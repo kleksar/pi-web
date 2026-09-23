@@ -2,13 +2,19 @@ import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { dump as stringifyYaml } from "js-yaml";
 import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSync, unlinkSync } from "fs";
-import { basename, dirname, join, resolve } from "path";
+import { basename, dirname, isAbsolute, join, resolve } from "path";
 import { parseFrontmatter } from "./frontmatter";
 import { writePrivateFileAtomicSync } from "./atomic-file";
 import { isExistingPathWithinRoots, isPathWithinRoots } from "./path-security";
 import { disabledBuiltInSubagents } from "./subagent-settings";
 import { PRESET_READ_ONLY } from "./tool-presets";
 import type { SessionEntry, SubagentSessionStatus } from "./types";
+import {
+  validatePinnedSkills,
+  validatePinnedExtensionTools,
+  type PinnedSkill,
+  type PinnedExtensionTool,
+} from "./agent-resource-selection";
 
 export const SUBAGENT_META_TYPE = "pi-web:subagent";
 export const SUBAGENT_STATUS_TYPE = "pi-web:subagent-status";
@@ -46,6 +52,10 @@ export interface SubagentProfile {
   systemPrompt: string;
   tools: string[];
   extensionTools?: string[];
+  /** Exact discovered skill file paths. Undefined preserves legacy loadSkills. */
+  selectedSkills?: string[];
+  /** Exact extension source + tool identity. Undefined preserves legacy loadExtensions. */
+  selectedExtensionTools?: Array<{ extensionPath: string; toolName: string }>;
   loadSkills: boolean;
   loadExtensions: boolean;
   model?: string;
@@ -97,6 +107,8 @@ interface SubagentResourceSnapshotFields {
 export type SubagentResourceSnapshot = SubagentResourceSnapshotFields & (
   | { version: 1; orchestration?: never }
   | { version: 2; orchestration?: SubagentSessionOrchestration }
+  | { version: 3; orchestration?: SubagentSessionOrchestration;
+      selectedSkills?: PinnedSkill[]; selectedExtensionTools?: PinnedExtensionTool[] }
 );
 
 export interface SubagentSessionResources {
@@ -106,6 +118,8 @@ export interface SubagentSessionResources {
   loadExtensions: boolean;
   exactSystemPrompt?: string;
   orchestration?: SubagentSessionOrchestration;
+  selectedSkills?: PinnedSkill[];
+  selectedExtensionTools?: PinnedExtensionTool[];
 }
 
 export interface SubagentResultMetadata {
@@ -179,6 +193,8 @@ const MANAGED_FRONTMATTER_KEYS = new Set([
   "isolation",
   "persist_session",
   "pi_web_orchestration",
+  "pi_web_selected_skills",
+  "pi_web_selected_extension_tools",
 ]);
 
 const FRONTMATTER_OPEN_RE = /^(?:\uFEFF)?---[ \t]*(?:\r\n|\n|\r)/;
@@ -351,6 +367,27 @@ function parseExtensionToolSelectors(value: unknown): string[] {
   return [...new Set(rawToolValues(value).filter((tool) => tool.toLowerCase().startsWith("ext:")))];
 }
 
+function parseSelectedSkills(value: unknown): string[] | null {
+  if (!Array.isArray(value) || value.some((path) => typeof path !== "string" || !isAbsolute(path) || !path.trim())) return null;
+  const paths = value as string[];
+  return new Set(paths).size === paths.length ? paths : null;
+}
+
+function parseSelectedExtensionTools(value: unknown): Array<{ extensionPath: string; toolName: string }> | null {
+  if (!Array.isArray(value)) return null;
+  const selected: Array<{ extensionPath: string; toolName: string }> = [];
+  const seen = new Set<string>();
+  for (const entry of value) {
+    if (!isRecord(entry) || typeof entry.extensionPath !== "string" || !isAbsolute(entry.extensionPath)
+      || typeof entry.toolName !== "string" || !entry.toolName.trim() || SUBAGENT_CONTROL_TOOLS.has(entry.toolName)) return null;
+    const key = `${entry.extensionPath}\u0000${entry.toolName}`;
+    if (seen.has(key)) return null;
+    seen.add(key);
+    selected.push({ extensionPath: entry.extensionPath, toolName: entry.toolName });
+  }
+  return selected;
+}
+
 /** Read existing frontmatter without allowing malformed metadata to be overwritten. */
 function readStoredFrontmatter(filePath: string): Record<string, unknown> {
   let source: string;
@@ -423,7 +460,13 @@ function parseProfileFile(filePath: string, scope: SubagentScope): SubagentProfi
   const activeTools = tools.filter((tool) => !disallowedTools.has(tool));
   const loadSkills = resourceBoolean(data?.load_skills ?? data?.skills, false);
   const loadExtensions = resourceBoolean(data?.load_extensions ?? data?.extensions, extensionTools.length > 0);
-  const orchestration = activeTools.length === 0 && extensionTools.length === 0 && !loadSkills && !loadExtensions
+  const selectedSkills = data && "pi_web_selected_skills" in data ? parseSelectedSkills(data.pi_web_selected_skills) : undefined;
+  const selectedExtensionTools = data && "pi_web_selected_extension_tools" in data
+    ? parseSelectedExtensionTools(data.pi_web_selected_extension_tools) : undefined;
+  const invalidSelection = selectedSkills === null || selectedExtensionTools === null;
+  const orchestration = activeTools.length === 0 && extensionTools.length === 0
+    && !(selectedExtensionTools === undefined ? loadExtensions : selectedExtensionTools?.length)
+    && (!loadSkills || selectedSkills !== undefined)
     ? profileOrchestration(data?.pi_web_orchestration, name)
     : undefined;
   const profile: SubagentProfile = {
@@ -433,6 +476,8 @@ function parseProfileFile(filePath: string, scope: SubagentScope): SubagentProfi
     systemPrompt: rest.trim(),
     tools: activeTools,
     ...(extensionTools.length > 0 ? { extensionTools } : {}),
+    ...(selectedSkills !== undefined && selectedSkills !== null ? { selectedSkills } : {}),
+    ...(selectedExtensionTools !== undefined && selectedExtensionTools !== null ? { selectedExtensionTools } : {}),
     loadSkills,
     loadExtensions,
     ...(stringValue(data?.model) ? { model: stringValue(data?.model) } : {}),
@@ -449,7 +494,7 @@ function parseProfileFile(filePath: string, scope: SubagentScope): SubagentProfi
     scope,
     filePath,
   };
-  if (!data || !hasOrchestrationMarker(data) || orchestration) return profile;
+  if (!invalidSelection && (!data || !hasOrchestrationMarker(data) || orchestration)) return profile;
   return {
     ...profile,
     enabled: false,
@@ -457,7 +502,9 @@ function parseProfileFile(filePath: string, scope: SubagentScope): SubagentProfi
     extensionTools: undefined,
     loadSkills: false,
     loadExtensions: false,
-    configurationError: "Invalid Pi Web orchestration configuration; this profile cannot run",
+    configurationError: invalidSelection
+      ? "Invalid Pi Web selected resources; this profile cannot run"
+      : "Invalid Pi Web orchestration configuration; this profile cannot run",
   };
 }
 
@@ -563,6 +610,17 @@ export function saveSubagentProfile(
   const name = assertProfileName(profile.name);
   const tools = [...new Set(profile.tools.filter((tool) => BUILTIN_TOOLS.has(tool)))];
   const extensionTools = [...new Set(profile.extensionTools ?? [])];
+  const dir = assertWritableProfileDirectory(cwd, scope);
+  const filePath = join(dir, `${name}.md`);
+  const stored = readStoredFrontmatter(filePath);
+  const selectedSkills = profile.selectedSkills === undefined
+    ? ("pi_web_selected_skills" in stored ? parseSelectedSkills(stored.pi_web_selected_skills) : undefined)
+    : parseSelectedSkills(profile.selectedSkills);
+  const selectedExtensionTools = profile.selectedExtensionTools === undefined
+    ? ("pi_web_selected_extension_tools" in stored
+        ? parseSelectedExtensionTools(stored.pi_web_selected_extension_tools) : undefined)
+    : parseSelectedExtensionTools(profile.selectedExtensionTools);
+  if (selectedSkills === null || selectedExtensionTools === null) throw new Error("Invalid selected agent resources");
   if (profile.thinking && !THINKING_LEVELS.has(profile.thinking)) {
     throw new Error(`Invalid thinking level: ${profile.thinking}`);
   }
@@ -594,13 +652,10 @@ export function saveSubagentProfile(
   if (requestedDependencies === null) {
     throw new Error(`Orchestrator dependencies must be an acyclic graph of unique allowed child profiles with at most ${MAX_SUBAGENT_DEPENDENCIES} prerequisites per child`);
   }
-  const dir = assertWritableProfileDirectory(cwd, scope);
   mkdirSync(dir, { recursive: true });
   if (scope === "project" && !isProjectProfilePathAllowed(cwd, dir)) {
     throw new Error("Agent profile directory is outside the project root");
   }
-  const filePath = join(dir, `${name}.md`);
-  const stored = readStoredFrontmatter(filePath);
   if (
     profile.orchestration === undefined
     && Object.prototype.hasOwnProperty.call(stored, "pi_web_orchestration")
@@ -618,8 +673,10 @@ export function saveSubagentProfile(
           ...(requestedDependencies !== undefined ? { depends_on: requestedDependencies } : {}),
         };
   const orchestration = profileOrchestration(orchestrationField, name);
-  if (orchestration && (tools.length > 0 || extensionTools.length > 0 || loadSkills || loadExtensions)) {
-    throw new Error("Orchestrators cannot use file tools, extension tools, skills, or extensions");
+  if (orchestration && (tools.length > 0 || extensionTools.length > 0
+    || (selectedExtensionTools === undefined ? loadExtensions : selectedExtensionTools.length > 0)
+    || (selectedExtensionTools?.length ?? 0) > 0 || (loadSkills && selectedSkills === undefined))) {
+    throw new Error("Orchestrators cannot use file tools, extension tools, or the legacy all-skills flag; select individual skills only");
   }
   const managed: Record<string, unknown> = {
     description,
@@ -641,6 +698,10 @@ export function saveSubagentProfile(
   if (profile.isolation) managed.isolation = profile.isolation;
   if (profile.persistSession !== undefined) managed.persist_session = profile.persistSession;
   if (orchestrationField !== undefined) managed.pi_web_orchestration = orchestrationField;
+  if (selectedSkills !== undefined) managed.pi_web_selected_skills = selectedSkills;
+  else if ("pi_web_selected_skills" in stored) managed.pi_web_selected_skills = stored.pi_web_selected_skills;
+  if (selectedExtensionTools !== undefined) managed.pi_web_selected_extension_tools = selectedExtensionTools;
+  else if ("pi_web_selected_extension_tools" in stored) managed.pi_web_selected_extension_tools = stored.pi_web_selected_extension_tools;
   // Managed keys win; keys this app does not own follow in their original order.
   const frontmatter: Record<string, unknown> = { ...managed };
   for (const [key, value] of Object.entries(unmanagedFrontmatter(stored))) {
@@ -657,6 +718,8 @@ export function saveSubagentProfile(
     systemPrompt,
     tools,
     ...(extensionTools.length > 0 ? { extensionTools } : {}),
+    ...(selectedSkills !== undefined ? { selectedSkills } : {}),
+    ...(selectedExtensionTools !== undefined ? { selectedExtensionTools } : {}),
     loadSkills,
     loadExtensions,
     ...(model ? { model } : { model: undefined }),
@@ -741,7 +804,7 @@ export function readSubagentSessionResources(
   const data = subagentMetadataData(entries);
   if (!data) throw new Error("Invalid subagent metadata");
   const snapshot = data.resourceSnapshot;
-  if (!isRecord(snapshot) || (snapshot.version !== 1 && snapshot.version !== 2)) {
+  if (!isRecord(snapshot) || (snapshot.version !== 1 && snapshot.version !== 2 && snapshot.version !== 3)) {
     throw new Error("Invalid or unsupported subagent resource snapshot");
   }
   const loadSkills = snapshot.loadSkills === true;
@@ -751,12 +814,21 @@ export function readSubagentSessionResources(
     || !snapshot.appendSystemPrompt.every((item) => typeof item === "string")
     || !Array.isArray(snapshot.tools)
     || (snapshot.exactSystemPrompt !== undefined && typeof snapshot.exactSystemPrompt !== "string")
-    || (snapshot.version === 2 &&
+    || ((snapshot.version === 2 || snapshot.version === 3) &&
       (typeof snapshot.loadSkills !== "boolean" || typeof snapshot.loadExtensions !== "boolean"))
   ) {
     throw new Error("Invalid subagent resource snapshot");
   }
-  const orchestration = snapshot.version === 2 && snapshot.orchestration !== undefined
+  const selectedSkills = snapshot.version === 3 && snapshot.selectedSkills !== undefined
+    ? validatePinnedSkills(snapshot.selectedSkills) : undefined;
+  const selectedExtensionTools = snapshot.version === 3 && snapshot.selectedExtensionTools !== undefined
+    ? validatePinnedExtensionTools(snapshot.selectedExtensionTools) : undefined;
+  if ((snapshot.version !== 3 && ("selectedSkills" in snapshot || "selectedExtensionTools" in snapshot))
+    || (snapshot.version === 3 && ((selectedSkills !== undefined && loadSkills !== (selectedSkills.length > 0))
+      || (selectedExtensionTools !== undefined && loadExtensions !== (selectedExtensionTools.length > 0))))) {
+    throw new Error("Invalid selected resources in subagent snapshot");
+  }
+  const orchestration = (snapshot.version === 2 || snapshot.version === 3) && snapshot.orchestration !== undefined
     ? snapshot.orchestration
     : undefined;
   const children = isRecord(orchestration) ? allowedChildren(orchestration.allowedChildren) : null;
@@ -769,7 +841,7 @@ export function readSubagentSessionResources(
     : undefined;
   if (
     (snapshot.version === 1 && "orchestration" in snapshot)
-    || (snapshot.version === 2 && "orchestration" in snapshot && (
+    || ((snapshot.version === 2 || snapshot.version === 3) && "orchestration" in snapshot && (
       !isRecord(orchestration)
       || children === null
       || pins === null
@@ -793,7 +865,7 @@ export function readSubagentSessionResources(
       && tool.length > 0
       && (BUILTIN_TOOLS.has(tool) || (loadExtensions && !SUBAGENT_CONTROL_TOOLS.has(tool)) || SUBAGENT_CONTROL_TOOLS.has(tool)))
     || (orchestration
-      ? loadSkills || loadExtensions
+      ? loadExtensions || (loadSkills && (snapshot.version !== 3 || selectedSkills === undefined))
         || tools.length !== SUBAGENT_CONTROL_TOOL_NAMES.length
         || controlTools.length !== SUBAGENT_CONTROL_TOOL_NAMES.length
         || SUBAGENT_CONTROL_TOOL_NAMES.some((name) => !controlTools.includes(name))
@@ -806,6 +878,8 @@ export function readSubagentSessionResources(
     tools: [...new Set(tools as string[])],
     loadSkills,
     loadExtensions,
+    ...(selectedSkills !== undefined ? { selectedSkills } : {}),
+    ...(selectedExtensionTools !== undefined ? { selectedExtensionTools } : {}),
     ...(typeof snapshot.exactSystemPrompt === "string" ? { exactSystemPrompt: snapshot.exactSystemPrompt } : {}),
     ...(isRecord(orchestration) && children !== null && pins !== null
       ? { orchestration: {

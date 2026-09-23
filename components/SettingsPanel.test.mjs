@@ -25,10 +25,10 @@ test("opens one settings panel from direct sidebar shortcuts", () => {
 });
 
 test("keeps every requested configuration surface inside the settings panel", () => {
-  for (const section of ["general", "models", "skills", "agents", "plugins"]) {
+  for (const section of ["general", "models", "skills", "main", "agents", "plugins"]) {
     assert.match(panelSource, new RegExp(`id: "${section}"`));
   }
-  for (const component of ["ModelsConfig", "SkillsConfig", "AgentsConfig", "PluginsConfig"]) {
+  for (const component of ["ModelsConfig", "SkillsConfig", "MainAgentConfig", "AgentsConfig", "PluginsConfig"]) {
     assert.match(panelSource, new RegExp(`<${component} embedded`));
   }
 });

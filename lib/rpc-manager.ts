@@ -35,11 +35,25 @@ import {
 } from "./subagent-extension";
 import {
   listSubagentProfiles,
+  resolveSubagentProfile,
   readSubagentRun,
   readSubagentSessionResources,
   SUBAGENT_CONTROL_TOOL_NAMES,
 } from "./subagents";
-import { createSubagentController } from "./subagent-runtime";
+import { createSubagentController, profileAuthorityPin } from "./subagent-runtime";
+import { readMainAgentConfig } from "./main-agent-config";
+import { MAIN_RESOURCE_META_TYPE, readMainSessionResources, type MainSessionResources } from "./main-agent-snapshot";
+import {
+  assertSelectedSkillsUnchanged,
+  assertSelectedExtensionToolsUnchanged,
+  filterPinnedSkills,
+  pinSelectedSkills,
+  pinSelectedExtensionTools,
+  pinnedResourceIntegrityExtension,
+  pinnedSkillsPrompt,
+  type PinnedSkill,
+  type PinnedExtensionTool,
+} from "./agent-resource-selection";
 import { isBuiltInSubagentsEnabled } from "./subagent-settings";
 import { resolveShellTools } from "./powershell-settings";
 import { CHAT_ONLY_RESOURCE_LOADER_OPTIONS, contextFilesSystemPrompt } from "./chat-only";
@@ -465,7 +479,22 @@ export class AgentSessionWrapper {
     if (this.subagentSessionResources()) {
       throw new Error("Subagent tool selection is fixed by its profile");
     }
-    this.inner.setActiveToolsByName(withExtensionTools(this.inner, toolNames));
+    if (this.chatOnly) {
+      if (toolNames.length > 0) throw new Error("Chat-only tool changes require rebuilding the session");
+      this.inner.setActiveToolsByName([]);
+      return;
+    }
+    const allTools = withExtensionTools(this.inner, toolNames);
+    const mainResources = readMainSessionResources(
+      this.inner.sessionManager.getEntries?.() as unknown as SessionEntry[] ?? [],
+    );
+    const selected = mainResources?.selectedExtensionTools;
+    this.inner.setActiveToolsByName(selected === undefined
+      ? allTools
+      : allTools.filter((name) => CODING_TOOL_NAMES.includes(name as (typeof CODING_TOOL_NAMES)[number])
+        || (isBuiltInSubagentsEnabled()
+          && SUBAGENT_CONTROL_TOOL_NAMES.includes(name as (typeof SUBAGENT_CONTROL_TOOL_NAMES)[number]))
+        || selected.some((tool) => tool.toolName === name)));
   }
 
   private emit(event: AgentEvent): void {
@@ -1008,6 +1037,7 @@ export class AgentSessionWrapper {
 
       case "reload": {
         const subagentResources = this.subagentSessionResources();
+        this.assertResourceSourcesUnchanged();
         if (this.extensionUiAbortController.signal.aborted) {
           this.extensionUiAbortController = new AbortController();
         }
@@ -1712,6 +1742,8 @@ export class AgentSessionWrapper {
       switchSession: async () => ({ cancelled: true }),
       reload: async () => {
         const subagentResources = this.subagentSessionResources();
+        this.assertResourceSourcesUnchanged();
+        const activeToolNames = this.inner.getActiveToolNames();
         this.extensionStatuses.clear();
         this.resetExtensionWidgetsForReload();
         this.syncProjectTrust();
@@ -1721,6 +1753,7 @@ export class AgentSessionWrapper {
           },
         });
         if (subagentResources) this.inner.setActiveToolsByName(subagentResources.tools);
+        else this.setActiveToolSelection(activeToolNames);
       },
     };
   }
@@ -1728,6 +1761,16 @@ export class AgentSessionWrapper {
   private syncProjectTrust(): void {
     const status = getProjectTrustStatus(this.cwd, getAgentDir());
     this.inner.settingsManager.setProjectTrusted(status.trusted);
+  }
+
+  private assertResourceSourcesUnchanged(): void {
+    const entries = this.inner.sessionManager.getEntries() as unknown as SessionEntry[];
+    const subagent = readSubagentSessionResources(entries);
+    const main = subagent ? null : readMainSessionResources(entries);
+    const selectedSkills = subagent?.selectedSkills ?? main?.selectedSkills;
+    const selectedExtensionTools = subagent?.selectedExtensionTools ?? main?.selectedExtensionTools;
+    if (selectedSkills) assertSelectedSkillsUnchanged(selectedSkills);
+    if (selectedExtensionTools) assertSelectedExtensionToolsUnchanged(selectedExtensionTools);
   }
 }
 
@@ -2063,6 +2106,34 @@ export async function startRpcSession(
         sessionManager.getEntries() as unknown as SessionEntry[],
       )
     : null;
+  const isMainSession = !subagentResources;
+  const restoredMainResources = isMainSession && sessionFile
+    ? readMainSessionResources(sessionManager.getEntries() as unknown as SessionEntry[])
+    : null;
+  // Existing sessions without a marker retain their old policy. Only newly
+  // created Main sessions receive the current global configuration.
+  const mainConfig = isMainSession && !sessionFile ? readMainAgentConfig() : undefined;
+  const selectedSkillPaths = restoredMainResources?.selectedSkills?.map((skill) => skill.filePath)
+    ?? mainConfig?.selectedSkills;
+  const selectedToolRefs = restoredMainResources?.selectedExtensionTools?.map(({ extensionPath, toolName }) => ({
+    extensionPath, toolName,
+  })) ?? mainConfig?.selectedExtensionTools;
+  if (restoredMainResources?.selectedSkills) assertSelectedSkillsUnchanged(restoredMainResources.selectedSkills);
+  if (restoredMainResources?.selectedExtensionTools) {
+    assertSelectedExtensionToolsUnchanged(restoredMainResources.selectedExtensionTools);
+  }
+  const mainOrchestration = restoredMainResources?.orchestration ?? (
+    mainConfig?.orchestration ? {
+      allowedChildren: [...mainConfig.orchestration.allowedChildren],
+      ...(mainConfig.orchestration.dependencies !== undefined
+        ? { dependencies: mainConfig.orchestration.dependencies } : {}),
+      childProfiles: Object.fromEntries(mainConfig.orchestration.allowedChildren.map((name) => {
+        const child = resolveSubagentProfile(sessionCwd, name);
+        if (!child) throw new Error(`Main allowed child agent is missing or disabled: ${name}`);
+        return [name.toLowerCase(), profileAuthorityPin(child)];
+      })),
+    } : undefined
+  );
   const persistedToolNames = subagentResources
     ? undefined
     : readSessionToolSelection(sessionManager.getEntries() as unknown as SessionEntry[]);
@@ -2074,11 +2145,17 @@ export async function startRpcSession(
     subagentResources?.loadExtensions || subagentResources?.loadSkills,
   );
   const chatOnly = selectedToolNames?.length === 0 && !subagentLoadsResources;
+  // An explicit empty tool set means chat-only, even when Main's global
+  // profile assigns resources. This session cannot expose them later by reload.
+  const effectiveSelectedSkillPaths = chatOnly ? undefined : selectedSkillPaths;
+  const effectiveSelectedToolRefs = chatOnly ? undefined : selectedToolRefs;
   const finishStartingSession = trackStartingSession(sessionCwd);
   const starting = (async () => {
     // Some extensions access the SDK's global theme even outside the terminal UI.
     if (!chatOnly) initTheme();
     const agentDir = getAgentDir();
+    let pinnedMainSkills: PinnedSkill[] | undefined = restoredMainResources?.selectedSkills;
+    let pinnedMainTools: PinnedExtensionTool[] | undefined = restoredMainResources?.selectedExtensionTools;
 
     // Determine which tools to pass based on requested toolNames.
     // Since v0.68.0, session creation expects string[] tool names instead of Tool[] instances.
@@ -2124,6 +2201,35 @@ export async function startRpcSession(
           },
         )
       : undefined;
+    const rootSubagentExtension = isMainSession && !chatOnly
+      ? createSubagentExtension(
+          SUBAGENT_CONTROLLER.extensionRuntime,
+          () => listSubagentProfiles(sessionCwd).filter((profile) => !mainOrchestration
+            || (mainOrchestration.allowedChildren.some((name) => name.toLowerCase() === profile.name.toLowerCase())
+              && (() => {
+                const expected = mainOrchestration.childProfiles[profile.name.toLowerCase()];
+                const actual = profileAuthorityPin(profile);
+                return expected?.sha256 === actual.sha256
+                  && expected.scope === actual.scope && expected.filePath === actual.filePath;
+              })())),
+          isBuiltInSubagentsEnabled,
+          mainOrchestration ? { allowedChildren: mainOrchestration.allowedChildren,
+            dependencies: mainOrchestration.dependencies } : undefined,
+        ) : undefined;
+    const mainHasReadTool = resolveShellTools(
+      selectedToolNames ?? settingsManager.getDefaultTools() ?? [], settingsManager.getDefaultTools(),
+    ).some((name) => name === "read" || name === "bash");
+    const mainNeedsSkillInjection = Boolean(effectiveSelectedSkillPaths?.length) && !mainHasReadTool;
+    const mainSkillsOverride = effectiveSelectedSkillPaths !== undefined
+      ? (base: { skills: import("@earendil-works/pi-coding-agent").Skill[];
+          diagnostics: import("@earendil-works/pi-coding-agent").ResourceDiagnostic[] }) => {
+          if (pinnedMainSkills === undefined) pinnedMainSkills = pinSelectedSkills(base.skills, effectiveSelectedSkillPaths);
+          return { ...base, skills: filterPinnedSkills(base.skills, pinnedMainSkills) };
+        }
+      : undefined;
+    const mainIntegrityExtension = effectiveSelectedSkillPaths !== undefined || effectiveSelectedToolRefs !== undefined
+      ? pinnedResourceIntegrityExtension(() => pinnedMainSkills, () => pinnedMainTools)
+      : undefined;
     const services = await createAgentSessionServices({
       cwd: sessionCwd,
       agentDir,
@@ -2142,10 +2248,20 @@ export async function startRpcSession(
                 }
               : {}),
             appendSystemPrompt: subagentResources.appendSystemPrompt,
+            ...(subagentResources.selectedSkills !== undefined ? { skillsOverride: (base: {
+              skills: import("@earendil-works/pi-coding-agent").Skill[];
+              diagnostics: import("@earendil-works/pi-coding-agent").ResourceDiagnostic[];
+            }) => ({ ...base, skills: filterPinnedSkills(base.skills, subagentResources.selectedSkills!) }) } : {}),
             ...(usesExactSystemPrompt || childOrchestratorExtension
+              || subagentResources.selectedSkills !== undefined || subagentResources.selectedExtensionTools !== undefined
               ? { extensionFactories: [
                   ...(usesExactSystemPrompt ? [exactSystemPromptExtension] : []),
                   ...(childOrchestratorExtension ? [childOrchestratorExtension] : []),
+                  ...(subagentResources.selectedSkills !== undefined || subagentResources.selectedExtensionTools !== undefined
+                    ? [pinnedResourceIntegrityExtension(
+                      () => subagentResources.selectedSkills,
+                      () => subagentResources.selectedExtensionTools,
+                    )] : []),
                 ] }
               : {}),
             ...(childOrchestratorExtension
@@ -2153,25 +2269,60 @@ export async function startRpcSession(
               : {}),
           }
         : chatOnly
-          ? { ...CHAT_ONLY_RESOURCE_LOADER_OPTIONS, extensionFactories: [exactSystemPromptExtension] }
+          ? {
+              ...CHAT_ONLY_RESOURCE_LOADER_OPTIONS,
+              // Main's editable APPEND_SYSTEM.md is used even in chat-only mode.
+              appendSystemPrompt: undefined,
+              appendSystemPromptOverride: undefined,
+              extensionFactories: [exactSystemPromptExtension],
+            }
         : {
+            ...(effectiveSelectedSkillPaths !== undefined ? {
+              noSkills: effectiveSelectedSkillPaths.length === 0,
+              skillsOverride: mainSkillsOverride,
+              ...(mainNeedsSkillInjection ? { appendSystemPromptOverride: (base: string[]) => [
+                ...base, pinnedSkillsPrompt(pinnedMainSkills ?? []),
+              ] } : {}),
+            } : {}),
+            ...(effectiveSelectedToolRefs !== undefined ? { noExtensions: effectiveSelectedToolRefs.length === 0 } : {}),
             extensionFactories: [
               createProjectCommandBashExtension({
                 cwd: sessionCwd,
                 settings: settingsManager,
               }),
-              createSubagentExtension(
-                SUBAGENT_CONTROLLER.extensionRuntime,
-                () => listSubagentProfiles(sessionCwd),
-                isBuiltInSubagentsEnabled,
-              ),
+              ...(rootSubagentExtension ? [rootSubagentExtension] : []),
+              ...(mainIntegrityExtension ? [mainIntegrityExtension] : []),
             ],
             extensionsOverride: (base) => preferUserBashExtension(preferPiWebSubagentExtension(base)),
           },
       ...(trustReloadOptions ? { resourceLoaderReloadOptions: trustReloadOptions } : {}),
     });
-    if (childOrchestratorExtension) {
-      assertPiWebOrchestrationHostTools(services.resourceLoader.getExtensions().extensions);
+    if (childOrchestratorExtension || (rootSubagentExtension
+      && (mainOrchestration !== undefined || effectiveSelectedToolRefs !== undefined))) {
+      const extensions = services.resourceLoader.getExtensions().extensions;
+      if (childOrchestratorExtension || isBuiltInSubagentsEnabled()) {
+        assertPiWebOrchestrationHostTools(extensions);
+      } else if (extensions.some((extension) =>
+        [...SUBAGENT_CONTROL_TOOL_NAMES].some((name) => extension.tools.has(name)))) {
+        throw new Error("Subagent control tools are unavailable while built-in sub-agents are disabled");
+      }
+    }
+    if (isMainSession && effectiveSelectedToolRefs !== undefined) {
+      const loadedTools = pinSelectedExtensionTools(services.resourceLoader.getExtensions().extensions, effectiveSelectedToolRefs);
+      if (pinnedMainTools && loadedTools.some((tool, index) => tool.realPath !== pinnedMainTools![index]?.realPath
+        || tool.sha256 !== pinnedMainTools![index]?.sha256)) {
+        throw new Error("Main extension tool changed since session start");
+      }
+      pinnedMainTools ??= loadedTools;
+    }
+    if (isMainSession && !restoredMainResources) {
+      const snapshot: MainSessionResources = {
+        version: 1,
+        ...(effectiveSelectedSkillPaths !== undefined ? { selectedSkills: pinnedMainSkills ?? [] } : {}),
+        ...(effectiveSelectedToolRefs !== undefined ? { selectedExtensionTools: pinnedMainTools ?? [] } : {}),
+        ...(mainOrchestration !== undefined ? { orchestration: mainOrchestration } : {}),
+      };
+      sessionManager.appendCustomEntry(MAIN_RESOURCE_META_TYPE, snapshot);
     }
     const scope = await resolveVisibleModels(
       services.modelRuntime,
@@ -2236,7 +2387,13 @@ export async function startRpcSession(
     // requested builtin coding tools PLUS all extension/package tools, so installed
     // extensions stay usable in Pi Web just like in the `pi` CLI.
     if (!subagentResources && !chatOnly) {
-      inner.setActiveToolsByName(withExtensionTools(inner, selectedToolNames ?? inner.getActiveToolNames()));
+      const active = withExtensionTools(inner, selectedToolNames ?? inner.getActiveToolNames());
+      inner.setActiveToolsByName(effectiveSelectedToolRefs === undefined
+        ? active
+        : active.filter((name) => CODING_TOOL_NAMES.includes(name as (typeof CODING_TOOL_NAMES)[number])
+          || (isBuiltInSubagentsEnabled()
+            && SUBAGENT_CONTROL_TOOL_NAMES.includes(name as (typeof SUBAGENT_CONTROL_TOOL_NAMES)[number]))
+          || pinnedMainTools?.some((tool) => tool.toolName === name)));
     }
 
     const exactSystemPrompt = subagentResources?.exactSystemPrompt !== undefined
@@ -2244,7 +2401,10 @@ export async function startRpcSession(
       : chatOnly
         ? subagentResources
           ? () => subagentResources.appendSystemPrompt[0] ?? ""
-          : () => contextFilesSystemPrompt(inner.resourceLoader.getAgentsFiles().agentsFiles)
+          : () => [
+            contextFilesSystemPrompt(inner.resourceLoader.getAgentsFiles().agentsFiles),
+            ...inner.resourceLoader.getAppendSystemPrompt(),
+          ].filter(Boolean).join("\n\n")
         : undefined;
     exactSystemPromptRef.current = exactSystemPrompt;
     const wrapper = new AgentSessionWrapper(inner, {

@@ -1,11 +1,13 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState, type CSSProperties } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { useI18n } from "@/hooks/useI18n";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import type { SubagentProfilesResponse, SubagentSettingsResponse } from "@/lib/api-types";
 import { sendAgentCommand } from "@/lib/agent-client";
 import type { ModelsData } from "@/lib/models-cache";
+import type { MainAgentConfig } from "@/lib/main-agent-config";
+import { MAIN_NODE_ID, effectiveMapProfiles } from "@/lib/orchestration-map";
 import { isSubagentProfileOverridden } from "@/lib/subagent-profile-precedence";
 import type { SubagentProfile, SubagentProfileInput, SubagentScope, SubagentWritableScope } from "@/lib/subagents";
 import {
@@ -34,6 +36,8 @@ import {
   ConfigSwitch,
 } from "./SettingsUi";
 import { ModelSelector } from "./ModelSelector";
+import { AgentResourceSelector } from "./AgentResourceSelector";
+import { OrchestrationMap } from "./OrchestrationMap";
 
 const TOOL_OPTIONS = ["read", "bash", "edit", "write", "grep", "find", "ls"];
 const THINKING_OPTIONS = ["", "off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
@@ -46,9 +50,11 @@ const EMPTY_PROFILE: EditableProfile = {
   displayName: "Custom agent",
   description: "",
   systemPrompt: "",
-  tools: ["read", "bash", "edit", "write", "grep", "find", "ls"],
+  tools: [],
   loadSkills: false,
   loadExtensions: false,
+  selectedSkills: [],
+  selectedExtensionTools: [],
   promptMode: "append",
   inheritContext: false,
   runInBackground: false,
@@ -85,6 +91,9 @@ function editableProfile(profile: SubagentProfile): EditableProfile {
     ...(profile.orchestration ? { extensionTools: [] } : {}),
     loadSkills: profile.orchestration ? false : profile.loadSkills,
     loadExtensions: profile.orchestration ? false : profile.loadExtensions,
+    ...(profile.selectedSkills !== undefined ? { selectedSkills: [...profile.selectedSkills] } : {}),
+    ...(profile.selectedExtensionTools !== undefined
+      ? { selectedExtensionTools: profile.selectedExtensionTools.map((tool) => ({ ...tool })) } : {}),
     promptMode: profile.promptMode,
     ...(profile.model ? { model: profile.model } : {}),
     ...(profile.thinking ? { thinking: profile.thinking } : {}),
@@ -212,12 +221,14 @@ export function AgentsConfig({
   onClose,
   onReloaded,
   embedded = false,
+  openMainMapRequest = 0,
 }: {
   cwd: string;
   sessionId?: string | null;
   onClose: () => void;
   onReloaded?: () => void;
   embedded?: boolean;
+  openMainMapRequest?: number;
 }) {
   const isMobile = useIsMobile();
   const { t } = useI18n();
@@ -242,6 +253,14 @@ export function AgentsConfig({
   const [reloadNeeded, setReloadNeeded] = useState(false);
   const [reloading, setReloading] = useState(false);
   const [childrenQuery, setChildrenQuery] = useState("");
+  const [view, setView] = useState<"profiles" | "map">("profiles");
+  const [mapOwner, setMapOwner] = useState<string | null>(null);
+  const [mainConfig, setMainConfig] = useState<MainAgentConfig>({});
+  const [mainDraft, setMainDraft] = useState<MainAgentConfig>({});
+  const [mainRevision, setMainRevision] = useState<string | null>(null);
+  const [mainMapError, setMainMapError] = useState<string | null>(null);
+  const [mainMapSaving, setMainMapSaving] = useState(false);
+  const lastMainMapRequest = useRef(openMainMapRequest);
 
   const selected = useMemo(
     () => profiles.find((profile) => profileKey(profile) === selectedKey) ?? null,
@@ -266,6 +285,44 @@ export function AgentsConfig({
     modelId: model.id,
     name: model.name,
   })), [modelOptions]);
+  const mapProfiles = useMemo(() => effectiveMapProfiles(profiles), [profiles]);
+  const profileDraftChanged = mode === "create" || Boolean(selected && mode === "edit"
+    && JSON.stringify(draft) !== JSON.stringify(editableProfile(selected)));
+  const mainDraftChanged = JSON.stringify(mainDraft) !== JSON.stringify(mainConfig);
+
+  const loadMainForMap = useCallback(async () => {
+    setMainMapError(null);
+    try {
+      const response = await fetch(`/api/main/config?cwd=${encodeURIComponent(cwd)}`, { cache: "no-store" });
+      const data = await response.json() as { config?: MainAgentConfig; revision?: string; error?: string };
+      if (!response.ok || data.error || !data.config || !data.revision) throw new Error(data.error ?? `HTTP ${response.status}`);
+      setMainConfig(data.config);
+      setMainDraft(data.config);
+      setMainRevision(data.revision);
+    } catch (cause) {
+      setMainMapError(cause instanceof Error ? cause.message : String(cause));
+      setMainRevision(null);
+    }
+  }, [cwd]);
+
+  useEffect(() => { if (view === "map" && mainRevision === null) void loadMainForMap(); }, [view, mainRevision, loadMainForMap]);
+
+  useEffect(() => {
+    const onMainConfigUpdated = (event: Event) => {
+      const detail = (event as CustomEvent<{ config: MainAgentConfig; revision: string; origin?: string }>).detail;
+      if (!detail?.config || typeof detail.revision !== "string" || detail.origin === "map") return;
+      if (mainDraftChanged) {
+        setMainMapError(t("main.configChanged"));
+        return;
+      }
+      setMainConfig(detail.config);
+      setMainDraft(detail.config);
+      setMainRevision(detail.revision);
+      setMainMapError(null);
+    };
+    window.addEventListener("pi-web:main-config-updated", onMainConfigUpdated);
+    return () => window.removeEventListener("pi-web:main-config-updated", onMainConfigUpdated);
+  }, [mainDraftChanged, t]);
 
   const loadProfiles = useCallback(async (preferredKey?: string) => {
     setLoading(true);
@@ -276,6 +333,7 @@ export function AgentsConfig({
       if (!response.ok || data.error) throw new Error(data.error ?? `HTTP ${response.status}`);
       const next = data.profiles ?? [];
       setProfiles(next);
+      window.dispatchEvent(new CustomEvent("pi-web:subagent-profiles-updated", { detail: { cwd } }));
       const rememberedKey = preferredKey ?? getLastSettingsSelection("agents", cwd);
       const chosen = next.find((profile) => profileKey(profile) === rememberedKey)
         ?? next.find((profile) => profile.scope === "project")
@@ -350,16 +408,20 @@ export function AgentsConfig({
     return () => controller.abort();
   }, [cwd]);
 
-  const selectProfile = (profile: SubagentProfile) => {
+  const selectProfile = (profile: SubagentProfile, confirmed = false): boolean => {
+    if (selectedKey === profileKey(profile) && mode !== "create") return true;
+    if (!confirmed && profileDraftChanged && !window.confirm(t("agents.discardChanges"))) return false;
     setSelectedKey(profileKey(profile));
     setDraft(editableProfile(profile));
     setMode(isWritableScope(profile.scope) ? "edit" : "view");
     if (isWritableScope(profile.scope)) setTargetScope(profile.scope);
     setError(null);
     setChildrenQuery("");
+    return true;
   };
 
   const beginCreate = () => {
+    if (profileDraftChanged && !window.confirm(t("agents.discardChanges"))) return;
     let name = "custom-agent";
     let suffix = 2;
     while (profiles.some((profile) => profile.name === name)) name = `custom-agent-${suffix++}`;
@@ -373,6 +435,7 @@ export function AgentsConfig({
 
   const beginDuplicate = () => {
     if (!selected) return;
+    if (profileDraftChanged && !window.confirm(t("agents.discardChanges"))) return;
     const name = duplicateProfileName(selected.name, profiles);
     setSelectedKey(null);
     setDraft({
@@ -552,6 +615,7 @@ export function AgentsConfig({
       const saved = data.profile;
       setProfiles((current) => current.map((profile) => profileKey(profile) === profileKey(saved) ? saved : profile));
       setDraft((current) => ({ ...current, enabled: saved.enabled }));
+      window.dispatchEvent(new CustomEvent("pi-web:subagent-profiles-updated", { detail: { cwd } }));
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
@@ -613,6 +677,85 @@ export function AgentsConfig({
     }
   };
 
+  const selectMapOwner = (ownerId: string | null) => {
+    if (ownerId === mapOwner) return;
+    const nextProfile = ownerId && ownerId !== MAIN_NODE_ID
+      ? mapProfiles.find((profile) => profile.name.toLowerCase() === ownerId.toLowerCase())
+      : undefined;
+    const leavingMain = mapOwner === MAIN_NODE_ID && ownerId !== MAIN_NODE_ID && mainDraftChanged;
+    const leavingProfile = profileDraftChanged && (
+      mapOwner !== null && mapOwner !== MAIN_NODE_ID && ownerId !== mapOwner
+      || nextProfile !== undefined && profileKey(nextProfile) !== selectedKey
+      || mapOwner === null && ownerId === MAIN_NODE_ID
+    );
+    if ((leavingMain || leavingProfile) && !window.confirm(t("agents.discardChanges"))) return;
+    if (leavingMain) setMainDraft(mainConfig);
+    if (leavingProfile && selected) setDraft(editableProfile(selected));
+    if (nextProfile && (profileKey(nextProfile) !== selectedKey || mode === "create")) selectProfile(nextProfile, true);
+    setMapOwner(ownerId);
+    setMainMapError(null);
+  };
+
+  const openMapProfile = (name: string) => {
+    const profile = mapProfiles.find((candidate) => candidate.name.toLowerCase() === name.toLowerCase());
+    if (!profile) return;
+    if (mapOwner === MAIN_NODE_ID && mainDraftChanged && !window.confirm(t("agents.discardChanges"))) return;
+    if (mapOwner === MAIN_NODE_ID && mainDraftChanged) setMainDraft(mainConfig);
+    if (profileKey(profile) !== selectedKey || mode === "create") {
+      if (!selectProfile(profile)) return;
+    }
+    setView("profiles");
+  };
+
+  const saveMapMain = async () => {
+    if (!mainRevision || !mainDraftChanged || mainMapSaving) return;
+    setMainMapSaving(true);
+    setMainMapError(null);
+    try {
+      const response = await fetch("/api/main/config", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ cwd, config: mainDraft, expectedRevision: mainRevision }),
+      });
+      const data = await response.json() as { config?: MainAgentConfig; revision?: string; error?: string };
+      if (!response.ok || data.error || !data.config || !data.revision) throw new Error(data.error ?? `HTTP ${response.status}`);
+      setMainConfig(data.config);
+      setMainDraft(data.config);
+      setMainRevision(data.revision);
+      window.dispatchEvent(new CustomEvent("pi-web:main-config-updated", {
+        detail: { config: data.config, revision: data.revision, origin: "map" },
+      }));
+    } catch (cause) {
+      setMainMapError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setMainMapSaving(false);
+    }
+  };
+
+  const updateMapPolicy = (ownerId: string, next: NonNullable<EditableProfile["orchestration"]>) => {
+    if (ownerId === MAIN_NODE_ID) {
+      setMainDraft((current) => ({ ...current, orchestration: next }));
+    } else if (ownerId.toLowerCase() === selected?.name.toLowerCase()) {
+      setDraft((current) => ({ ...current, orchestration: next }));
+    }
+  };
+
+  const mapEditable = mapOwner === MAIN_NODE_ID
+    ? mainRevision !== null && !mainMapSaving
+    : Boolean(mapOwner && selected && mapOwner.toLowerCase() === selected.name.toLowerCase()
+      && isWritableScope(selected.scope) && !selected.configurationError && !saving);
+
+  useEffect(() => {
+    if (openMainMapRequest === lastMainMapRequest.current) return;
+    lastMainMapRequest.current = openMainMapRequest;
+    if ((profileDraftChanged || (mapOwner === MAIN_NODE_ID && mainDraftChanged))
+      && !window.confirm(t("agents.discardChanges"))) return;
+    if (profileDraftChanged && selected) setDraft(editableProfile(selected));
+    if (mainDraftChanged) setMainDraft(mainConfig);
+    setMapOwner(MAIN_NODE_ID);
+    setView("map");
+  }, [openMainMapRequest, mainConfig, mainDraftChanged, mapOwner, profileDraftChanged, selected, t]);
+
   return (
     <ConfigPanelShell embedded={embedded} title={t("common.agents")} subtitle={shortenPath(cwd)} closeLabel={t("agents.close")} onClose={onClose}>
       <div className="agents-feature-setting">
@@ -649,6 +792,28 @@ export function AgentsConfig({
           />
         </div>
       </div>
+      <div role="group" aria-label={t("common.agents")} style={{ display: "flex", gap: 4, padding: "7px 16px", borderBottom: "1px solid var(--border)" }}>
+        <ConfigButton size="small" variant={view === "profiles" ? "primary" : undefined} onClick={() => setView("profiles")}>{t("agents.profiles")}</ConfigButton>
+        <ConfigButton size="small" variant={view === "map" ? "primary" : undefined} onClick={() => setView("map")}>{t("agents.map")}</ConfigButton>
+        {view === "map" && <span style={{ marginLeft: "auto", alignSelf: "center", color: "var(--text-dim)", fontSize: 11 }}>{t("agents.mapMainScope")}</span>}
+      </div>
+      {view === "map" ? (
+        <OrchestrationMap
+          cwd={cwd}
+          profiles={mapProfiles}
+          main={{ orchestration: mainDraft.orchestration ?? null,
+            selectedSkills: mainDraft.selectedSkills,
+            selectedExtensionTools: mainDraft.selectedExtensionTools }}
+          ownerId={mapOwner}
+          draftOrchestration={mapOwner === MAIN_NODE_ID ? mainDraft.orchestration
+            : mapOwner && selected?.name.toLowerCase() === mapOwner.toLowerCase() ? draft.orchestration : undefined}
+          canEdit={mapEditable}
+          onSelectOwner={selectMapOwner}
+          onOpenProfile={openMapProfile}
+          onToggleChild={(ownerId, _childName, _enabled, next) => updateMapPolicy(ownerId, next)}
+          onToggleDependency={(ownerId, _producerName, _consumerName, _enabled, next) => updateMapPolicy(ownerId, next)}
+        />
+      ) : (
       <ConfigSplitView>
         <ConfigSidebar>
           <ConfigSidebarList>
@@ -773,7 +938,8 @@ export function AgentsConfig({
                       disabled={disabled}
                       checked={draft.orchestration !== null && draft.orchestration !== undefined}
                       onChange={(checked) => setDraft((current) => checked
-                        ? { ...current, orchestration: { allowedChildren: [] }, tools: [], extensionTools: [], loadSkills: false, loadExtensions: false }
+                        ? { ...current, orchestration: { allowedChildren: [] }, tools: [], extensionTools: [],
+                          selectedExtensionTools: [], loadSkills: false, loadExtensions: false }
                         : { ...current, orchestration: null })}
                     />
                     {draft.orchestration && (
@@ -880,14 +1046,25 @@ export function AgentsConfig({
                     </Field>
                   )}
 
-                  {!draft.orchestration && (
-                    <Field label={t("agents.resources")}>
-                      <div style={{ display: "flex", flexWrap: "wrap", gap: "8px 20px" }}>
-                        <Toggle label={t("agents.loadSkills")} disabled={disabled} checked={draft.loadSkills} onChange={(checked) => update("loadSkills", checked)} />
-                        <Toggle label={t("agents.loadExtensions")} disabled={disabled} checked={draft.loadExtensions} onChange={(checked) => update("loadExtensions", checked)} />
+                  <Field label={t("agents.resources")}>
+                    {!draft.orchestration && (draft.selectedSkills === undefined || draft.selectedExtensionTools === undefined) && (
+                      <div style={{ display: "flex", flexWrap: "wrap", gap: "8px 20px", marginBottom: 10 }}>
+                        {draft.selectedSkills === undefined && <Toggle label={t("agents.loadSkills")} disabled={disabled} checked={draft.loadSkills} onChange={(checked) => update("loadSkills", checked)} />}
+                        {draft.selectedExtensionTools === undefined && <Toggle label={t("agents.loadExtensions")} disabled={disabled} checked={draft.loadExtensions} onChange={(checked) => update("loadExtensions", checked)} />}
                       </div>
-                    </Field>
-                  )}
+                    )}
+                    <AgentResourceSelector
+                      cwd={cwd}
+                      selectedSkills={draft.selectedSkills}
+                      selectedExtensionTools={draft.selectedExtensionTools}
+                      onChangeSkills={(skills) => setDraft((current) => ({ ...current, selectedSkills: skills, loadSkills: false }))}
+                      onChangeExtensionTools={(tools) => setDraft((current) => ({ ...current, selectedExtensionTools: tools, loadExtensions: false }))}
+                      legacySkills={draft.loadSkills}
+                      legacyExtensions={draft.loadExtensions}
+                      hideExtensionTools={Boolean(draft.orchestration)}
+                      disabled={disabled}
+                    />
+                  </Field>
 
                   <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr" : "minmax(0, 1.5fr) minmax(120px, 0.75fr) minmax(100px, 0.5fr)", gap: 12 }}>
                     <Field label={t("agents.model")}>
@@ -926,8 +1103,17 @@ export function AgentsConfig({
           </ConfigDetailStack>
         </ConfigDetail>
       </ConfigSplitView>
-      <ConfigFooter status={(settingsError || error) && <span role="alert" style={{ color: "#ef4444" }}>{settingsError || error}</span>}>
-        {editing && (
+      )}
+      <ConfigFooter status={(settingsError || error || mainMapError) && <span role="alert" style={{ color: "#ef4444" }}>{settingsError || error || mainMapError}</span>}>
+        {view === "map" && mapOwner === MAIN_NODE_ID && !mainMapError && (
+          <span style={{ color: "var(--text-muted)", fontSize: 11 }}>{t("main.newSessionsOnly")}</span>
+        )}
+        {view === "map" && mapOwner === MAIN_NODE_ID && mainDraftChanged && (
+          <ConfigButton variant="primary" onClick={() => void saveMapMain()} disabled={mainMapSaving || !mainRevision}>
+            {mainMapSaving ? t("agents.saving") : t("agents.save")}
+          </ConfigButton>
+        )}
+        {editing && (view === "profiles" || (view === "map" && mapOwner !== null && mapOwner !== MAIN_NODE_ID && profileDraftChanged)) && (
           <ConfigButton
             variant="primary"
             onClick={() => void save()}

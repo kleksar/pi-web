@@ -8,6 +8,7 @@ import {
   type SubagentRunInfo,
 } from "./subagents";
 import type { SessionEntry } from "./types";
+import { MAIN_RESOURCE_META_TYPE } from "./main-agent-snapshot";
 
 export const SUBAGENT_ARTIFACT_TYPE = "pi-web:subagent-artifact";
 export const SUBAGENT_ARTIFACT_INVALIDATED_TYPE = "pi-web:subagent-artifact-invalidated";
@@ -87,6 +88,14 @@ function sha256(value: string): string {
 
 /** A resumed coordinator starts another invocation even though its session ID stays the same. */
 export function currentDependencyEpoch(entries: ParentEntries): string {
+  const mainPolicy = entries.some((entry) => entry.type === "custom" && entry.customType === MAIN_RESOURCE_META_TYPE);
+  if (mainPolicy) {
+    // The root's last user turn owns this invocation; the next user turn starts
+    // another epoch and cannot reuse artifacts from the previous request.
+    const userTurn = [...entries].reverse().find((entry) => entry.type === "message" && entry.message.role === "user");
+    if (!userTurn?.id) throw new Error("Main invocation has not started");
+    return userTurn.id;
+  }
   for (let index = entries.length - 1; index >= 0; index -= 1) {
     const entry = entries[index];
     if (entry.type === "custom" && (entry.customType === SUBAGENT_STATUS_TYPE || entry.customType === SUBAGENT_RESULT_TYPE)) {

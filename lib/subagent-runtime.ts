@@ -38,7 +38,18 @@ import {
 } from "./subagents";
 import type { SessionEntry } from "./types";
 import { buildSubagentPromptPlan } from "./subagent-prompt";
+import { readMainSessionResources } from "./main-agent-snapshot";
 import { createExactSystemPromptExtension } from "./exact-system-prompt";
+import {
+  filterPinnedSkills,
+  pinSelectedSkills,
+  pinSelectedExtensionTools,
+  pinnedResourceIntegrityExtension,
+  selectedResourceSourceFingerprint,
+  pinnedSkillsPrompt,
+  type PinnedSkill,
+  type PinnedExtensionTool,
+} from "./agent-resource-selection";
 import { appendSubagentInputFiles, loadSubagentInputFiles } from "./subagent-input";
 import { projectTrustReloadOptions } from "./project-trust";
 import { resolveShellTools } from "./powershell-settings";
@@ -65,6 +76,7 @@ interface HostSession {
   readonly cwd: string;
   isAlive(): boolean;
   isRunning(): boolean;
+  isChatOnly?(): boolean;
   waitUntilReady(): Promise<void>;
 }
 
@@ -196,6 +208,10 @@ export function profileAuthorityPin(profile: SubagentProfile) {
     systemPrompt: profile.systemPrompt,
     tools: profile.tools,
     extensionTools: profile.extensionTools,
+    selectedSkills: profile.selectedSkills,
+    selectedExtensionTools: profile.selectedExtensionTools,
+    selectedSkillSources: profile.selectedSkills?.map((path) => selectedResourceSourceFingerprint(path)),
+    selectedExtensionSources: profile.selectedExtensionTools?.map((tool) => selectedResourceSourceFingerprint(tool.extensionPath)),
     loadSkills: profile.loadSkills,
     loadExtensions: profile.loadExtensions,
     model: profile.model,
@@ -241,7 +257,8 @@ function pinAllowedChildren(cwd: string, allowedChildren: readonly string[]) {
 function assertDependencyProvidersPinned(
   cwd: string,
   childName: string,
-  orchestration: NonNullable<ReturnType<typeof readSubagentSessionResources>>["orchestration"],
+  orchestration: { dependencies?: SubagentOrchestration["dependencies"];
+    childProfiles: Record<string, ReturnType<typeof profileAuthorityPin>> } | undefined,
 ): void {
   if (!orchestration) return;
   const checked = new Set<string>();
@@ -271,10 +288,30 @@ function assertParentMayStart(
   getSession: SubagentRuntimeDependencies["getSession"],
 ) {
   if (stoppedParents().has(parentSessionId)) throw new Error("Parent session was stopped");
+  if (parent.isChatOnly?.()) throw new Error("Chat-only Main cannot delegate without Agent tools");
   const entries = parent.inner.sessionManager.getEntries() as unknown as SessionEntry[];
   // Throws on a corrupt subagent marker. A legacy v1 specialist cannot delegate.
   const resources = readSubagentSessionResources(entries);
-  if (!resources) return { rootSessionId: parentSessionId, depth: 1 };
+  if (!resources) {
+    const rootPolicy = readMainSessionResources(entries);
+    if (!rootPolicy) {
+      // A session created before Main configuration support stays legacy even
+      // after the global policy is edited; new sessions always persist a marker.
+      return { rootSessionId: parentSessionId, depth: 1 };
+    }
+    const orchestration = rootPolicy.orchestration;
+    if (orchestration) {
+      if (!orchestration.allowedChildren.some((name) => name.toLowerCase() === childProfileName.toLowerCase())) {
+        throw new Error(`Main is not allowed to delegate to ${childProfileName}`);
+      }
+      const actual = resolveSubagentProfile(parent.cwd, childProfileName);
+      const expected = orchestration.childProfiles[childProfileName.toLowerCase()];
+      if (!actual || !sameProfilePin(profileAuthorityPin(actual), expected)) {
+        throw new Error(`Subagent profile changed since Main session start: ${childProfileName}`);
+      }
+    }
+    return { rootSessionId: parentSessionId, depth: 1 };
+  }
   const permission = resources.orchestration;
   if (!permission?.allowedChildren.some((name) => name.toLowerCase() === childProfileName.toLowerCase())) {
     throw new Error(`Subagent ${parentSessionId} is not allowed to delegate to ${childProfileName}`);
@@ -454,12 +491,13 @@ export function createSubagentController(
       const releaseRootAdmission = reserveRootAdmission(rootSessionId);
       const releaseBranchAdmission = depth > 1 ? reserveBranchAdmission(parent.cwd) : undefined;
       releaseAdmission = () => { releaseBranchAdmission?.(); releaseRootAdmission(); releaseDependencyClaim?.(); };
-      if (depth > 1) {
+      if (depth > 1 || readMainSessionResources(parent.inner.sessionManager.getEntries() as unknown as SessionEntry[])?.orchestration?.dependencies) {
         const parentEntries = parent.inner.sessionManager.getEntries() as unknown as SessionEntry[];
-        const orchestration = readSubagentSessionResources(parentEntries)?.orchestration;
+        const orchestration = readSubagentSessionResources(parentEntries)?.orchestration
+          ?? readMainSessionResources(parentEntries)?.orchestration;
         dependencyGraph = orchestration?.dependencies;
         if (dependencyGraph !== undefined) {
-          if (getSubagentRuns().get(parentSessionId)?.run.status !== "running") {
+          if (depth > 1 && getSubagentRuns().get(parentSessionId)?.run.status !== "running") {
             throw new Error("Orchestrator invocation is not active");
           }
           const epoch = currentDependencyEpoch(parentEntries);
@@ -516,15 +554,21 @@ export function createSubagentController(
       const inputFiles = loadSubagentInputFiles(parent.cwd, request.inputFiles ?? []);
       const allowedChildren = depth < MAX_SUBAGENT_DEPTH ? profile.orchestration?.allowedChildren ?? [] : [];
       const canDelegate = allowedChildren.length > 0;
-      if (canDelegate && (profile.tools.length > 0 || profile.extensionTools?.length || profile.loadSkills || profile.loadExtensions)) {
+      const loadSkills = profile.selectedSkills === undefined ? profile.loadSkills : profile.selectedSkills.length > 0;
+      const loadExtensions = profile.selectedExtensionTools === undefined
+        ? profile.loadExtensions : profile.selectedExtensionTools.length > 0;
+      if (canDelegate && (profile.tools.length > 0 || profile.extensionTools?.length || loadExtensions
+        || (loadSkills && profile.selectedSkills === undefined))) {
         throw new Error("An orchestrator must use only the three Pi Web delegation tools");
       }
+      let pinnedSkills: PinnedSkill[] | undefined;
+      let pinnedExtensionTools: PinnedExtensionTool[] | undefined;
       const childProfiles = canDelegate ? pinAllowedChildren(childCwd, allowedChildren) : undefined;
       const promptPlan = buildSubagentPromptPlan({
         profileSystemPrompt: profile.systemPrompt,
         tools: profile.tools,
-        loadSkills: profile.loadSkills,
-        loadExtensions: profile.loadExtensions,
+        loadSkills,
+        loadExtensions,
         promptMode: profile.promptMode,
         task: appendSubagentInputFiles(request.task + (dependencyAdmission?.taskSuffix ?? ""), inputFiles),
         inheritedParentContext,
@@ -538,8 +582,8 @@ export function createSubagentController(
         modelRuntime: parentModelRuntime,
         settingsManager,
         resourceLoaderOptions: {
-          noExtensions: !profile.loadExtensions,
-          noSkills: !profile.loadSkills,
+          noExtensions: !loadExtensions,
+          noSkills: !loadSkills,
           noPromptTemplates: true,
           noThemes: true,
           noContextFiles: true,
@@ -550,11 +594,26 @@ export function createSubagentController(
               }
             : {}),
           appendSystemPrompt,
+          ...(profile.selectedSkills !== undefined
+            ? { skillsOverride: (base: { skills: import("@earendil-works/pi-coding-agent").Skill[]; diagnostics: import("@earendil-works/pi-coding-agent").ResourceDiagnostic[] }) => {
+                pinnedSkills = pinSelectedSkills(base.skills, profile.selectedSkills!);
+                return { ...base, skills: filterPinnedSkills(base.skills, pinnedSkills) };
+              } }
+            : {}),
+          ...(profile.selectedSkills?.length && !profile.tools.includes("read") && !profile.tools.includes("bash")
+            ? { appendSystemPromptOverride: (base: string[]) => [
+                ...base, pinnedSkillsPrompt(pinnedSkills ?? []),
+              ] }
+            : {}),
           // The exact prompt is sent through before_agent_start; see lib/exact-system-prompt.ts.
-          ...((promptPlan.exactSystemPrompt !== undefined || canDelegate)
+          ...((promptPlan.exactSystemPrompt !== undefined || canDelegate
+              || profile.selectedSkills !== undefined || profile.selectedExtensionTools !== undefined)
             ? { extensionFactories: [
                 ...(promptPlan.exactSystemPrompt !== undefined
-                  ? [createExactSystemPromptExtension(() => promptPlan.exactSystemPrompt)] : []),
+                  ? [createExactSystemPromptExtension(() => profile.selectedSkills?.length
+                    && !profile.tools.includes("read") && !profile.tools.includes("bash")
+                      ? `${promptPlan.exactSystemPrompt}\n\n${pinnedSkillsPrompt(pinnedSkills ?? [])}`
+                      : promptPlan.exactSystemPrompt)] : []),
                 ...(canDelegate
                   ? [createSubagentExtension(
                       extensionRuntime,
@@ -565,11 +624,16 @@ export function createSubagentController(
                       dependencies.isBuiltInSubagentsEnabled ?? isBuiltInSubagentsEnabled,
                       { allowedChildren, dependencies: profile.orchestration?.dependencies },
                     )] : []),
+                ...(profile.selectedSkills !== undefined || profile.selectedExtensionTools !== undefined
+                  ? [pinnedResourceIntegrityExtension(
+                    () => pinnedSkills,
+                    () => pinnedExtensionTools,
+                  )] : []),
               ] }
             : {}),
           ...(canDelegate ? { extensionsOverride: preferPiWebSubagentExtension } : {}),
         },
-        ...((profile.loadExtensions || profile.loadSkills)
+        ...((loadExtensions || loadSkills)
           ? { resourceLoaderReloadOptions: projectTrustReloadOptions(childCwd, agentDir) }
           : {}),
       });
@@ -586,8 +650,13 @@ export function createSubagentController(
         }
       }
 
-      const extensionToolNames = profile.loadExtensions
-        ? profile.extensionTools?.length
+      const extensionToolNames = loadExtensions
+        ? profile.selectedExtensionTools !== undefined
+          ? (pinnedExtensionTools = pinSelectedExtensionTools(
+              services.resourceLoader.getExtensions().extensions,
+              profile.selectedExtensionTools,
+            )).map((tool) => tool.toolName)
+          : profile.extensionTools?.length
           ? selectSubagentExtensionTools(services.resourceLoader.getExtensions().extensions, profile.extensionTools)
           : services.resourceLoader.getExtensions().extensions.flatMap((extension) => [...extension.tools.keys()])
         : [];
@@ -612,20 +681,30 @@ export function createSubagentController(
         createdAt,
         ...(dependencyAdmission ? { dependencyEpoch: dependencyAdmission.epoch } : {}),
         resourceSnapshot: {
-          appendSystemPrompt: [...appendSystemPrompt],
+          appendSystemPrompt: services.resourceLoader.getAppendSystemPrompt
+            ? [...services.resourceLoader.getAppendSystemPrompt()]
+            : [...appendSystemPrompt, ...(profile.selectedSkills?.length && !profile.tools.includes("read")
+              && !profile.tools.includes("bash") ? [pinnedSkillsPrompt(pinnedSkills ?? [])] : [])],
           tools: [...activeTools],
-          loadSkills: profile.loadSkills,
-          loadExtensions: profile.loadExtensions,
-          ...(promptPlan.exactSystemPrompt !== undefined ? { exactSystemPrompt: promptPlan.exactSystemPrompt } : {}),
+          loadSkills,
+          loadExtensions,
+          ...(profile.selectedSkills !== undefined ? { selectedSkills: pinnedSkills ?? [] } : {}),
+          ...(profile.selectedExtensionTools !== undefined ? { selectedExtensionTools: pinnedExtensionTools ?? [] } : {}),
+          ...(promptPlan.exactSystemPrompt !== undefined ? { exactSystemPrompt: profile.selectedSkills?.length
+            && !profile.tools.includes("read") && !profile.tools.includes("bash")
+              ? `${promptPlan.exactSystemPrompt}\n\n${pinnedSkillsPrompt(pinnedSkills ?? [])}`
+              : promptPlan.exactSystemPrompt } : {}),
           ...(canDelegate
-            ? { version: 2 as const, orchestration: {
+            ? { orchestration: {
                 allowedChildren: [...allowedChildren], childProfiles: childProfiles!, rootSessionId, depth,
                 ...(profile.orchestration?.dependencies !== undefined
                   ? { dependencies: Object.fromEntries(Object.entries(profile.orchestration.dependencies).map(([consumer, producers]) => [consumer, [...producers]])) }
                   : {}),
               } }
-            : { version: 1 as const }),
-        },
+            : {}),
+          version: profile.selectedSkills !== undefined || profile.selectedExtensionTools !== undefined
+            ? 3 as const : canDelegate ? 2 as const : 1 as const,
+        } as SubagentMetadata["resourceSnapshot"],
         ...(isolatedWorktree ? { worktreePath: isolatedWorktree.path, worktreeBranch: isolatedWorktree.branch } : {}),
       };
       sessionManager.appendCustomEntry(SUBAGENT_META_TYPE, metadata);

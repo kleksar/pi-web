@@ -10,8 +10,16 @@ import {
   type SubagentWritableScope,
 } from "@/lib/subagents";
 import { writeDisabledBuiltInSubagent } from "@/lib/subagent-settings";
+import { validateSelectedAgentResources } from "@/lib/agent-resource-selection";
+import { hasJsonContentType, isApiRequestAllowed } from "@/lib/request-security";
 
 export const dynamic = "force-dynamic";
+
+function rejectedMutation(req: Request): NextResponse | null {
+  if (!isApiRequestAllowed(req)) return NextResponse.json({ error: "Untrusted API request" }, { status: 403 });
+  if (!hasJsonContentType(req)) return NextResponse.json({ error: "Content-Type must be application/json" }, { status: 415 });
+  return null;
+}
 
 async function validateCwd(cwd: unknown): Promise<string> {
   if (typeof cwd !== "string" || !cwd || !existsSync(cwd)) throw new Error("Valid cwd required");
@@ -35,7 +43,7 @@ function validateAllowedChildren(cwd: string, profile: SubagentProfileInput): vo
   const names = profile.orchestration?.allowedChildren;
   if (!Array.isArray(names)) return; // saveSubagentProfile validates malformed input.
   const effective = new Set(listSubagentProfiles(cwd)
-    .filter((candidate) => candidate.enabled)
+    .filter((candidate) => candidate.enabled && !candidate.configurationError)
     .map((candidate) => candidate.name.toLowerCase()));
   for (const name of names) {
     if (typeof name !== "string") continue; // saveSubagentProfile validates malformed input.
@@ -56,6 +64,8 @@ export async function GET(req: Request) {
 }
 
 export async function PUT(req: Request) {
+  const rejected = rejectedMutation(req);
+  if (rejected) return rejected;
   try {
     const body = await req.json() as {
       cwd?: unknown;
@@ -68,6 +78,7 @@ export async function PUT(req: Request) {
       return NextResponse.json({ error: "profile required" }, { status: 400 });
     }
     validateAllowedChildren(cwd, body.profile);
+    await validateSelectedAgentResources(cwd, body.profile);
     return NextResponse.json({ profile: saveSubagentProfile(cwd, scope, body.profile) });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -76,6 +87,8 @@ export async function PUT(req: Request) {
 }
 
 export async function PATCH(req: Request) {
+  const rejected = rejectedMutation(req);
+  if (rejected) return rejected;
   try {
     const body = await req.json() as { cwd?: unknown; scope?: unknown; name?: unknown; enabled?: unknown };
     const cwd = await validateCwd(body.cwd);
@@ -92,6 +105,7 @@ export async function PATCH(req: Request) {
       return NextResponse.json({ profile: { ...source, enabled: body.enabled } });
     }
     const profile: SubagentProfileInput = { ...source, enabled: body.enabled };
+    await validateSelectedAgentResources(cwd, profile);
     return NextResponse.json({ profile: saveSubagentProfile(cwd, scope, profile) });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -100,6 +114,8 @@ export async function PATCH(req: Request) {
 }
 
 export async function DELETE(req: Request) {
+  const rejected = rejectedMutation(req);
+  if (rejected) return rejected;
   try {
     const body = await req.json() as { cwd?: unknown; scope?: unknown; name?: unknown };
     const cwd = await validateCwd(body.cwd);

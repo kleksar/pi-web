@@ -43,10 +43,34 @@ function profile(overrides = {}) {
 function jsonRequest(method, body) {
   return new Request("http://localhost/api/subagents/profiles", {
     method,
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", Host: "localhost" },
     body: JSON.stringify(body),
   });
 }
+
+test("profile mutations reject cross-origin JSON and form posts before changing files", async (t) => {
+  const cwd = await mkdtemp(join(tmpdir(), "pi-web-subagent-route-security-"));
+  allowFileRoot(cwd);
+  t.after(() => rm(cwd, { recursive: true, force: true }));
+  const methods = [
+    ["PUT", PUT, { cwd, scope: "project", profile: profile() }],
+    ["PATCH", PATCH, { cwd, scope: "project", name: "api-test-agent", enabled: false }],
+    ["DELETE", DELETE, { cwd, scope: "project", name: "api-test-agent" }],
+  ];
+  for (const [method, handler, body] of methods) {
+    const crossOrigin = new Request("http://localhost/api/subagents/profiles", {
+      method,
+      headers: { "Content-Type": "application/json", Host: "localhost", Origin: "https://other.example" },
+      body: JSON.stringify(body),
+    });
+    assert.equal((await handler(crossOrigin)).status, 403);
+    const form = new Request("http://localhost/api/subagents/profiles", {
+      method, headers: { "Content-Type": "application/x-www-form-urlencoded", Host: "localhost" }, body: "x=y",
+    });
+    assert.equal((await handler(form)).status, 415);
+  }
+  assert.equal(existsSync(join(cwd, ".pi", "agents", "api-test-agent.md")), false);
+});
 
 test("profiles route creates, lists, and deletes a project profile", async (t) => {
   const cwd = await mkdtemp(join(tmpdir(), "pi-web-subagent-route-"));
