@@ -21,7 +21,11 @@ interface Props {
 }
 
 type Tab = "instructions" | "resources" | "delegation";
-type ConfigResponse = { config?: MainAgentConfig; revision?: string; error?: string };
+type ConfigResponse = {
+  config?: MainAgentConfig; revision?: string; error?: string;
+  globalConfig?: MainAgentConfig; overrides?: MainAgentConfig; trusted?: boolean; projectPath?: string;
+  rosterPath?: string;
+};
 
 function dependencyIssue(orchestration: SubagentOrchestration): string | null {
   const issue = findOrchestrationLinkIssue(
@@ -37,7 +41,15 @@ function dependencyIssue(orchestration: SubagentOrchestration): string | null {
 export function MainAgentConfig({ cwd, sessionId = null, onClose, onReloaded, embedded = false, onOpenMap }: Props) {
   const { t } = useI18n();
   const [tab, setTab] = useState<Tab>("resources");
+  const [scope, setScope] = useState<"project" | "global" | "roster">("project");
+  const [rosterAvailable, setRosterAvailable] = useState(false);
+  const [refresh, setRefresh] = useState(0);
   const [saved, setSaved] = useState<MainAgentConfig | null>(null);
+  const [globalConfig, setGlobalConfig] = useState<MainAgentConfig>({});
+  const [overrides, setOverrides] = useState<MainAgentConfig>({});
+  const [projectTrusted, setProjectTrusted] = useState(true);
+  const [projectPath, setProjectPath] = useState("");
+  const [rosterPath, setRosterPath] = useState("");
   const [draft, setDraft] = useState<MainAgentConfig>({});
   const [revision, setRevision] = useState("absent");
   const [profiles, setProfiles] = useState<SubagentProfile[]>([]);
@@ -55,8 +67,8 @@ export function MainAgentConfig({ cwd, sessionId = null, onClose, onReloaded, em
 
   useEffect(() => {
     const onUpdated = (event: Event) => {
-      const detail = (event as CustomEvent<{ config?: MainAgentConfig; revision?: string; origin?: string }>).detail;
-      if (!detail?.config || typeof detail.revision !== "string" || detail.origin === "main") return;
+      const detail = (event as CustomEvent<{ config?: MainAgentConfig; revision?: string; origin?: string; scope?: string; overrides?: MainAgentConfig }>).detail;
+      if (!detail?.config || typeof detail.revision !== "string" || detail.origin === "main" || (detail.scope ?? "global") !== scope) return;
       if (dirty) {
         setLatest({ config: detail.config, revision: detail.revision });
         setConflicted(true);
@@ -65,13 +77,14 @@ export function MainAgentConfig({ cwd, sessionId = null, onClose, onReloaded, em
       }
       setSaved(detail.config);
       setDraft(detail.config);
+      setOverrides(detail.overrides ?? {});
       setRevision(detail.revision);
       setSavedOk(false);
       setError(null);
     };
     window.addEventListener("pi-web:main-config-updated", onUpdated);
     return () => window.removeEventListener("pi-web:main-config-updated", onUpdated);
-  }, [dirty, t]);
+  }, [dirty, t, scope]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -84,11 +97,11 @@ export function MainAgentConfig({ cwd, sessionId = null, onClose, onReloaded, em
     setConflicted(false);
     setSavedOk(false);
     Promise.all([
-      fetch(`/api/main/config?cwd=${encodeURIComponent(cwd)}`, { cache: "no-store", signal: controller.signal }),
+      fetch(`/api/main/config?cwd=${encodeURIComponent(cwd)}&scope=${scope}`, { cache: "no-store", signal: controller.signal }),
       fetch(`/api/subagents/profiles?cwd=${encodeURIComponent(cwd)}`, { cache: "no-store", signal: controller.signal }),
     ]).then(async ([configResponse, profilesResponse]) => {
       const main = await configResponse.json() as ConfigResponse;
-      const agents = await profilesResponse.json() as { profiles?: SubagentProfile[]; error?: string };
+      const agents = await profilesResponse.json() as { profiles?: SubagentProfile[]; error?: string; rosterAvailable?: boolean };
       if (!configResponse.ok || main.error || !main.config || typeof main.revision !== "string") {
         throw new Error(main.error ?? `HTTP ${configResponse.status}`);
       }
@@ -99,12 +112,18 @@ export function MainAgentConfig({ cwd, sessionId = null, onClose, onReloaded, em
       setSaved(main.config);
       setDraft(main.config);
       setRevision(main.revision);
+      setGlobalConfig(main.globalConfig ?? main.config);
+      setOverrides(main.overrides ?? {});
+      setProjectTrusted(main.trusted ?? true);
+      setProjectPath(main.projectPath ?? "");
+      setRosterPath(main.rosterPath ?? "");
+      setRosterAvailable(Boolean(agents.rosterAvailable));
       if (profileRequest === profileRequestId.current) setProfiles(agents.profiles);
     }).catch((cause) => {
       if (!controller.signal.aborted) setError(cause instanceof Error ? cause.message : String(cause));
     }).finally(() => { if (!controller.signal.aborted) setLoading(false); });
     return () => controller.abort();
-  }, [cwd]);
+  }, [cwd, scope, refresh]);
 
   // Settings keeps visited tabs mounted. Refresh the roster after a profile edit
   // without discarding unsaved Main assignments or its compare-and-swap revision.
@@ -188,11 +207,12 @@ export function MainAgentConfig({ cwd, sessionId = null, onClose, onReloaded, em
       const response = await fetch("/api/main/config", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ cwd, config: draft, expectedRevision: revision }),
+        body: JSON.stringify({ cwd, scope, config: draft, expectedRevision: revision,
+          ...(scope === "project" || scope === "global" ? { previous: saved, overrides } : {}) }),
       });
       const result = await response.json() as ConfigResponse;
       if (response.status === 409) {
-        const latestResponse = await fetch(`/api/main/config?cwd=${encodeURIComponent(cwd)}`, { cache: "no-store" });
+        const latestResponse = await fetch(`/api/main/config?cwd=${encodeURIComponent(cwd)}&scope=${scope}`, { cache: "no-store" });
         const newVersion = await latestResponse.json() as ConfigResponse;
         if (latestResponse.ok && newVersion.config && typeof newVersion.revision === "string") {
           setLatest(newVersion);
@@ -207,10 +227,17 @@ export function MainAgentConfig({ cwd, sessionId = null, onClose, onReloaded, em
       setSaved(result.config);
       setDraft(result.config);
       setRevision(result.revision);
+      setGlobalConfig(result.globalConfig ?? result.config);
+      setOverrides(result.overrides ?? {});
+      setProjectTrusted(result.trusted ?? true);
+      if (result.projectPath) setProjectPath(result.projectPath);
+      if (result.rosterPath) setRosterPath(result.rosterPath);
       setSavedOk(true);
       window.dispatchEvent(new CustomEvent("pi-web:main-config-updated", {
-        detail: { config: result.config, revision: result.revision, origin: "main" },
+        detail: { config: result.config, revision: result.revision,
+          overrides: result.overrides ?? {}, origin: "main", scope },
       }));
+      if (scope === "project") window.dispatchEvent(new Event("pi-web:project-trust-updated"));
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
@@ -224,12 +251,31 @@ export function MainAgentConfig({ cwd, sessionId = null, onClose, onReloaded, em
         <div className="main-agent-config-header">
           <div>
             <strong>{t("main.title")}</strong>
-            <p>{t("main.globalDescription")}</p>
+            <p>{scope === "project" ? t("main.projectDescription") : scope === "roster" ? t("main.rosterDescription") : t("main.globalDescription")}</p>
           </div>
           {onOpenMap && <ConfigButton size="small" onClick={() => {
             if (!dirty || window.confirm(t("main.unsavedMapConfirm"))) onOpenMap();
           }}>{t("main.openMap")}</ConfigButton>}
         </div>
+        <div className="main-agent-config-scope" role="group" aria-label={t("main.configScope")}>
+          <button type="button" aria-pressed={scope === "project"} disabled={saving} onClick={() => { if (!dirty || window.confirm(t("agents.discardChanges"))) setScope("project"); }}>{t("main.projectScope")}</button>
+          {rosterAvailable && <button type="button" aria-pressed={scope === "roster"} disabled={saving} onClick={() => { if (!dirty || window.confirm(t("agents.discardChanges"))) setScope("roster"); }}>{t("main.rosterScope")}</button>}
+          <button type="button" aria-pressed={scope === "global"} disabled={saving} onClick={() => { if (!dirty || window.confirm(t("agents.discardChanges"))) setScope("global"); }}>{t("main.globalScope")}</button>
+          {scope === "project" && <code title={projectPath}>{projectPath}</code>}
+          {scope === "roster" && <code title={rosterPath}>{rosterPath}</code>}
+        </div>
+        {scope === "project" && !projectTrusted && <div className="main-agent-config-warning" role="status">
+          {t("main.projectNeedsTrust")}
+          <ConfigButton size="small" onClick={async () => {
+            try {
+              const response = await fetch("/api/project-trust", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ cwd, purpose: "main-config" }) });
+              const data = await response.json() as { error?: string };
+              if (!response.ok) throw new Error(data.error ?? `HTTP ${response.status}`);
+              window.dispatchEvent(new Event("pi-web:project-trust-updated"));
+              setRefresh((value) => value + 1);
+            } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); }
+          }}>{t("main.trustProject")}</ConfigButton>
+        </div>}
         <div role="tablist" aria-label={t("main.title")} className="main-agent-config-tabs">
           {(["resources", "delegation", "instructions"] as const).map((item) => (
             <button key={item} type="button" role="tab" aria-selected={tab === item} onClick={() => setTab(item)}>
@@ -240,20 +286,26 @@ export function MainAgentConfig({ cwd, sessionId = null, onClose, onReloaded, em
         <div className="main-agent-config-scroll">
           <div hidden={tab !== "resources"} className="main-agent-config-section">
             <p className="main-agent-config-note">{t("main.resourcesDescription")}</p>
+            {scope === "project" && <p className="main-agent-config-note">{t("main.projectSkillsHint")}</p>}
+            {scope === "project" && overrides.selectedSkills !== undefined && <ConfigButton size="small" onClick={() => setDraft((current) => ({ ...current, selectedSkills: globalConfig.selectedSkills }))}>{t("main.inheritSkills")}</ConfigButton>}
+            {scope === "project" && overrides.selectedExtensionTools !== undefined && <ConfigButton size="small" onClick={() => setDraft((current) => ({ ...current, selectedExtensionTools: globalConfig.selectedExtensionTools }))}>{t("main.inheritTools")}</ConfigButton>}
             {!loading && saved && (
               <AgentResourceSelector
                 cwd={cwd}
+                allowedSkillRoot={scope === "roster" ? `${rosterPath.replace(/[/\\]main-agent-config\.json$/, "")}/skills` : undefined}
                 selectedSkills={draft.selectedSkills}
                 selectedExtensionTools={draft.selectedExtensionTools}
                 legacySkills={draft.selectedSkills === undefined}
                 legacyExtensions={draft.selectedExtensionTools === undefined}
                 onChangeSkills={changeSkills}
                 onChangeExtensionTools={changeTools}
+                hideExtensionTools={scope === "roster"}
                 disabled={saving}
               />
             )}
           </div>
           <div hidden={tab !== "delegation"} className="main-agent-config-section">
+            {scope === "project" && overrides.orchestration !== undefined && <ConfigButton size="small" onClick={() => setDraft((current) => ({ ...current, orchestration: globalConfig.orchestration }))}>{t("main.inheritDelegation")}</ConfigButton>}
             {draft.orchestration == null ? (
               <div className="main-agent-config-warning" role="status">
                 <span>{t("main.unrestrictedDescription")}</span>
@@ -353,7 +405,7 @@ export function MainAgentConfig({ cwd, sessionId = null, onClose, onReloaded, em
               }}>{t("main.keepEdits")}</ConfigButton>
             </div>
           )}
-          <ConfigButton variant="primary" onClick={() => void save()} disabled={loading || saving || conflicted || Boolean(profilesError) || !dirty || missingChildren.length > 0 || Boolean(currentDependencyIssue)}>
+          <ConfigButton variant="primary" onClick={() => void save()} disabled={loading || saving || conflicted || Boolean(profilesError) || !dirty || (scope === "project" && !projectTrusted) || missingChildren.length > 0 || Boolean(currentDependencyIssue)}>
             {saving ? t("agents.saving") : t("agents.save")}
           </ConfigButton>
         </ConfigFooter>}
@@ -362,6 +414,10 @@ export function MainAgentConfig({ cwd, sessionId = null, onClose, onReloaded, em
         .main-agent-config { height: 100%; min-height: 0; display: flex; flex-direction: column; color: var(--text); }
         .main-agent-config-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 18px 22px 12px; }
         .main-agent-config-header strong { font-size: 15px; }
+        .main-agent-config-scope { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; padding: 4px 22px 12px; }
+        .main-agent-config-scope button { border: 1px solid var(--border); padding: 6px 11px; border-radius: 6px; color: var(--text); background: var(--bg-panel); cursor: pointer; }
+        .main-agent-config-scope button[aria-pressed=true] { border-color: var(--accent); color: var(--accent); }
+        .main-agent-config-scope code { color: var(--text-muted); font-size: 11px; overflow-wrap: anywhere; }
         .main-agent-config-header p, .main-agent-config-note, .main-agent-config-dependencies p, .main-agent-config-row p { margin: 5px 0 0; font-size: 12px; line-height: 1.5; color: var(--text-muted); }
         .main-agent-config-tabs { display: flex; gap: 4px; padding: 0 22px; border-bottom: 1px solid var(--border); }
         .main-agent-config-tabs button { border: 0; border-bottom: 2px solid transparent; margin-bottom: -1px; padding: 10px 13px; background: none; color: var(--text-muted); cursor: pointer; font-size: 12px; }

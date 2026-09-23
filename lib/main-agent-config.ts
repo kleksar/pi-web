@@ -1,11 +1,14 @@
-import { existsSync, mkdirSync, readFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { dirname, join } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import lockfile from "proper-lockfile";
 import { writePrivateFileAtomicSync } from "./atomic-file";
 import type { SelectedExtensionTool } from "./agent-resource-selection";
+import { resolveSelectedSkillReferences } from "./agent-resource-selection";
 import { MAX_SUBAGENT_DEPENDENCIES, type SubagentOrchestration } from "./subagents";
+import { isProjectMainConfigTrusted } from "./project-trust";
+import { getRepositoryRosterRoot } from "./repository-roster";
 
 /** Missing fields preserve Pi's current discovery of resources and child agents. */
 export interface MainAgentConfig {
@@ -128,6 +131,148 @@ export function validateMainAgentConfig(value: unknown): MainAgentConfig {
 
 export function getMainAgentConfigPath(agentDir = getAgentDir()): string {
   return join(agentDir, "main-agent-config.json");
+}
+
+/** Project overrides live in the checked-out repository, not in the operator's global agent directory. */
+export function getProjectMainAgentConfigPath(cwd: string): string {
+  return join(cwd, ".pi", "main-agent-config.json");
+}
+
+export function getRosterMainAgentConfigPath(): string | undefined {
+  const root = getRepositoryRosterRoot();
+  if (!root) return undefined;
+  const path = join(root, "main-agent-config.json");
+  if (existsSync(path) && (lstatSync(path).isSymbolicLink() || !lstatSync(path).isFile())) {
+    throw new Error("Repository roster Main configuration must be a regular file");
+  }
+  return path;
+}
+
+export function readRosterMainAgentConfig(): MainAgentConfig {
+  const path = getRosterMainAgentConfigPath();
+  if (!path) return {};
+  const config = readMainAgentConfig(path);
+  if (config.selectedExtensionTools?.length) {
+    throw new Error("Repository roster Main extension tools must be configured globally");
+  }
+  if (config.selectedSkills?.some((item) => item.startsWith("/") || /^[A-Za-z]:[\\/]/.test(item))) {
+    throw new Error("Repository roster Main skill references must be relative");
+  }
+  const root = getRepositoryRosterRoot()!;
+  return config.selectedSkills === undefined ? config : {
+    ...config,
+    selectedSkills: resolveSelectedSkillReferences(root, config.selectedSkills),
+  };
+}
+
+export function getGlobalMainAgentConfigRevision(): string {
+  const rosterPath = getRosterMainAgentConfigPath();
+  const rosterRevision = rosterPath ? getMainAgentConfigRevision(rosterPath) : "absent";
+  return createHash("sha256").update(`${rosterRevision}\u0000${getMainAgentConfigRevision()}`).digest("hex");
+}
+
+export function readEffectiveGlobalMainAgentConfig(): {
+  config: MainAgentConfig; globalConfig: MainAgentConfig; overrides: MainAgentConfig; revision: string;
+} {
+  const globalConfig = readRosterMainAgentConfig();
+  const overrides = readMainAgentConfig();
+  return {
+    config: mergeMainAgentConfigs(globalConfig, overrides), globalConfig, overrides,
+    revision: getGlobalMainAgentConfigRevision(),
+  };
+}
+
+function assertProjectConfigLocation(cwd: string): string {
+  const root = realpathSync(cwd);
+  const parent = join(root, ".pi");
+  if (existsSync(parent) && (lstatSync(parent).isSymbolicLink() || !lstatSync(parent).isDirectory())) {
+    throw new Error("Project Main configuration directory must be a real directory");
+  }
+  const configPath = join(parent, "main-agent-config.json");
+  if (existsSync(configPath) && (lstatSync(configPath).isSymbolicLink() || !lstatSync(configPath).isFile())) {
+    throw new Error("Project Main configuration must be a regular file");
+  }
+  return configPath;
+}
+
+/** Missing keys inherit their global counterparts, while [] and null are explicit overrides. */
+export function mergeMainAgentConfigs(globalConfig: MainAgentConfig, project: MainAgentConfig): MainAgentConfig {
+  return validateMainAgentConfig({
+    ...(globalConfig.selectedSkills !== undefined ? { selectedSkills: globalConfig.selectedSkills } : {}),
+    ...(globalConfig.selectedExtensionTools !== undefined ? { selectedExtensionTools: globalConfig.selectedExtensionTools } : {}),
+    ...(globalConfig.orchestration !== undefined ? { orchestration: globalConfig.orchestration } : {}),
+    ...project,
+  });
+}
+
+/** An effective settings draft changes only the edited keys in the project overlay. */
+export function changedProjectMainOverrides(
+  previous: MainAgentConfig, draft: MainAgentConfig, overrides: MainAgentConfig, globalConfig: MainAgentConfig,
+): MainAgentConfig {
+  const result: MainAgentConfig = { ...overrides };
+  for (const key of ["selectedSkills", "selectedExtensionTools", "orchestration"] as const) {
+    if (JSON.stringify(previous[key]) === JSON.stringify(draft[key])) continue;
+    if (JSON.stringify(draft[key]) === JSON.stringify(globalConfig[key])) delete result[key];
+    else if (draft[key] !== undefined) Object.assign(result, { [key]: draft[key] });
+    else delete result[key];
+  }
+  return validateMainAgentConfig(result);
+}
+
+export function readEffectiveMainAgentConfig(cwd: string): {
+  config: MainAgentConfig; globalConfig: MainAgentConfig; overrides: MainAgentConfig;
+  revision: string; projectPath: string; trusted: boolean;
+} {
+  const globalConfig = readEffectiveGlobalMainAgentConfig().config;
+  const projectPath = assertProjectConfigLocation(cwd);
+  const trusted = isProjectMainConfigTrusted(cwd, getAgentDir());
+  // Repository-owned configuration cannot expand resources in an untrusted checkout.
+  const diskOverrides = trusted ? readMainAgentConfig(projectPath) : {};
+  if (diskOverrides.selectedExtensionTools?.length) {
+    throw new Error("Project Main extension tools must be configured globally");
+  }
+  if (diskOverrides.selectedSkills?.some((path) => path.startsWith("/") || /^[A-Za-z]:[\\/]/.test(path))) {
+    throw new Error("Project Main skills must be repository-relative");
+  }
+  const overrides: MainAgentConfig = diskOverrides.selectedSkills === undefined ? diskOverrides : {
+    ...diskOverrides,
+    selectedSkills: resolveSelectedSkillReferences(cwd, diskOverrides.selectedSkills),
+  };
+  return {
+    config: mergeMainAgentConfigs(globalConfig, trusted ? overrides : {}), globalConfig, overrides,
+    revision: projectMainAgentConfigRevision(cwd), projectPath, trusted,
+  };
+}
+
+export function projectMainAgentConfigRevision(cwd: string): string {
+  const globalRevision = getGlobalMainAgentConfigRevision();
+  const projectRevision = getMainAgentConfigRevision(assertProjectConfigLocation(cwd));
+  return createHash("sha256").update(`${globalRevision}\u0000${projectRevision}`).digest("hex");
+}
+
+/** Project saves compare both global and project versions, so inherited values cannot drift unseen. */
+export async function saveProjectMainAgentConfig(
+  cwd: string, input: MainAgentConfig, expectedRevision: string,
+): Promise<ReturnType<typeof readEffectiveMainAgentConfig>> {
+  if (typeof expectedRevision !== "string" || !/^[0-9a-f]{64}$/.test(expectedRevision)) {
+    throw new Error("A valid project Main configuration revision is required");
+  }
+  const config = validateMainAgentConfig(input);
+  const path = assertProjectConfigLocation(cwd);
+  if (!isProjectMainConfigTrusted(cwd, getAgentDir())) {
+    throw new Error("Trust this project before editing its Main configuration");
+  }
+  const parent = dirname(path);
+  mkdirSync(parent, { recursive: true });
+  const release = await lockfile.lock(parent, { retries: { retries: 8, factor: 1, minTimeout: 20, maxTimeout: 100 } });
+  try {
+    assertProjectConfigLocation(cwd);
+    if (projectMainAgentConfigRevision(cwd) !== expectedRevision) throw new MainAgentConfigConflictError();
+    writeMainAgentConfig(config, path);
+    return readEffectiveMainAgentConfig(cwd);
+  } finally {
+    await release();
+  }
 }
 
 export function getMainAgentConfigRevision(configPath = getMainAgentConfigPath()): string {

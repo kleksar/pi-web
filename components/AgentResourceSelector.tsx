@@ -32,6 +32,8 @@ export interface AgentResourceSelectorProps {
   legacyExtensions?: boolean;
   /** Orchestrators can use selected instructions but cannot receive extension tools. */
   hideExtensionTools?: boolean;
+  /** A Git-owned policy can only store skill references inside its own catalog. */
+  allowedSkillRoot?: string;
 }
 
 const EMPTY_SKILLS: string[] = [];
@@ -109,6 +111,7 @@ export function AgentResourceSelector({
   legacySkills = false,
   legacyExtensions = false,
   hideExtensionTools = false,
+  allowedSkillRoot,
 }: AgentResourceSelectorProps) {
   const { t } = useI18n();
   const [catalog, setCatalog] = useState<AgentResourceCatalog | null>(null);
@@ -139,12 +142,19 @@ export function AgentResourceSelector({
   const legacyAllExtensions = selectedExtensionTools === undefined && legacyExtensions;
   const skills = selectedSkills ?? EMPTY_SKILLS;
   const tools = selectedExtensionTools ?? EMPTY_TOOLS;
-  const visibleSkills = useMemo(() => catalog ? currentSkillList(catalog, skillSearch, skills) : [], [catalog, skillSearch, skills]);
+  const assignableSkills = useMemo(() => {
+    if (!catalog) return [];
+    if (!allowedSkillRoot) return catalog.skills;
+    const root = `${allowedSkillRoot.replaceAll("\\", "/").replace(/\/$/, "")}/`;
+    return catalog.skills.filter((skill) => (skill.realPath ?? skill.filePath).replaceAll("\\", "/").startsWith(root));
+  }, [catalog, allowedSkillRoot]);
+  const visibleSkills = useMemo(() => catalog
+    ? currentSkillList({ ...catalog, skills: assignableSkills }, skillSearch, skills) : [], [catalog, assignableSkills, skillSearch, skills]);
   const visibleTools = useMemo(() => catalog ? currentToolList(catalog, toolSearch, tools) : [], [catalog, toolSearch, tools]);
   const selectedToolKeys = useMemo(() => new Set(tools.map(extensionToolKey)), [tools]);
-  const missingSkills = catalog ? missingSelectedSkills(skills, catalog.skills) : [];
+  const missingSkills = catalog ? missingSelectedSkills(skills, assignableSkills) : [];
   const missingTools = catalog ? missingSelectedExtensionTools(tools, catalog.extensionTools) : [];
-  const unavailableSkills = catalog?.skills.some((skill) => skill.unavailableReason) ?? false;
+  const unavailableSkills = assignableSkills.some((skill) => skill.unavailableReason);
   const unavailableTools = catalog?.extensionTools.some((tool) => tool.unavailableReason) ?? false;
 
   return (
@@ -168,13 +178,13 @@ export function AgentResourceSelector({
                 ? t("agentResources.skillsAll")
                 : t("agentResources.skillsCount", { count: skills.length })}</strong>
               {legacyAllSkills && <span className="agent-resource-section-actions">
-                <button type="button" disabled={disabled || unavailableSkills} title={unavailableSkills ? t("agentResources.resolveSkills") : undefined} onClick={() => onChangeSkills(explicitSkillSelection(selectedSkills, catalog.skills, true))}>
+                <button type="button" disabled={disabled || unavailableSkills} title={unavailableSkills ? t("agentResources.resolveSkills") : undefined} onClick={() => onChangeSkills(explicitSkillSelection(selectedSkills, assignableSkills, true))}>
                   {t("agentResources.chooseSkills")}
                 </button>
                 {unavailableSkills && <button type="button" disabled={disabled} onClick={() => onChangeSkills([])}>{t("agentResources.startEmpty")}</button>}
               </span>}
             </div>
-            {(catalog.skills.length > 5 || skillSearch) && <input className="agent-resource-search" type="search" aria-label={t("agentResources.searchSkills")} value={skillSearch} onChange={(event) => setSkillSearch(event.target.value)} placeholder={t("agentResources.searchSkillsPlaceholder")} />}
+            {(assignableSkills.length > 5 || skillSearch) && <input className="agent-resource-search" type="search" aria-label={t("agentResources.searchSkills")} value={skillSearch} onChange={(event) => setSkillSearch(event.target.value)} placeholder={t("agentResources.searchSkillsPlaceholder")} />}
             <div className="agent-resource-list">
               {visibleSkills.map((skill) => (
                 <ResourceRow key={skill.filePath} title={skill.name}

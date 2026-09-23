@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "selectedSkills": [
+    "skills/coordinate-task/SKILL.md"
+  ],
+  "orchestration": {
+    "allowedChildren": [
+      "task-coordinator"
+    ]
+  }
+}

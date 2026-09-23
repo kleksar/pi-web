@@ -87,7 +87,7 @@ export function centerOrchestrationMapNode(node: MapNode, width: number, height:
     y: height / 2 - (node.y + MAP_NODE_HEIGHT / 2) * scale, scale };
 }
 
-const priority = { builtin: 0, global: 1, workspace: 2, project: 3 } as const;
+const priority = { builtin: 0, roster: 1, global: 2, workspace: 3, project: 4 } as const;
 const key = (name: string) => name.toLowerCase();
 const byLabel = (left: MapProfile, right: MapProfile) => left.displayName.localeCompare(right.displayName);
 

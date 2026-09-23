@@ -42,7 +42,8 @@ import {
 } from "./subagents";
 import { createSubagentController, profileAuthorityPin } from "./subagent-runtime";
 import { applyFastMode } from "./subagent-fast-mode";
-import { readMainAgentConfig } from "./main-agent-config";
+import { readEffectiveMainAgentConfig } from "./main-agent-config";
+import { getRepositorySkillPaths } from "./repository-roster";
 import { MAIN_RESOURCE_META_TYPE, readMainSessionResources, type MainSessionResources } from "./main-agent-snapshot";
 import {
   assertNoReservedExtensionToolCollisions,
@@ -2123,8 +2124,9 @@ export async function startRpcSession(
     ? readMainSessionResources(sessionManager.getEntries() as unknown as SessionEntry[])
     : null;
   // Existing sessions without a marker retain their old policy. Only newly
-  // created Main sessions receive the current global configuration.
-  const mainConfig = isMainSession && !sessionFile ? readMainAgentConfig() : undefined;
+  // created Main sessions receive the effective trusted project overlay.
+  const mainConfig = isMainSession && !sessionFile
+    ? readEffectiveMainAgentConfig(sessionCwd).config : undefined;
   const selectedSkillPaths = restoredMainResources?.selectedSkills?.map((skill) => skill.filePath)
     ?? mainConfig?.selectedSkills;
   const selectedToolRefs = restoredMainResources?.selectedExtensionTools?.map(({ extensionPath, toolName }) => ({
@@ -2254,6 +2256,7 @@ export async function startRpcSession(
         ? {
             noExtensions: !subagentResources.loadExtensions,
             noSkills: !subagentResources.loadSkills,
+            ...(subagentResources.loadSkills ? { additionalSkillPaths: getRepositorySkillPaths() } : {}),
             noPromptTemplates: true,
             noThemes: true,
             noContextFiles: true,
@@ -2300,6 +2303,8 @@ export async function startRpcSession(
                 ...base, pinnedSkillsPrompt(pinnedMainSkills ?? []),
               ] } : {}),
             } : {}),
+            ...((effectiveSelectedSkillPaths === undefined || effectiveSelectedSkillPaths.length > 0)
+              ? { additionalSkillPaths: getRepositorySkillPaths() } : {}),
             ...(effectiveSelectedToolRefs !== undefined ? { noExtensions: effectiveSelectedToolRefs.length === 0 } : {}),
             extensionFactories: [
               createProjectCommandBashExtension({

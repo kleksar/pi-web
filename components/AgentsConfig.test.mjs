@@ -21,9 +21,9 @@ test("opens the Main branch from the top button, focuses profiles without filter
   assert.doesNotMatch(mapSource, /setQuery\(focusNodeId\)/);
 });
 
-test("keeps same-name profiles selectable by scope and groups writable sources first", () => {
+test("keeps same-name profiles selectable by scope and shows the shared roster when configured", () => {
   assert.match(source, /return `\$\{profile\.scope\}:\$\{profile\.name\}`/);
-  assert.match(source, /\["project", "global", "workspace", "builtin"\] as const/);
+  assert.match(source, /\["project", \.\.\.\(rosterAvailable \? \["roster" as const\] : \[\]\), "global", "workspace", "builtin"\] as const/);
   assert.match(source, /profile\.scope === scope/);
 });
 
@@ -51,15 +51,15 @@ test("marks profiles shadowed by a higher-precedence source", () => {
   assert.match(cssSource, /\.agents-overridden-label \{[\s\S]*?white-space: nowrap;/);
 });
 
-test("treats global and project profiles as directly editable", () => {
-  assert.match(source, /scope === "global" \|\| scope === "project"/);
+test("treats roster, global and project profiles as directly editable", () => {
+  assert.match(source, /scope === "global" \|\| scope === "project" \|\| scope === "roster"/);
   assert.match(source, /setMode\(isWritableScope\(profile\.scope\) \? "edit" : "view"\)/);
   assert.match(source, /selected && isWritableScope\(selected\.scope\) && mode === "edit"/);
 });
 
-test("offers both writable scopes when creating a profile", () => {
+test("offers a roster creation scope only when a shared catalog is configured", () => {
   assert.match(source, /\{creating && \(/);
-  assert.match(source, /\["global", "project"\] as const/);
+  assert.match(source, /\[\.\.\.\(rosterAvailable \? \["roster" as const\] : \[\]\), "project", "global"\] as const/);
   assert.doesNotMatch(source, /beginOverride|mode === "override"|agents\.readOnly|agents\.override/);
 });
 
@@ -158,7 +158,7 @@ test("duplicates any selected profile through the existing create flow", () => {
   assert.match(source, /const beginDuplicate = \(\) =>/);
   assert.match(source, /\.\.\.editableProfile\(selected\),[\s\S]*?name,[\s\S]*?displayName: t\("agents\.copyName"/);
   assert.match(source, /setMode\("create"\)/);
-  assert.match(source, /setTargetScope\(isWritableScope\(selected\.scope\) \? selected\.scope : "global"\)/);
+  assert.match(source, /setTargetScope\(isWritableScope\(selected\.scope\) \? selected\.scope : rosterAvailable \? "roster" : "project"\)/);
   assert.match(source, /onClick=\{beginDuplicate\}[^>]*>[\s\S]*?t\("agents\.duplicate"\)/);
 });
 

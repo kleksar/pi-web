@@ -1,16 +1,19 @@
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { dump as stringifyYaml } from "js-yaml";
-import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSync, unlinkSync } from "fs";
+import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSync, unlinkSync } from "fs";
 import { basename, dirname, isAbsolute, join, resolve } from "path";
 import { parseFrontmatter } from "./frontmatter";
 import { writePrivateFileAtomicSync } from "./atomic-file";
 import { isExistingPathWithinRoots, isPathWithinRoots } from "./path-security";
 import { disabledBuiltInSubagents } from "./subagent-settings";
 import { pendingContextRequest } from "./subagent-context-handoff";
+import { getRepositoryRosterRoot } from "./repository-roster";
 import { PRESET_READ_ONLY } from "./tool-presets";
 import type { SessionEntry, SubagentSessionStatus } from "./types";
 import {
+  portableSelectedSkillReferences,
+  resolveSelectedSkillReferences,
   validatePinnedSkills,
   validatePinnedExtensionTools,
   type PinnedSkill,
@@ -25,8 +28,8 @@ export const SUBAGENT_CONTROL_TOOL_NAMES = ["Agent", "get_subagent_result", "ste
 export const MAX_SUBAGENT_DEPENDENCIES = 8;
 
 export type SubagentStatus = SubagentSessionStatus;
-export type SubagentScope = "builtin" | "global" | "workspace" | "project";
-export type SubagentWritableScope = Extract<SubagentScope, "global" | "project">;
+export type SubagentScope = "builtin" | "roster" | "global" | "workspace" | "project";
+export type SubagentWritableScope = Extract<SubagentScope, "roster" | "global" | "project">;
 
 export interface SubagentOrchestration {
   allowedChildren: string[];
@@ -189,7 +192,7 @@ export interface SubagentRunInfo {
 const DEFAULT_TOOLS = ["read", "bash", "edit", "write", "grep", "find", "ls"];
 const BUILTIN_TOOLS = new Set(DEFAULT_TOOLS);
 const SUBAGENT_CONTROL_TOOLS = new Set<string>(SUBAGENT_CONTROL_TOOL_NAMES);
-const SUBAGENT_SCOPES = new Set<SubagentScope>(["builtin", "global", "workspace", "project"]);
+const SUBAGENT_SCOPES = new Set<SubagentScope>(["builtin", "roster", "global", "workspace", "project"]);
 const THINKING_LEVELS = new Set<ThinkingLevel>(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
 
 /**
@@ -411,10 +414,17 @@ function parseExtensionToolSelectors(value: unknown): string[] {
   return [...new Set(rawToolValues(value).filter((tool) => tool.toLowerCase().startsWith("ext:")))];
 }
 
-function parseSelectedSkills(value: unknown): string[] | null {
-  if (!Array.isArray(value) || value.some((path) => typeof path !== "string" || !isAbsolute(path) || !path.trim())) return null;
-  const paths = value as string[];
-  return new Set(paths).size === paths.length ? paths : null;
+function parseSelectedSkills(value: unknown, profileFilePath: string): string[] | null {
+  if (!Array.isArray(value) || value.some((path) => typeof path !== "string" || !path.trim())) return null;
+  try {
+    // Resolve against the physical source of a directory-linked agent profile,
+    // so one roster works under every checkout and through ~/.pi/agent/agents.
+    const root = dirname(realpathSync(dirname(profileFilePath)));
+    const paths = resolveSelectedSkillReferences(root, value as string[]);
+    return new Set(paths).size === paths.length ? paths : null;
+  } catch {
+    return null;
+  }
 }
 
 function parseSelectedExtensionTools(value: unknown): Array<{ extensionPath: string; toolName: string }> | null {
@@ -504,10 +514,17 @@ function parseProfileFile(filePath: string, scope: SubagentScope): SubagentProfi
   const activeTools = tools.filter((tool) => !disallowedTools.has(tool));
   const loadSkills = resourceBoolean(data?.load_skills ?? data?.skills, false);
   const loadExtensions = resourceBoolean(data?.load_extensions ?? data?.extensions, extensionTools.length > 0);
-  const selectedSkills = data && "pi_web_selected_skills" in data ? parseSelectedSkills(data.pi_web_selected_skills) : undefined;
+  const selectedSkills = data && "pi_web_selected_skills" in data ? parseSelectedSkills(data.pi_web_selected_skills, filePath) : undefined;
   const selectedExtensionTools = data && "pi_web_selected_extension_tools" in data
     ? parseSelectedExtensionTools(data.pi_web_selected_extension_tools) : undefined;
-  const invalidSelection = selectedSkills === null || selectedExtensionTools === null;
+  const invalidSelection = selectedSkills === null || selectedExtensionTools === null
+    || (scope === "roster" && (
+      (Array.isArray(data?.pi_web_selected_skills)
+        && data.pi_web_selected_skills.some((path) => typeof path !== "string" || isAbsolute(path)))
+      || (loadSkills && selectedSkills === undefined)
+      || loadExtensions
+      || (selectedExtensionTools?.length ?? 0) > 0
+    ));
   const orchestration = activeTools.length === 0 && extensionTools.length === 0
     && !(selectedExtensionTools === undefined ? loadExtensions : selectedExtensionTools?.length)
     && (!loadSkills || selectedSkills !== undefined)
@@ -553,10 +570,6 @@ function parseProfileFile(filePath: string, scope: SubagentScope): SubagentProfi
   };
 }
 
-function isProjectProfilePathAllowed(cwd: string, target: string): boolean {
-  return isExistingPathWithinRoots(target, new Set([cwd]));
-}
-
 function readProfileDirectory(dir: string, scope: SubagentScope, cwd: string): SubagentProfile[] {
   try {
     if (!statSync(dir).isDirectory()) throw new Error(`Agent profile path is not a directory: ${dir}`);
@@ -566,14 +579,19 @@ function readProfileDirectory(dir: string, scope: SubagentScope, cwd: string): S
   }
   // Keep an intentional symlink outside cwd excluded, but propagate failures
   // to resolve an existing directory instead of falling back to a lower scope.
-  if (scope !== "global" && !isPathWithinRoots(realpathSync(dir), new Set([realpathSync(cwd)]))) return [];
+  if (scope !== "global") {
+    const allowedRoot = scope === "roster" ? getRepositoryRosterRoot() : realpathSync(cwd);
+    if (!allowedRoot || !isPathWithinRoots(realpathSync(dir), new Set([allowedRoot]))) return [];
+  }
   return readdirSync(dir, { withFileTypes: true })
     .filter((entry) => entry.isFile() && entry.name.endsWith(".md"))
     .map((entry) => parseProfileFile(join(dir, entry.name), scope));
 }
 
 function profileDirectories(cwd: string): Array<[string, Exclude<SubagentScope, "builtin">]> {
+  const rosterRoot = getRepositoryRosterRoot();
   return [
+    ...(rosterRoot ? [[join(rosterRoot, "agents"), "roster"] as [string, "roster"]] : []),
     [join(getAgentDir(), "agents"), "global"],
     [join(resolve(cwd), ".agents", "agents"), "workspace"],
     [join(resolve(cwd), ".pi", "agents"), "project"],
@@ -626,14 +644,21 @@ function assertProfileName(name: string): string {
 }
 
 function writableProfileDirectory(cwd: string, scope: SubagentWritableScope): string {
+  if (scope === "roster") {
+    const root = getRepositoryRosterRoot();
+    if (!root) throw new Error("Repository roster is unavailable");
+    return join(root, "agents");
+  }
   if (scope === "global") return join(getAgentDir(), "agents");
   if (scope === "project") return join(resolve(cwd), ".pi", "agents");
-  throw new Error("Agent scope must be global or project");
+  throw new Error("Agent scope must be roster, global, or project");
 }
 
 function assertWritableProfileDirectory(cwd: string, scope: SubagentWritableScope): string {
   const dir = writableProfileDirectory(cwd, scope);
   if (scope === "global") return dir;
+  const allowedRoot = scope === "roster" ? getRepositoryRosterRoot() : cwd;
+  if (!allowedRoot) throw new Error("Repository roster is unavailable");
 
   let existingAncestor = dir;
   while (!existsSync(existingAncestor)) {
@@ -641,10 +666,18 @@ function assertWritableProfileDirectory(cwd: string, scope: SubagentWritableScop
     if (parent === existingAncestor) throw new Error("Agent profile directory is outside the project root");
     existingAncestor = parent;
   }
-  if (!isProjectProfilePathAllowed(cwd, existingAncestor)) {
-    throw new Error("Agent profile directory is outside the project root");
+  if (!isExistingPathWithinRoots(existingAncestor, new Set([allowedRoot]))) {
+    throw new Error(`Agent profile directory is outside the ${scope === "roster" ? "repository roster" : "project root"}`);
   }
   return dir;
+}
+
+function assertRegularRosterProfile(filePath: string): void {
+  try {
+    if (!lstatSync(filePath).isFile()) throw new Error("Repository roster profile must be a regular file");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
 }
 
 export function saveSubagentProfile(
@@ -657,15 +690,19 @@ export function saveSubagentProfile(
   const extensionTools = [...new Set(profile.extensionTools ?? [])];
   const dir = assertWritableProfileDirectory(cwd, scope);
   const filePath = join(dir, `${name}.md`);
+  if (scope === "roster") assertRegularRosterProfile(filePath);
   const stored = readStoredFrontmatter(filePath);
   const selectedSkills = profile.selectedSkills === undefined
-    ? ("pi_web_selected_skills" in stored ? parseSelectedSkills(stored.pi_web_selected_skills) : undefined)
-    : parseSelectedSkills(profile.selectedSkills);
+    ? ("pi_web_selected_skills" in stored ? parseSelectedSkills(stored.pi_web_selected_skills, filePath) : undefined)
+    : parseSelectedSkills(profile.selectedSkills, filePath);
   const selectedExtensionTools = profile.selectedExtensionTools === undefined
     ? ("pi_web_selected_extension_tools" in stored
         ? parseSelectedExtensionTools(stored.pi_web_selected_extension_tools) : undefined)
     : parseSelectedExtensionTools(profile.selectedExtensionTools);
   if (selectedSkills === null || selectedExtensionTools === null) throw new Error("Invalid selected agent resources");
+  if (scope === "roster" && selectedExtensionTools?.length) {
+    throw new Error("Repository roster profiles cannot store machine-local extension tool paths");
+  }
   if (profile.thinking && !THINKING_LEVELS.has(profile.thinking)) {
     throw new Error(`Invalid thinking level: ${profile.thinking}`);
   }
@@ -684,6 +721,12 @@ export function saveSubagentProfile(
   const model = profile.model?.trim() || undefined;
   const loadSkills = profile.loadSkills === true;
   const loadExtensions = profile.loadExtensions === true;
+  if (scope === "roster" && loadSkills && selectedSkills === undefined) {
+    throw new Error("Repository roster profiles require an explicit selected skills list");
+  }
+  if (scope === "roster" && loadExtensions) {
+    throw new Error("Repository roster profiles cannot load unscoped extensions");
+  }
   const fastMode = profile.fastMode ?? booleanValue(stored.pi_web_fast_mode, false);
   const promptMode = profile.promptMode === "replace" ? "replace" : "append";
   const requestedChildren = profile.orchestration == null
@@ -710,9 +753,11 @@ export function saveSubagentProfile(
     throw new Error(`Orchestrator context providers must be an acyclic graph of unique allowed child profiles with at most ${MAX_SUBAGENT_DEPENDENCIES} providers per child`);
   }
   mkdirSync(dir, { recursive: true });
-  if (scope === "project" && !isProjectProfilePathAllowed(cwd, dir)) {
-    throw new Error("Agent profile directory is outside the project root");
+  if (scope !== "global" && !isExistingPathWithinRoots(dir,
+    new Set([scope === "roster" ? getRepositoryRosterRoot()! : cwd]))) {
+    throw new Error(`Agent profile directory is outside the ${scope === "roster" ? "repository roster" : "project root"}`);
   }
+  if (scope === "roster") assertRegularRosterProfile(filePath);
   if (
     profile.orchestration === undefined
     && Object.prototype.hasOwnProperty.call(stored, "pi_web_orchestration")
@@ -757,7 +802,16 @@ export function saveSubagentProfile(
   if (profile.isolation) managed.isolation = profile.isolation;
   if (profile.persistSession !== undefined) managed.persist_session = profile.persistSession;
   if (orchestrationField !== undefined) managed.pi_web_orchestration = orchestrationField;
-  if (selectedSkills !== undefined) managed.pi_web_selected_skills = selectedSkills;
+  if (selectedSkills !== undefined) {
+    const linkedGlobalRoster = scope === "global" && realpathSync(dir) !== resolve(dir);
+    const savedSkills = scope === "project" || scope === "roster" || linkedGlobalRoster
+      ? portableSelectedSkillReferences(dirname(realpathSync(dir)), selectedSkills)
+      : selectedSkills;
+    if (scope === "roster" && savedSkills.some((path) => isAbsolute(path))) {
+      throw new Error("Repository roster profiles may select only skills inside the repository roster");
+    }
+    managed.pi_web_selected_skills = savedSkills;
+  }
   else if ("pi_web_selected_skills" in stored) managed.pi_web_selected_skills = stored.pi_web_selected_skills;
   if (selectedExtensionTools !== undefined) managed.pi_web_selected_extension_tools = selectedExtensionTools;
   else if ("pi_web_selected_extension_tools" in stored) managed.pi_web_selected_extension_tools = stored.pi_web_selected_extension_tools;
@@ -797,6 +851,7 @@ export function saveSubagentProfile(
 export function deleteSubagentProfile(cwd: string, scope: SubagentWritableScope, name: string): void {
   const safeName = assertProfileName(name);
   const filePath = join(assertWritableProfileDirectory(cwd, scope), `${safeName}.md`);
+  if (scope === "roster") assertRegularRosterProfile(filePath);
   if (existsSync(filePath)) unlinkSync(filePath);
 }
 

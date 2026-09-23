@@ -270,19 +270,19 @@ test("profiles route rejects missing paths, malformed profiles, and unsafe names
 
   response = await PUT(jsonRequest("PUT", { cwd, scope: "workspace", profile: profile() }));
   assert.equal(response.status, 400);
-  assert.deepEqual(await response.json(), { error: "scope must be global or project" });
+  assert.deepEqual(await response.json(), { error: "scope must be roster, global, or project" });
 
   response = await PUT(jsonRequest("PUT", { cwd, scope: "builtin", profile: profile() }));
   assert.equal(response.status, 400);
-  assert.deepEqual(await response.json(), { error: "scope must be global or project" });
+  assert.deepEqual(await response.json(), { error: "scope must be roster, global, or project" });
 
   response = await PATCH(jsonRequest("PATCH", { cwd, scope: "workspace", name: "explore", enabled: false }));
   assert.equal(response.status, 400);
-  assert.deepEqual(await response.json(), { error: "scope must be global, project, or builtin" });
+  assert.deepEqual(await response.json(), { error: "scope must be roster, global, project, or builtin" });
 
   response = await DELETE(jsonRequest("DELETE", { cwd, scope: "builtin", name: "Explore" }));
   assert.equal(response.status, 400);
-  assert.deepEqual(await response.json(), { error: "scope must be global or project" });
+  assert.deepEqual(await response.json(), { error: "scope must be roster, global, or project" });
 
   response = await PATCH(jsonRequest("PATCH", { cwd, scope: "project", name: "missing", enabled: false }));
   assert.equal(response.status, 404);

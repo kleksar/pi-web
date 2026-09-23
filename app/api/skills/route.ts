@@ -6,6 +6,7 @@ import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { loadSkillsWithInstallInfo } from "@/lib/skills-service";
 import { setDisableModelInvocation } from "@/lib/skill-frontmatter";
 import { getAllowedFileRoots, isExistingFilePathAllowed } from "@/lib/file-access";
+import { isRepositoryRosterSkillPath } from "@/lib/repository-roster";
 
 export const dynamic = "force-dynamic";
 
@@ -35,6 +36,9 @@ export async function PATCH(req: Request) {
     const { filePath, disableModelInvocation } = body;
     if (!filePath) return NextResponse.json({ error: "filePath required" }, { status: 400 });
     if (!existsSync(filePath)) return NextResponse.json({ error: "file not found" }, { status: 404 });
+    if (isRepositoryRosterSkillPath(filePath)) {
+      return NextResponse.json({ error: "Repository-owned skills are edited in Git, not in this panel" }, { status: 403 });
+    }
     const allowedRoots = new Set(await getAllowedFileRoots());
     allowedRoots.add(getAgentDir());
     // Globally installed skills live in ~/.agents/skills and are symlinked into
