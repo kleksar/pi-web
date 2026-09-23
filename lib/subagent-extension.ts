@@ -16,7 +16,7 @@ export const HOST_SUBAGENT_EXTENSION_NAME = "pi-web-subagents";
 const HOST_SUBAGENT_EXTENSION_PATH = `<inline:${HOST_SUBAGENT_EXTENSION_NAME}>`;
 const SUBAGENT_TOOL_NAMES = new Set<string>(SUBAGENT_CONTROL_TOOL_NAMES);
 const LEGACY_SUBAGENT_PACKAGE_NAME = "pi-subagents";
-const TERMINAL_SUBAGENT_STATUSES = new Set<SubagentRunInfo["status"]>(["completed", "failed", "aborted", "interrupted"]);
+const TERMINAL_SUBAGENT_STATUSES = new Set<SubagentRunInfo["status"]>(["completed", "needs_context", "failed", "aborted", "interrupted"]);
 
 export interface SubagentToolDetails {
   kind: "pi-web-subagent";
@@ -28,6 +28,8 @@ export interface SubagentToolDetails {
   createdAt: string;
   completedAt?: string;
   error?: string;
+  contextRequest?: SubagentRunInfo["contextRequest"];
+  contextFor?: string;
   worktreePath?: string;
   worktreeBranch?: string;
   worktreeCleanupError?: string;
@@ -38,6 +40,7 @@ export interface StartSubagentRequest {
   parentToolCallId: string;
   profile: string;
   task: string;
+  contextFor?: string;
   inputFiles?: string[];
   description: string;
   runInBackground?: boolean;
@@ -82,6 +85,8 @@ export interface SubagentExtensionOptions {
   allowedChildren?: readonly string[];
   /** Consumer profile -> producer profiles, from the pinned orchestrator policy. */
   dependencies?: Readonly<Record<string, readonly string[]>>;
+  /** Consumer -> siblings whose context can be requested after starting. */
+  contextProviders?: Readonly<Record<string, readonly string[]>>;
 }
 
 function dependencyDescription(dependencies: SubagentExtensionOptions["dependencies"]): string {
@@ -91,6 +96,12 @@ function dependencyDescription(dependencies: SubagentExtensionOptions["dependenc
   return `\n\nRequired results before dispatch (Pi Web checks these and passes their text to the consumer):\n${edges
     .map(([consumer, producers]) => `- ${consumer} depends on ${producers.join(", ")}`)
     .join("\n")}`;
+}
+
+function contextDescription(contextProviders: SubagentExtensionOptions["contextProviders"]): string {
+  const entries = Object.entries(contextProviders ?? {}).filter(([, providers]) => providers.length);
+  if (!entries.length) return "";
+  return `\n\nOn-demand context: ${entries.map(([consumer, providers]) => `${consumer} may request ${providers.join(", ")}`).join("; ")}. A specialist may return {"status":"needs_context","provider":"...","request":"..."}. Call the requested provider with context_for set to the requesting session ID, then resume the requester. Pi Web transfers provider output directly to the requester; no need to copy it into the resume prompt.`;
 }
 
 function agentTypeDescription(profiles: readonly SubagentProfile[]): string {
@@ -114,6 +125,8 @@ export function subagentToolDetails(run: SubagentRunInfo): SubagentToolDetails {
     createdAt: run.createdAt,
     ...(run.completedAt ? { completedAt: run.completedAt } : {}),
     ...(run.error ? { error: run.error } : {}),
+    ...(run.contextRequest ? { contextRequest: run.contextRequest } : {}),
+    ...(run.contextFor ? { contextFor: run.contextFor } : {}),
     ...(run.worktreePath ? { worktreePath: run.worktreePath } : {}),
     ...(run.worktreeBranch ? { worktreeBranch: run.worktreeBranch } : {}),
     ...(run.worktreeCleanupError ? { worktreeCleanupError: run.worktreeCleanupError } : {}),
@@ -126,8 +139,15 @@ export function subagentFinalText(run: SubagentRunInfo): string {
   }
   // Keep the session ID in the text: the model only sees `content`, never `details`, and needs it for `resume` / `get_subagent_result`.
   if (run.status === "completed") {
+    if (run.contextFor) return `Subagent ${run.sessionId} completed context for ${run.contextFor}. Resume that requester using Agent(resume="${run.contextFor}", prompt="Continue").`;
     const result = run.result?.trim();
     return result ? `Subagent ${run.sessionId} completed.\n\n${result}` : `Subagent ${run.sessionId} completed without text output.`;
+  }
+  if (run.status === "needs_context") {
+    const requested = run.contextRequest;
+    return requested
+      ? `Subagent ${run.sessionId} needs context from ${requested.provider}: ${requested.request}${requested.missingFiles?.length ? ` (files: ${requested.missingFiles.join(", ")})` : ""}. Call Agent(subagent_type="${requested.provider}", context_for="${run.sessionId}", prompt=${JSON.stringify(requested.request)}) and then resume ${run.sessionId}.`
+      : `Subagent ${run.sessionId} needs context but its request is invalid.`;
   }
   if (run.status === "aborted") return `Subagent ${run.sessionId} was stopped.`;
   if (run.status === "interrupted") return `Subagent ${run.sessionId} was interrupted before completion.`;
@@ -183,7 +203,7 @@ export function createSubagentExtension(
       pi.registerTool(defineTool({
         name: "Agent",
         label: "Agent",
-        description: `Delegate a focused task to a configured subagent. Each subagent runs as a full, inspectable Pi session.${allowedChildren === null ? " Use background mode for independent work and foreground mode when the result is needed immediately." : ""}\n\nAvailable agent types:\n${agentTypeDescription(profiles)}${allowedChildren === null ? "" : dependencyDescription(options?.dependencies)}`,
+        description: `Delegate a focused task to a configured subagent. Each subagent runs as a full, inspectable Pi session.${allowedChildren === null ? " Use background mode for independent work and foreground mode when the result is needed immediately." : ""}\n\nAvailable agent types:\n${agentTypeDescription(profiles)}${allowedChildren === null ? "" : dependencyDescription(options?.dependencies)}${contextDescription(options?.contextProviders)}`,
         promptSnippet: "Delegate a focused task to an inspectable subagent session",
         promptGuidelines: [
           "Use Agent for a focused task that benefits from an isolated context.",
@@ -198,6 +218,7 @@ export function createSubagentExtension(
           subagent_type: Type.Optional(Type.String({ description: `Configured agent profile. Available types: ${availableTypes}.${allowedChildren === null ? " Default: general-purpose." : ""}` })),
           prompt: Type.String({ description: "The complete task for the subagent." }),
           resume: Type.Optional(Type.String({ description: "Existing subagent session ID to continue instead of creating a new session." })),
+          context_for: Type.Optional(Type.String({ description: "For an on-demand context request, the requesting sibling's session ID. The provider's full result is transferred by Pi Web and is hidden from this coordinator's tool result." })),
           description: Type.String({ description: "Short activity label shown in the UI." }),
           ...(allowedChildren === null ? rootOnlyParameters : {}),
         }),
@@ -212,6 +233,7 @@ export function createSubagentExtension(
               max_turns?: number;
               inherit_context?: boolean;
               isolation?: string;
+              context_for?: string;
             };
             if (allowedChildren !== null) {
               if (overrides.input_files !== undefined && (!Array.isArray(overrides.input_files) || overrides.input_files.length > 0)) {
@@ -222,6 +244,8 @@ export function createSubagentExtension(
               }
             }
             const resume = params.resume?.trim();
+            const contextFor = overrides.context_for?.trim();
+            if (overrides.context_for !== undefined && (!contextFor || resume)) throw new Error("context_for requires a new provider run and a requester session ID");
             const callerSessionId = ctx.sessionManager.getSessionId();
             if (!callerSessionId) throw new Error("Parent session is unavailable");
             const profile = params.subagent_type?.trim() || "general-purpose";
@@ -254,6 +278,7 @@ export function createSubagentExtension(
               parentToolCallId: toolCallId,
               profile,
               task: params.prompt,
+              ...(contextFor ? { contextFor } : {}),
               ...(allowedChildren === null && overrides.input_files ? { inputFiles: overrides.input_files } : {}),
               description: params.description,
               ...(overrides.run_in_background !== undefined ? { runInBackground: overrides.run_in_background } : {}),

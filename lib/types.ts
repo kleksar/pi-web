@@ -336,6 +336,7 @@ export type SubagentSessionStatus =
   | "starting"
   | "queued"
   | "running"
+  | "needs_context"
   | "completed"
   | "failed"
   | "aborted"

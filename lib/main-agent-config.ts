@@ -35,22 +35,22 @@ function uniqueStrings(value: unknown, label: string, profileNames = false): str
   });
 }
 
-function parseDependencies(value: unknown, allowedChildren: readonly string[]): Record<string, string[]> {
-  if (!record(value)) throw new Error("Main dependencies must be an object");
+function parseDependencies(value: unknown, allowedChildren: readonly string[], label = "Main dependencies"): Record<string, string[]> {
+  if (!record(value)) throw new Error(`${label} must be an object`);
   const known = new Map(allowedChildren.map((name) => [name.toLowerCase(), name]));
   const dependencies: Record<string, string[]> = Object.create(null);
   const seen = new Set<string>();
   for (const [rawConsumer, rawProducers] of Object.entries(value)) {
     const consumer = known.get(rawConsumer.toLowerCase());
-    if (!consumer || seen.has(consumer.toLowerCase())) throw new Error("Main dependency names must be allowed child agents");
+    if (!consumer || seen.has(consumer.toLowerCase())) throw new Error(`${label} must name allowed child agents`);
     seen.add(consumer.toLowerCase());
-    const producers = uniqueStrings(rawProducers, `Dependencies for ${consumer}`, true);
+    const producers = uniqueStrings(rawProducers, `${label} for ${consumer}`, true);
     if (producers.length > MAX_SUBAGENT_DEPENDENCIES) {
-      throw new Error(`Each child can have at most ${MAX_SUBAGENT_DEPENDENCIES} dependencies`);
+      throw new Error(`${label} can have at most ${MAX_SUBAGENT_DEPENDENCIES} agents per child`);
     }
     dependencies[consumer] = producers.map((producer) => {
       const knownProducer = known.get(producer.toLowerCase());
-      if (!knownProducer || knownProducer === consumer) throw new Error("Main dependencies must refer to other allowed children");
+      if (!knownProducer || knownProducer === consumer) throw new Error(`${label} must refer to other allowed children`);
       return knownProducer;
     });
   }
@@ -71,7 +71,7 @@ function parseDependencies(value: unknown, allowedChildren: readonly string[]): 
       if (next === 0) ready.push(consumer);
     }
   }
-  if (visited !== allowedChildren.length) throw new Error("Main dependencies contain a cycle");
+  if (visited !== allowedChildren.length) throw new Error(`${label} contain a cycle`);
   return dependencies;
 }
 
@@ -108,9 +108,18 @@ export function validateMainAgentConfig(value: unknown): MainAgentConfig {
       const dependencies = Object.hasOwn(value.orchestration, "dependencies")
         ? parseDependencies(value.orchestration.dependencies, children)
         : undefined;
+      const contextProviders = Object.hasOwn(value.orchestration, "contextProviders")
+        ? parseDependencies(value.orchestration.contextProviders, children, "Main on-demand context providers")
+        : undefined;
+      if (contextProviders) {
+        const combined = Object.fromEntries(children.map((child) => [child,
+          [...new Set([...(dependencies?.[child] ?? []), ...(contextProviders[child] ?? [])])]]));
+        parseDependencies(combined, children, "Main combined orchestration links");
+      }
       config.orchestration = {
         allowedChildren: children,
         ...(dependencies !== undefined ? { dependencies } : {}),
+        ...(contextProviders !== undefined ? { contextProviders } : {}),
       };
     }
   }

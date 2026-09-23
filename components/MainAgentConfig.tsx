@@ -37,13 +37,21 @@ function normalizedDependencies(
 function dependencyIssue(orchestration: SubagentOrchestration): string | null {
   const known = new Set(orchestration.allowedChildren.map((name) => name.toLowerCase()));
   const graph = orchestration.dependencies ?? {};
-  for (const [consumer, producers] of Object.entries(graph)) {
-    if (!known.has(consumer.toLowerCase())) return `Unknown child: ${consumer}`;
-    if (producers.length > 8) return `${consumer} has more than 8 dependencies`;
-    for (const producer of producers) {
-      if (!known.has(producer.toLowerCase())) return `Unknown dependency: ${producer}`;
-      if (consumer.toLowerCase() === producer.toLowerCase()) return `${consumer} cannot depend on itself`;
+  const providers = orchestration.contextProviders ?? {};
+  for (const edges of [graph, providers]) {
+    for (const [consumer, producers] of Object.entries(edges)) {
+      if (!known.has(consumer.toLowerCase())) return `Unknown child: ${consumer}`;
+      if (producers.length > 8) return `${consumer} has more than 8 sources`;
+      for (const producer of producers) {
+        if (!known.has(producer.toLowerCase())) return `Unknown source: ${producer}`;
+        if (consumer.toLowerCase() === producer.toLowerCase()) return `${consumer} cannot depend on itself`;
+      }
     }
+  }
+  for (const child of orchestration.allowedChildren) {
+    const prerequisites = Object.entries(graph).find(([name]) => name.toLowerCase() === child.toLowerCase())?.[1] ?? [];
+    const optional = Object.entries(providers).find(([name]) => name.toLowerCase() === child.toLowerCase())?.[1] ?? [];
+    if (new Set([...prerequisites, ...optional].map((name) => name.toLowerCase())).size > 8) return `${child} has more than 8 sources`;
   }
   const visiting = new Set<string>();
   const visited = new Set<string>();
@@ -52,8 +60,9 @@ function dependencyIssue(orchestration: SubagentOrchestration): string | null {
     if (visiting.has(lower)) return true;
     if (visited.has(lower)) return false;
     visiting.add(lower);
-    const producers = Object.entries(graph).find(([key]) => key.toLowerCase() === lower)?.[1] ?? [];
-    for (const producer of producers) if (visit(producer)) return true;
+    const prerequisites = Object.entries(graph).find(([key]) => key.toLowerCase() === lower)?.[1] ?? [];
+    const optional = Object.entries(providers).find(([key]) => key.toLowerCase() === lower)?.[1] ?? [];
+    for (const producer of new Set([...prerequisites, ...optional].map((value) => value.toLowerCase()))) if (visit(producer)) return true;
     visiting.delete(lower);
     visited.add(lower);
     return false;
@@ -186,11 +195,13 @@ export function MainAgentConfig({ cwd, sessionId = null, onClose, onReloaded, em
       ? [...current.orchestration.allowedChildren, name]
       : current.orchestration.allowedChildren.filter((child) => child.toLowerCase() !== name.toLowerCase());
     const dependencies = normalizedDependencies(next, current.orchestration.dependencies);
+    const contextProviders = normalizedDependencies(next, current.orchestration.contextProviders);
     return {
       ...current,
       orchestration: {
         allowedChildren: next,
         ...(dependencies ? { dependencies } : {}),
+        ...(contextProviders ? { contextProviders } : {}),
       },
     };
   });
@@ -340,6 +351,16 @@ export function MainAgentConfig({ cwd, sessionId = null, onClose, onReloaded, em
                     })}
                   </section>
                 )}
+                {allowedChildren.length > 1 && <section className="main-agent-config-dependencies">
+                  <strong>{t("map.availableProviders")}</strong>
+                  <p>{t("map.contextProviderHint")}</p>
+                  {Object.entries(draft.orchestration.contextProviders ?? {}).map(([consumer, providers]) => (
+                    <p key={consumer}>{providers.map((provider) => `${provider} → ${consumer}`).join(", ")}</p>
+                  ))}
+                  {onOpenMap && <ConfigButton size="small" onClick={() => {
+                    if (!dirty || window.confirm(t("main.unsavedMapConfirm"))) onOpenMap();
+                  }}>{t("main.openMap")}</ConfigButton>}
+                </section>}
               </>
             )}
             {missingChildren.length > 0 && <p role="alert" className="main-agent-config-error">{t("agents.unavailableChildren", { names: missingChildren.join(", ") })}</p>}

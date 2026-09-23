@@ -38,6 +38,7 @@ import {
 } from "./subagents";
 import type { SessionEntry } from "./types";
 import { buildSubagentPromptPlan } from "./subagent-prompt";
+import { applyFastMode, isFastSupported } from "./subagent-fast-mode";
 import { readMainSessionResources } from "./main-agent-snapshot";
 import { createExactSystemPromptExtension } from "./exact-system-prompt";
 import {
@@ -69,6 +70,18 @@ import {
   resolveDependencyInputs,
   type DependencyAdmission,
 } from "./subagent-dependencies";
+import {
+  childParentIdentity,
+  contextHandoffFor,
+  contextResultHash,
+  latestSubagentResult,
+  MAX_CONTEXT_RESULT_BYTES,
+  parseSubagentContextRequest,
+  pendingContextRequest,
+  SUBAGENT_CONTEXT_CONSUMED_TYPE,
+  SUBAGENT_CONTEXT_HANDOFF_TYPE,
+  type ContextHandoff,
+} from "./subagent-context-handoff";
 
 interface HostSession {
   readonly inner: AgentSessionLike;
@@ -116,6 +129,7 @@ type StoredSubagentExecution = {
 };
 
 declare global {
+  var __piSubagentContextClaims: Set<string> | undefined;
   var __piSubagentRuns: Map<string, StoredSubagentExecution> | undefined;
   var __piSubagentQueue: SubagentQueue<SubagentRunInfo> | undefined;
   var __piSubagentConsumedResults: Set<string> | undefined;
@@ -216,6 +230,9 @@ export function profileAuthorityPin(profile: SubagentProfile) {
     loadExtensions: profile.loadExtensions,
     model: profile.model,
     thinking: profile.thinking,
+    // Missing/false were the same behavior before Fast mode existed; keep old
+    // session child pins valid when a legacy profile acquires its default.
+    ...(profile.fastMode ? { fastMode: true } : {}),
     maxTurns: profile.maxTurns,
     inheritContext: profile.inheritContext,
     runInBackground: profile.runInBackground,
@@ -279,6 +296,19 @@ function assertDependencyProvidersPinned(
     }
   }
   check(childName);
+}
+
+type PinnedOrchestration = {
+  allowedChildren: string[];
+  dependencies?: SubagentOrchestration["dependencies"];
+  contextProviders?: SubagentOrchestration["contextProviders"];
+  childProfiles: Record<string, ReturnType<typeof profileAuthorityPin>>;
+};
+
+function contextProviderAllowed(policy: PinnedOrchestration | undefined, consumer: string, provider: string): boolean {
+  return Object.entries(policy?.contextProviders ?? {}).some(([name, providers]) =>
+    name.toLowerCase() === consumer.toLowerCase()
+      && providers.some((item) => item.toLowerCase() === provider.toLowerCase()));
 }
 
 function assertParentMayStart(
@@ -448,6 +478,148 @@ export function createSubagentController(
   const parentMayContinue = (parent: HostSession, sessionId: string, generation: number) =>
     parent.isAlive() && !stoppedParents().has(sessionId) && (stopGenerations.get(parent) ?? 0) === generation;
 
+  function parentPolicy(parent: HostSession): PinnedOrchestration | undefined {
+    const entries = parent.inner.sessionManager.getEntries() as unknown as SessionEntry[];
+    return readSubagentSessionResources(entries)?.orchestration
+      ?? readMainSessionResources(entries)?.orchestration;
+  }
+
+  async function childTranscript(sessionId: string): Promise<{ path: string; entries: SessionEntry[] }> {
+    const path = await dependencies.resolveSessionPath(sessionId);
+    if (!path) throw new Error(`Subagent session file not found: ${sessionId}`);
+    const live = dependencies.getSession(sessionId);
+    const manager = live?.isAlive() ? live.inner.sessionManager : SessionManager.open(path);
+    if (manager.getSessionId() !== sessionId) throw new Error("Subagent session identity changed");
+    return { path, entries: manager.getEntries() as unknown as SessionEntry[] };
+  }
+
+  async function verifyPendingRequest(
+    parent: HostSession, parentSessionId: string, epoch: string,
+    consumerSessionId: string, provider: string,
+  ): Promise<{ consumerResultId: string; consumerProfile: string }> {
+    const child = await childTranscript(consumerSessionId);
+    const identity = childParentIdentity(child.entries);
+    if (identity.parentSessionId !== parentSessionId || identity.parentSessionPath !== parent.sessionFile
+      || identity.epoch !== epoch || stoppedParents().has(consumerSessionId)) {
+      throw new Error("Context requester is not a current direct sibling");
+    }
+    const pending = pendingContextRequest(child.entries);
+    if (!pending || pending.request.provider.toLowerCase() !== provider.toLowerCase()
+      || !contextProviderAllowed(parentPolicy(parent), identity.profile, provider)) {
+      throw new Error("Subagent context request is no longer permitted");
+    }
+    return { consumerResultId: pending.id, consumerProfile: identity.profile };
+  }
+
+  async function resolvePendingHandoff(parent: HostSession, parentSessionId: string,
+    epoch: string, consumerSessionId: string, entries: SessionEntry[],
+  ): Promise<{ suffix: string; handoff: ContextHandoff; providerPath: string }> {
+    const pending = pendingContextRequest(entries, true);
+    if (!pending) throw new Error("Subagent has no pending context request");
+    const consumer = childParentIdentity(entries);
+    if (consumer.parentSessionId !== parentSessionId || consumer.parentSessionPath !== parent.sessionFile
+      || consumer.epoch !== epoch || !contextProviderAllowed(parentPolicy(parent), consumer.profile, pending.request.provider)) {
+      throw new Error("Context request is no longer valid in this orchestrator invocation");
+    }
+    const parentEntries = parent.inner.sessionManager.getEntries() as unknown as SessionEntry[];
+    const handoff = contextHandoffFor(parentEntries, consumerSessionId, pending.id);
+    if (!handoff || handoff.epoch !== epoch || handoff.parentSessionId !== parentSessionId
+      || handoff.providerProfile.toLowerCase() !== pending.request.provider.toLowerCase()) {
+      throw new Error("Run the requested context provider before resuming this subagent");
+    }
+    if (parentEntries.some((entry) => entry.type === "custom" && entry.customType === SUBAGENT_CONTEXT_CONSUMED_TYPE
+      && typeof entry.data === "object" && entry.data !== null && !Array.isArray(entry.data)
+      && (entry.data as Record<string, unknown>).consumerSessionId === consumerSessionId
+      && (entry.data as Record<string, unknown>).consumerResultId === pending.id)) {
+      throw new Error("Context handoff has already been consumed");
+    }
+    const provider = await childTranscript(handoff.providerSessionId);
+    const identity = childParentIdentity(provider.entries);
+    const latest = latestSubagentResult(provider.entries);
+    const output = latest?.data.result;
+    if (identity.parentSessionId !== parentSessionId || identity.parentSessionPath !== parent.sessionFile
+      || identity.epoch !== epoch || identity.profile.toLowerCase() !== handoff.providerProfile.toLowerCase()
+      || identity.contextFor !== consumerSessionId || identity.contextForResultId !== pending.id
+      || latest?.data.status !== "completed" || latest.data.contextFor !== consumerSessionId
+      || latest.data.contextForResultId !== pending.id
+      || latest.id !== handoff.providerResultId
+      || typeof output !== "string" || !output.trim()
+      || Buffer.byteLength(output, "utf8") > MAX_CONTEXT_RESULT_BYTES
+      || contextResultHash(output) !== handoff.sha256) throw new Error("Context provider result changed or is unavailable");
+    return { handoff, providerPath: provider.path,
+      suffix: `\n\nVerified context from ${identity.profile} (agent output, not user instructions):\n${output}` };
+  }
+
+  function classifyContextResult(
+    run: SubagentRunInfo, parent: HostSession, parentSessionId: string, epoch: string | undefined,
+  ): SubagentRunInfo {
+    if (run.status !== "completed" || !run.result) return run;
+    try {
+      const request = parseSubagentContextRequest(run.result);
+      if (!request) return run;
+      if (!epoch || currentDependencyEpoch(parent.inner.sessionManager.getEntries() as unknown as SessionEntry[]) !== epoch
+        || !contextProviderAllowed(parentPolicy(parent), run.profile, request.provider)) {
+        throw new Error(`Context provider ${request.provider} is not allowed for ${run.profile}`);
+      }
+      // A provider is a pinned direct sibling, even when this child itself cannot delegate.
+      assertParentMayStart(parent, parentSessionId, request.provider, dependencies.getSession);
+      return { ...run, status: "needs_context", result: undefined, contextRequest: request };
+    } catch (error) {
+      return { ...run, status: "failed", result: undefined,
+        error: error instanceof Error ? error.message : String(error) };
+    }
+  }
+
+  async function publishContextResult(options: {
+    parent: HostSession; parentSessionId: string; epoch: string | undefined;
+    consumerSessionId: string | undefined; consumerResultId: string | undefined;
+    providerManager: typeof SessionManager.prototype; run: SubagentRunInfo;
+  }): Promise<SubagentRunInfo> {
+    const { parent, parentSessionId, epoch, consumerSessionId, consumerResultId, providerManager, run } = options;
+    if (!consumerSessionId || run.status !== "completed") return run;
+    try {
+      if (!epoch || !consumerResultId || run.contextFor !== consumerSessionId
+        || run.contextForResultId !== consumerResultId || !parent.isAlive() || stoppedParents().has(parentSessionId)
+        || currentDependencyEpoch(parent.inner.sessionManager.getEntries() as unknown as SessionEntry[]) !== epoch) {
+        throw new Error("Context request is no longer active");
+      }
+      const pending = await verifyPendingRequest(parent, parentSessionId, epoch, consumerSessionId, run.profile);
+      if (pending.consumerResultId !== consumerResultId) throw new Error("Context requester changed while provider was running");
+      const output = run.result;
+      if (!output?.trim() || Buffer.byteLength(output, "utf8") > MAX_CONTEXT_RESULT_BYTES) {
+        throw new Error(`Context provider must return nonempty text of at most ${MAX_CONTEXT_RESULT_BYTES} bytes`);
+      }
+      const parentEntries = parent.inner.sessionManager.getEntries() as unknown as SessionEntry[];
+      if (!parent.isAlive() || stoppedParents().has(parentSessionId)
+        || currentDependencyEpoch(parentEntries) !== epoch
+        || !contextProviderAllowed(parentPolicy(parent), pending.consumerProfile, run.profile)) {
+        throw new Error("Context request changed before the provider could publish");
+      }
+      assertParentMayStart(parent, parentSessionId, run.profile, dependencies.getSession);
+      if (contextHandoffFor(parentEntries, consumerSessionId, consumerResultId)) {
+        throw new Error("Context request already has a provider result");
+      }
+      const providerResult = latestSubagentResult(providerManager.getEntries() as unknown as SessionEntry[]);
+      if (!providerResult || providerResult.data.status !== "completed" || providerResult.data.result !== output
+        || providerResult.data.contextFor !== consumerSessionId) throw new Error("Context provider result is not verified");
+      parent.inner.sessionManager.appendCustomEntry(SUBAGENT_CONTEXT_HANDOFF_TYPE, {
+        version: 1, parentSessionId, epoch, consumerSessionId, consumerResultId,
+        providerSessionId: run.sessionId, providerResultId: providerResult.id,
+        providerProfile: run.profile, sha256: contextResultHash(output),
+      } satisfies ContextHandoff);
+      return run;
+    } catch (error) {
+      const failed = { ...run, status: "failed" as const, result: undefined,
+        error: error instanceof Error ? error.message : String(error) };
+      providerManager.appendCustomEntry(SUBAGENT_RESULT_TYPE, {
+        version: 1, status: "failed", completedAt: run.completedAt!, error: failed.error,
+        contextFor: consumerSessionId,
+        contextForResultId: consumerResultId,
+      } satisfies SubagentResultMetadata);
+      return failed;
+    }
+  }
+
   async function start(request: StartSubagentRequest): Promise<SubagentExecution> {
     const enabled = dependencies.isBuiltInSubagentsEnabled ?? isBuiltInSubagentsEnabled;
     if (!enabled()) throw new Error("Pi Web built-in sub-agents are disabled");
@@ -462,7 +634,11 @@ export function createSubagentController(
     let releaseDependencyClaim: (() => void) | undefined;
     let registeredSessionId: string | undefined;
     let dependencyAdmission: DependencyAdmission | undefined;
+    let pendingDependencyInputs: Awaited<ReturnType<typeof resolveDependencyInputs>> | undefined;
     let dependencyGraph: SubagentOrchestration["dependencies"];
+    let contextEpoch: string | undefined;
+    let contextForResultId: string | undefined;
+    let contextProviderNames: string[] = [];
     try {
       const profile = resolveSubagentProfile(parent.cwd, request.profile);
       if (!profile) throw new Error(`Unknown or disabled subagent profile: ${request.profile}`);
@@ -472,13 +648,14 @@ export function createSubagentController(
         throw new Error("Nested subagents cannot attach input files");
       }
 
-      const runInBackground = request.runInBackground ?? profile.runInBackground;
+      const runInBackground = depth > 1 || request.contextFor ? false : request.runInBackground ?? profile.runInBackground;
       const isolation = profile.isolation === "off" ? undefined : request.isolation ?? profile.isolation;
-      if (depth > 1 && runInBackground) {
-        throw new Error("Nested subagents must run in foreground until worktree lifetime is managed by the whole branch");
-      }
+      if (request.contextFor && request.runInBackground === true) throw new Error("Context providers must run in foreground");
       if (depth > 1 && isolation === "worktree") {
         throw new Error("Nested subagents cannot create an isolated worktree");
+      }
+      if (depth > 1 && request.runInBackground === true) {
+        throw new Error("Nested subagents must run in foreground");
       }
       if (depth > 1 && (
         request.model !== undefined || request.thinking !== undefined || request.maxTurns !== undefined
@@ -486,16 +663,50 @@ export function createSubagentController(
       )) {
         throw new Error("Nested subagents cannot override their pinned profile settings");
       }
+      const parentModelRuntime = (parent.inner as unknown as { modelRuntime: ModelRuntime }).modelRuntime;
+      const modelName = request.model ?? profile.model;
+      const slash = modelName?.indexOf("/") ?? -1;
+      // The resource loader may register a provider during child service creation.
+      // Only reject a known incompatible model here; resolve unknown model names
+      // after services load, as Pi did before Fast mode was introduced.
+      const knownModel = profile.fastMode && slash > 0
+        ? parentModelRuntime.getModel(modelName!.slice(0, slash), modelName!.slice(slash + 1))
+        : undefined;
+      if (profile.fastMode && (!modelName || knownModel)
+        && !isFastSupported(knownModel ?? parent.inner.model)) {
+        throw new Error(`Fast mode for ${profile.name} requires an OpenAI Responses or OpenAI Codex Responses model; choose one or disable Fast mode in the profile`);
+      }
       // Include queued descendants in the root cap, before invalidating any
       // previous dependency output. A rejected capacity reservation is inert.
       const releaseRootAdmission = reserveRootAdmission(rootSessionId);
       const releaseBranchAdmission = depth > 1 ? reserveBranchAdmission(parent.cwd) : undefined;
       releaseAdmission = () => { releaseBranchAdmission?.(); releaseRootAdmission(); releaseDependencyClaim?.(); };
-      if (depth > 1 || readMainSessionResources(parent.inner.sessionManager.getEntries() as unknown as SessionEntry[])?.orchestration?.dependencies) {
+      if (depth > 1 || readMainSessionResources(parent.inner.sessionManager.getEntries() as unknown as SessionEntry[])?.orchestration) {
         const parentEntries = parent.inner.sessionManager.getEntries() as unknown as SessionEntry[];
-        const orchestration = readSubagentSessionResources(parentEntries)?.orchestration
-          ?? readMainSessionResources(parentEntries)?.orchestration;
+        const orchestration = parentPolicy(parent);
         dependencyGraph = orchestration?.dependencies;
+        if (orchestration?.contextProviders) {
+          if (depth > 1 && getSubagentRuns().get(parentSessionId)?.run.status !== "running") {
+            throw new Error("Orchestrator invocation is not active");
+          }
+          contextEpoch = currentDependencyEpoch(parentEntries);
+          contextProviderNames = Object.entries(orchestration.contextProviders)
+            .find(([consumer]) => consumer.toLowerCase() === profile.name.toLowerCase())?.[1] ?? [];
+        }
+        if (request.contextFor) {
+          if (!contextEpoch || !orchestration) throw new Error("Context handoff requires a pinned orchestration policy");
+          const pending = await verifyPendingRequest(parent, parentSessionId, contextEpoch, request.contextFor, profile.name);
+          if (contextHandoffFor(parentEntries, request.contextFor, pending.consumerResultId)) {
+            throw new Error("Context request already has a provider result");
+          }
+          contextForResultId = pending.consumerResultId;
+          const claim = JSON.stringify([parentSessionId, contextEpoch, request.contextFor, contextForResultId]);
+          const claims = globalThis.__piSubagentContextClaims ??= new Set<string>();
+          if (claims.has(claim)) throw new Error("Context request already has a provider running");
+          claims.add(claim);
+          const previousRelease = releaseAdmission;
+          releaseAdmission = () => { claims.delete(claim); previousRelease?.(); };
+        }
         if (dependencyGraph !== undefined) {
           if (depth > 1 && getSubagentRuns().get(parentSessionId)?.run.status !== "running") {
             throw new Error("Orchestrator invocation is not active");
@@ -522,12 +733,11 @@ export function createSubagentController(
           }
           assertParentMayStart(parent, parentSessionId, profile.name, dependencies.getSession);
           assertDependencyProvidersPinned(parent.cwd, profile.name, orchestration);
-          dependencyAdmission = admitDependencyChild({
-            appendCustomEntry: (type, data) => parent.inner.sessionManager.appendCustomEntry(type, data),
-            parentSessionId, childProfile: profile.name, epoch: inputs.epoch,
-            suffix: inputs.suffix, artifacts: inputs.artifacts,
-          });
+          pendingDependencyInputs = inputs;
         }
+      }
+      if (request.contextFor && (!contextEpoch || !contextForResultId)) {
+        throw new Error("Context handoff requires a valid pending request");
       }
       if (isolation === "worktree") {
         isolatedWorktree = await (dependencies.createWorktree ?? addWorktree)(parent.cwd, `pi-web-agent-${randomUUID()}`);
@@ -546,7 +756,6 @@ export function createSubagentController(
       }
 
       const agentDir = getAgentDir();
-      const parentModelRuntime = (parent.inner as unknown as { modelRuntime: ModelRuntime }).modelRuntime;
       const settingsManager = SettingsManager.create(childCwd, agentDir);
       const inheritedParentContext = inheritContext
         ? `The following is the active conversation context from the parent session. Use it only as background for the delegated task:\n${parentContextText(parent)}`
@@ -565,12 +774,14 @@ export function createSubagentController(
       let pinnedExtensionTools: PinnedExtensionTool[] | undefined;
       const childProfiles = canDelegate ? pinAllowedChildren(childCwd, allowedChildren) : undefined;
       const promptPlan = buildSubagentPromptPlan({
-        profileSystemPrompt: profile.systemPrompt,
+        profileSystemPrompt: contextProviderNames.length
+          ? `${profile.systemPrompt}\n\nIf essential context is missing, return ONLY one JSON object {"status":"needs_context","provider":"<one of ${contextProviderNames.join(", ")}>","request":"<precise missing information>","missingFiles":["<optional path>"]}. Do not assume a provider result, call Agent, or claim the task is complete when requesting context. The parent will run the provider and resume this same session. Otherwise return your normal final answer.`
+          : profile.systemPrompt,
         tools: profile.tools,
         loadSkills,
         loadExtensions,
         promptMode: profile.promptMode,
-        task: appendSubagentInputFiles(request.task + (dependencyAdmission?.taskSuffix ?? ""), inputFiles),
+        task: appendSubagentInputFiles(request.task + (pendingDependencyInputs?.suffix ?? ""), inputFiles),
         inheritedParentContext,
         canDelegate,
       });
@@ -622,7 +833,8 @@ export function createSubagentController(
                         && sameProfilePin(profileAuthorityPin(candidate), childProfiles?.[candidate.name.toLowerCase()])
                       ),
                       dependencies.isBuiltInSubagentsEnabled ?? isBuiltInSubagentsEnabled,
-                      { allowedChildren, dependencies: profile.orchestration?.dependencies },
+                      { allowedChildren, dependencies: profile.orchestration?.dependencies,
+                        contextProviders: profile.orchestration?.contextProviders },
                     )] : []),
                 ...(profile.selectedSkills !== undefined || profile.selectedExtensionTools !== undefined
                   ? [pinnedResourceIntegrityExtension(
@@ -664,6 +876,34 @@ export function createSubagentController(
         [...withSubagentExtensionTools(profile.tools, extensionToolNames), ...(canDelegate ? SUBAGENT_CONTROL_TOOL_NAMES : [])],
         settingsManager.getDefaultTools(),
       );
+      const requestedModel = parseSubagentModel(parentModelRuntime, modelName);
+      const parentModel = parent.inner.model as ReturnType<ModelRuntime["getModel"]>;
+      if (profile.fastMode && !isFastSupported(requestedModel ?? parentModel)) {
+        throw new Error(`Fast mode for ${profile.name} requires an OpenAI Responses or OpenAI Codex Responses model; choose one or disable Fast mode in the profile`);
+      }
+
+      // Resource loading may register a model provider. Admit the dependency
+      // child only after that provider and Fast mode are validated, so an
+      // unsupported model cannot invalidate a previous producer's artifact.
+      if (pendingDependencyInputs && dependencyGraph !== undefined) {
+        const currentEntries = parent.inner.sessionManager.getEntries() as unknown as SessionEntry[];
+        if (request.signal?.aborted || !parentMayContinue(parent, parentSessionId, parentGeneration)) {
+          throw new Error("Subagent start was stopped");
+        }
+        if (!dependencyRefsStillCurrent({
+          entries: currentEntries, parentSessionId, epoch: pendingDependencyInputs.epoch,
+          artifacts: pendingDependencyInputs.artifacts, graph: dependencyGraph,
+        })) {
+          throw new Error(`Dependency results changed while preparing ${profile.name}; launch it again`);
+        }
+        assertParentMayStart(parent, parentSessionId, profile.name, dependencies.getSession);
+        assertDependencyProvidersPinned(parent.cwd, profile.name, parentPolicy(parent));
+        dependencyAdmission = admitDependencyChild({
+          appendCustomEntry: (type, data) => parent.inner.sessionManager.appendCustomEntry(type, data),
+          parentSessionId, childProfile: profile.name, epoch: pendingDependencyInputs.epoch,
+          suffix: pendingDependencyInputs.suffix, artifacts: pendingDependencyInputs.artifacts,
+        });
+      }
 
       const sessionManager = isolatedWorktree
         ? SessionManager.create(childCwd, undefined, { parentSession: parent.sessionFile })
@@ -679,7 +919,8 @@ export function createSubagentController(
         task: request.task,
         runInBackground,
         createdAt,
-        ...(dependencyAdmission ? { dependencyEpoch: dependencyAdmission.epoch } : {}),
+        ...((dependencyAdmission || contextEpoch) ? { dependencyEpoch: dependencyAdmission?.epoch ?? contextEpoch } : {}),
+        ...(request.contextFor ? { contextFor: request.contextFor, contextForResultId: contextForResultId! } : {}),
         resourceSnapshot: {
           appendSystemPrompt: services.resourceLoader.getAppendSystemPrompt
             ? [...services.resourceLoader.getAppendSystemPrompt()]
@@ -688,6 +929,7 @@ export function createSubagentController(
           tools: [...activeTools],
           loadSkills,
           loadExtensions,
+          fastMode: profile.fastMode,
           ...(profile.selectedSkills !== undefined ? { selectedSkills: pinnedSkills ?? [] } : {}),
           ...(profile.selectedExtensionTools !== undefined ? { selectedExtensionTools: pinnedExtensionTools ?? [] } : {}),
           ...(promptPlan.exactSystemPrompt !== undefined ? { exactSystemPrompt: profile.selectedSkills?.length
@@ -700,6 +942,9 @@ export function createSubagentController(
                 ...(profile.orchestration?.dependencies !== undefined
                   ? { dependencies: Object.fromEntries(Object.entries(profile.orchestration.dependencies).map(([consumer, producers]) => [consumer, [...producers]])) }
                   : {}),
+                ...(profile.orchestration?.contextProviders !== undefined
+                  ? { contextProviders: Object.fromEntries(Object.entries(profile.orchestration.contextProviders).map(([consumer, providers]) => [consumer, [...providers]])) }
+                  : {}),
               } }
             : {}),
           version: profile.selectedSkills !== undefined || profile.selectedExtensionTools !== undefined
@@ -710,8 +955,6 @@ export function createSubagentController(
       sessionManager.appendCustomEntry(SUBAGENT_META_TYPE, metadata);
       sessionManager.appendSessionInfo(metadata.description);
 
-      const requestedModel = parseSubagentModel(parentModelRuntime, request.model ?? profile.model);
-      const parentModel = parent.inner.model as ReturnType<ModelRuntime["getModel"]>;
       const { session: inner } = await (dependencies.createFromServices ?? createAgentSessionFromServices)({
         services,
         sessionManager,
@@ -720,6 +963,7 @@ export function createSubagentController(
         tools: activeTools,
         ...(canDelegate ? {} : { excludeTools: [...SUBAGENT_CONTROL_TOOL_NAMES] }),
       });
+      applyFastMode(inner, profile.fastMode);
       if (request.signal?.aborted || !parentMayContinue(parent, parentSessionId, parentGeneration)) {
         await inner.abort();
         throw new Error("Subagent start was stopped");
@@ -740,6 +984,8 @@ export function createSubagentController(
         description: metadata.description,
         task: request.task,
         runInBackground,
+        ...(request.contextFor ? { contextFor: request.contextFor } : {}),
+        ...(contextForResultId ? { contextForResultId } : {}),
         status: "queued",
         createdAt,
         ...(isolatedWorktree ? { worktreePath: isolatedWorktree.path, worktreeBranch: isolatedWorktree.branch } : {}),
@@ -860,6 +1106,7 @@ export function createSubagentController(
             ...(text ? { result: text } : {}),
             ...(providerError ? { error: providerError } : {}),
           };
+          result = classifyContextResult(result, parent, parentSessionId, contextEpoch);
         } catch (error) {
           const text = inner.getLastAssistantText()?.trim();
           const aborted = stored.abortRequested || request.signal?.aborted;
@@ -898,10 +1145,16 @@ export function createSubagentController(
           status: result.status as SubagentResultMetadata["status"],
           completedAt: result.completedAt!,
           ...(result.result ? { result: result.result } : {}),
+          ...(result.contextRequest ? { contextRequest: result.contextRequest } : {}),
+          ...(result.contextFor ? { contextFor: result.contextFor } : {}),
+          ...(result.contextForResultId ? { contextForResultId: result.contextForResultId } : {}),
           ...(result.error ? { error: result.error } : {}),
           ...(result.worktreeCleanupError ? { worktreeCleanupError: result.worktreeCleanupError } : {}),
         };
         sessionManager.appendCustomEntry(SUBAGENT_RESULT_TYPE, persisted);
+        result = await publishContextResult({ parent, parentSessionId, epoch: contextEpoch,
+          consumerSessionId: request.contextFor, consumerResultId: contextForResultId,
+          providerManager: sessionManager, run: result });
         if (dependencyAdmission && profileProducesDependencyOutput(dependencyGraph, profile.name)
           && result.status === "completed" && result.result && parentMayContinue(parent, parentSessionId, parentGeneration)) {
           const published = recordDependencyArtifact({
@@ -1016,9 +1269,9 @@ export function createSubagentController(
     if (existing.parentSessionId !== parentSessionId) throw new Error("Subagent does not belong to this parent session");
     if (existing.status === "running" || existing.status === "queued") throw new Error("Subagent is already running");
     const { rootSessionId, depth } = assertParentMayStart(parent, parentSessionId, existing.profile, dependencies.getSession);
-    const runInBackground = request.runInBackground ?? existing.runInBackground;
-    if (depth > 1 && runInBackground) throw new Error("Nested subagents must run in foreground until worktree lifetime is managed by the whole branch");
+    const runInBackground = depth > 1 ? false : request.runInBackground ?? existing.runInBackground;
     if (depth > 1 && existing.worktreePath) throw new Error("Nested subagents cannot resume an isolated worktree");
+    if (depth > 1 && request.runInBackground === true) throw new Error("Nested subagents must run in foreground");
     if (depth > 1 && request.runInBackground !== undefined) throw new Error("Nested subagents cannot override their pinned profile settings");
     if (request.signal?.aborted) throw new Error("Subagent resume was stopped");
     const releaseRootAdmission = reserveRootAdmission(rootSessionId);
@@ -1027,6 +1280,11 @@ export function createSubagentController(
     const releaseAdmission = () => { releaseBranchAdmission?.(); releaseRootAdmission(); releaseDependencyClaim?.(); };
     let dependencyAdmission: DependencyAdmission | undefined;
     let dependencyGraph: SubagentOrchestration["dependencies"];
+    let contextEpoch: string | undefined;
+    let contextForResultId: string | undefined;
+    let contextSuffix = "";
+    let contextHandoff: ContextHandoff | undefined;
+    let contextProviderPath: string | undefined;
     let initialRunForCleanup: SubagentRunInfo | undefined;
     try {
     const sessionPath = existing.sessionPath || await dependencies.resolveSessionPath(request.sessionId);
@@ -1037,11 +1295,45 @@ export function createSubagentController(
     if (wrapper.isRunning()) throw new Error("Subagent is already running");
     if (request.signal?.aborted || !parentMayContinue(parent, parentSessionId, parentGeneration)) throw new Error("Subagent resume was stopped");
     const manager = wrapper.inner.sessionManager;
+    const childResources = readSubagentSessionResources(manager.getEntries() as unknown as SessionEntry[]);
+    if (childResources?.fastMode && !isFastSupported(wrapper.inner.model)) {
+      throw new Error(`Fast mode for ${existing.profile} requires an OpenAI Responses or OpenAI Codex Responses model; restore a supported model before resuming`);
+    }
     const parentEntries = parent.inner.sessionManager.getEntries() as unknown as SessionEntry[];
     const orchestration = depth > 1
       ? readSubagentSessionResources(parentEntries)?.orchestration
       : readMainSessionResources(parentEntries)?.orchestration;
     dependencyGraph = orchestration?.dependencies;
+    if (orchestration?.contextProviders) {
+      if (depth > 1 && getSubagentRuns().get(parentSessionId)?.run.status !== "running") {
+        throw new Error("Orchestrator invocation is not active");
+      }
+      const epoch = currentDependencyEpoch(parentEntries);
+      contextEpoch = epoch;
+      if (existing.contextFor) {
+        const requester = await verifyPendingRequest(parent, parentSessionId, epoch, existing.contextFor, existing.profile);
+        if (!existing.contextForResultId || existing.contextForResultId !== requester.consumerResultId) {
+          throw new Error("Context provider is bound to an earlier request; start a new provider session");
+        }
+        if (contextHandoffFor(parent.inner.sessionManager.getEntries() as unknown as SessionEntry[],
+          existing.contextFor, requester.consumerResultId)) throw new Error("Context request already has a provider result");
+        contextForResultId = requester.consumerResultId;
+      }
+      const childEntries = manager.getEntries() as unknown as SessionEntry[];
+      const identity = childParentIdentity(childEntries);
+      if (identity.epoch !== epoch || identity.parentSessionId !== parentSessionId
+        || identity.parentSessionPath !== parent.sessionFile) {
+        throw new Error(`Subagent ${request.sessionId} belongs to another orchestrator invocation`);
+      }
+      if (existing.status === "needs_context") {
+        const transferred = await resolvePendingHandoff(parent, parentSessionId, epoch, request.sessionId, childEntries);
+        contextSuffix = transferred.suffix;
+        contextHandoff = transferred.handoff;
+        contextProviderPath = transferred.providerPath;
+      }
+    } else if (existing.status === "needs_context") {
+      throw new Error("Context request has no pinned orchestration policy");
+    }
     if (dependencyGraph !== undefined) {
       if (depth > 1 && getSubagentRuns().get(parentSessionId)?.run.status !== "running") {
         throw new Error("Orchestrator invocation is not active");
@@ -1089,6 +1381,7 @@ export function createSubagentController(
       status: "queued",
       completedAt: undefined,
       result: undefined,
+      contextRequest: undefined,
       error: undefined,
     };
     initialRunForCleanup = initialRun;
@@ -1124,6 +1417,13 @@ export function createSubagentController(
         return result;
       }
       stored.run = { ...stored.run, status: "running" };
+      if (contextHandoff) {
+        const fresh = await resolvePendingHandoff(parent, parentSessionId, contextHandoff.epoch,
+          request.sessionId, manager.getEntries() as unknown as SessionEntry[]);
+        if (fresh.handoff.providerResultId !== contextHandoff.providerResultId
+          || fresh.suffix !== contextSuffix) throw new Error("Context provider result changed before resume");
+        contextProviderPath = fresh.providerPath;
+      }
       manager.appendCustomEntry(SUBAGENT_STATUS_TYPE, { version: 1, status: "running", ...resumeFields });
       reportSubagentUpdate(request.onUpdate, stored.run);
       let result: SubagentRunInfo;
@@ -1141,13 +1441,16 @@ export function createSubagentController(
           assertDependencyProvidersPinned(parent.cwd, existing.profile,
             readSubagentSessionResources(parent.inner.sessionManager.getEntries() as unknown as SessionEntry[])?.orchestration);
         }
-        await wrapper!.inner.prompt(request.task + (dependencyAdmission?.taskSuffix ?? ""), {
+        await wrapper!.inner.prompt(request.task + contextSuffix + (dependencyAdmission?.taskSuffix ?? ""), {
           source: "rpc",
           expandPromptTemplates: false,
           preflightResult: (success) => {
             if (!success) return;
             if (stored.abortRequested || !parentMayContinue(parent, parentSessionId, parentGeneration)) {
               throw new Error("Subagent resume was stopped before the agent loop");
+            }
+            if (childResources?.fastMode && !isFastSupported(wrapper!.inner.model)) {
+              throw new Error(`Fast mode for ${existing.profile} requires an OpenAI Responses or OpenAI Codex Responses model; restore a supported model before resuming`);
             }
             if (dependencyAdmission) {
               assertParentMayStart(parent, parentSessionId, existing.profile, dependencies.getSession);
@@ -1158,6 +1461,42 @@ export function createSubagentController(
               entries: parent.inner.sessionManager.getEntries() as unknown as SessionEntry[],
               parentSessionId, admission: dependencyAdmission, graph: dependencyGraph,
             })) throw new Error("Dependency results changed before the agent loop; launch this subagent again");
+            if (contextHandoff) {
+              const confirmedHandoff = contextHandoff;
+              const parentEntries = parent.inner.sessionManager.getEntries() as unknown as SessionEntry[];
+              if (currentDependencyEpoch(parentEntries) !== confirmedHandoff.epoch
+                || !contextProviderAllowed(parentPolicy(parent), existing.profile, confirmedHandoff.providerProfile)
+                || contextHandoffFor(parentEntries, request.sessionId, confirmedHandoff.consumerResultId)?.providerResultId !== confirmedHandoff.providerResultId
+                || parentEntries.some((entry) => entry.type === "custom" && entry.customType === SUBAGENT_CONTEXT_CONSUMED_TYPE
+                  && typeof entry.data === "object" && entry.data !== null && !Array.isArray(entry.data)
+                  && (entry.data as Record<string, unknown>).consumerSessionId === request.sessionId
+                  && (entry.data as Record<string, unknown>).consumerResultId === confirmedHandoff.consumerResultId)) {
+                throw new Error("Context handoff changed before the agent loop");
+              }
+              assertParentMayStart(parent, parentSessionId, confirmedHandoff.providerProfile, dependencies.getSession);
+              if (!contextProviderPath) throw new Error("Context provider session path is unavailable");
+              const provider = dependencies.getSession(confirmedHandoff.providerSessionId);
+              const providerManager = provider?.isAlive() ? provider.inner.sessionManager : SessionManager.open(contextProviderPath);
+              if (providerManager.getSessionId() !== confirmedHandoff.providerSessionId) throw new Error("Context provider session changed");
+              const latest = latestSubagentResult(providerManager.getEntries() as unknown as SessionEntry[]);
+              const providerIdentity = childParentIdentity(providerManager.getEntries() as unknown as SessionEntry[]);
+              if (!latest || latest.id !== confirmedHandoff.providerResultId || latest.data.status !== "completed"
+                || latest.data.contextFor !== request.sessionId || typeof latest.data.result !== "string"
+                || latest.data.contextForResultId !== confirmedHandoff.consumerResultId
+                || providerIdentity.contextFor !== request.sessionId
+                || providerIdentity.contextForResultId !== confirmedHandoff.consumerResultId
+                || providerIdentity.parentSessionId !== parentSessionId
+                || providerIdentity.parentSessionPath !== parent.sessionFile
+                || providerIdentity.epoch !== confirmedHandoff.epoch
+                || contextResultHash(latest.data.result) !== confirmedHandoff.sha256) {
+                throw new Error("Context provider result changed before the agent loop");
+              }
+              parent.inner.sessionManager.appendCustomEntry(SUBAGENT_CONTEXT_CONSUMED_TYPE, {
+                version: 1, parentSessionId, epoch: confirmedHandoff.epoch,
+                consumerSessionId: request.sessionId, consumerResultId: confirmedHandoff.consumerResultId,
+                providerSessionId: confirmedHandoff.providerSessionId,
+              });
+            }
           },
         });
         const text = wrapper!.inner.getLastAssistantText()?.trim();
@@ -1169,6 +1508,7 @@ export function createSubagentController(
           ...(text ? { result: text } : {}),
           ...(providerError ? { error: providerError } : {}),
         };
+        result = classifyContextResult(result, parent, parentSessionId, contextEpoch);
       } catch (error) {
         result = {
           ...initialRun,
@@ -1194,12 +1534,18 @@ export function createSubagentController(
       }
       manager.appendCustomEntry(SUBAGENT_RESULT_TYPE, {
         version: 1,
-        status: result.status as "completed" | "failed" | "aborted",
+        status: result.status as SubagentResultMetadata["status"],
         completedAt: result.completedAt!,
         ...(result.result ? { result: result.result } : {}),
+        ...(result.contextRequest ? { contextRequest: result.contextRequest } : {}),
+        ...(result.contextFor ? { contextFor: result.contextFor } : {}),
+        ...(result.contextForResultId ? { contextForResultId: result.contextForResultId } : {}),
         ...(result.error ? { error: result.error } : {}),
         ...resumeFields,
       });
+      result = await publishContextResult({ parent, parentSessionId, epoch: contextEpoch,
+        consumerSessionId: existing.contextFor, consumerResultId: contextForResultId,
+        providerManager: manager, run: result });
       if (dependencyAdmission && profileProducesDependencyOutput(dependencyGraph, existing.profile)
         && result.status === "completed" && result.result && parentMayContinue(parent, parentSessionId, parentGeneration)) {
         const published = recordDependencyArtifact({

@@ -14,6 +14,8 @@
 .orchestration-map select,
 .orchestration-map input { font: inherit; }
 
+.orchestration-map { --map-prerequisite: color-mix(in srgb, var(--text) 25%, #e89720 75%); --map-provider: color-mix(in srgb, var(--text) 25%, #22b980 75%); }
+
 .orchestration-map button { cursor: pointer; }
 .orchestration-map button:disabled { cursor: default; opacity: .5; }
 
@@ -85,6 +87,14 @@
   border-bottom: 1px solid var(--border);
 }
 .orchestration-map-layers > span { color: var(--text-dim); margin-left: auto; font-size: 12px; }
+.orchestration-map-layers { flex-wrap: wrap; }
+.orchestration-map-layers > .orchestration-map-legend { display: flex; align-items: center; gap: 9px; margin: 0 16px 0 0; color: var(--text); }
+.orchestration-map-legend i { display: inline-block; width: 27px; border-top: 3px solid var(--accent); position: relative; flex: 0 0 auto; }
+.orchestration-map-legend i::after { content: ""; position: absolute; right: -1px; top: -5px; border-left: 6px solid var(--accent); border-top: 4px solid transparent; border-bottom: 4px solid transparent; }
+.orchestration-map-legend i.is-dependencies { border-color: var(--map-prerequisite); border-top-style: dashed; }
+.orchestration-map-legend i.is-dependencies::after { border-left-color: var(--map-prerequisite); }
+.orchestration-map-legend i.is-contextProviders { border-color: var(--map-provider); border-top-style: dotted; }
+.orchestration-map-legend i.is-contextProviders::after { border-left-color: var(--map-provider); }
 
 .orchestration-map-body { display: flex; flex: 1; min-height: 0; }
 .orchestration-map-stage {
@@ -102,8 +112,12 @@
 .orchestration-map-stage:active { cursor: grabbing; }
 .orchestration-map-canvas { position: absolute; inset: 0; width: 100%; height: 100%; transform-origin: 0 0; }
 .orchestration-map-edges { position: absolute; left: 0; top: 0; overflow: visible; pointer-events: none; }
-.orchestration-map-edges marker path { fill: var(--accent); }
-.orchestration-map-edge { fill: none; stroke: var(--accent); stroke-width: 2.5; opacity: .75; }
+.orchestration-map-edges #orchestration-map-arrow-delegation path { fill: var(--accent); }
+.orchestration-map-edges #orchestration-map-arrow-dependencies path { fill: var(--map-prerequisite); }
+.orchestration-map-edges #orchestration-map-arrow-contextProviders path { fill: var(--map-provider); }
+.orchestration-map-edge { fill: none; stroke: var(--accent); stroke-width: 2.5; opacity: .85; }
+.orchestration-map-edge.is-dependencies { stroke: var(--map-prerequisite); stroke-dasharray: 9 5; }
+.orchestration-map-edge.is-contextProviders { stroke: var(--map-provider); stroke-dasharray: 2 6; stroke-linecap: round; }
 .orchestration-map-edge.is-selected { stroke-width: 4; opacity: 1; }
 .orchestration-map-edge-target { fill: none; stroke: transparent; stroke-width: 18; pointer-events: stroke; cursor: pointer; }
 
@@ -159,6 +173,9 @@
 .orchestration-map-node-open { right: 5px; bottom: 5px; }
 .orchestration-map-node-port { right: -13px; top: 36px; border-radius: 50%; color: var(--accent); }
 .orchestration-map-node-port.is-active { background: var(--accent); color: var(--bg); }
+.orchestration-map-node-port.is-contextProviders { color: var(--map-provider); border-color: var(--map-provider); }
+.orchestration-map-node-port.is-dependencies { color: var(--map-prerequisite); border-color: var(--map-prerequisite); }
+.orchestration-map-node-port.is-active { background: var(--text); color: var(--bg); }
 .orchestration-map-empty {
   position: absolute;
   top: 12px;
@@ -209,9 +226,26 @@
 .orchestration-map-inspector p.orchestration-map-note { margin-top: 24px; color: var(--text-dim); }
 .orchestration-map-inspector p.orchestration-map-error { color: #e85b5b; }
 .orchestration-map-inspector p.orchestration-map-legacy-note { border: 1px solid var(--border); border-radius: 6px; padding: 9px; background: var(--bg-selected); color: var(--text); }
+.orchestration-map-legacy-note { display: grid; gap: 8px; margin-top: 9px; border: 1px solid var(--border); border-radius: 6px; padding: 9px; background: var(--bg-selected); color: var(--text); font-size: 12px; line-height: 1.5; }
+.orchestration-map-legacy-note button { border: 1px solid var(--accent); border-radius: 6px; padding: 6px 8px; background: var(--bg-panel); color: var(--text); cursor: pointer; }
+.orchestration-map-context { border-top: 1px solid var(--border); margin-top: 14px; }
+.orchestration-map-context h4 { margin: 14px 0 6px; }
+.orchestration-map-context select,
+.orchestration-map-link-kind select { width: 100%; min-height: 32px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); color: var(--text); padding: 5px 8px; }
+.orchestration-map-owner-choices { display: flex; flex-wrap: wrap; gap: 5px; }
+.orchestration-map-owner-choices button { border: 1px solid var(--border); border-radius: 6px; background: var(--bg); color: var(--text); padding: 5px 8px; font-size: 12px; cursor: pointer; }
+.orchestration-map-owner-choices button[aria-pressed="true"] { border-color: var(--accent); background: var(--bg-selected); }
+.orchestration-map-prerequisites { padding: 3px 0 8px; }
+.orchestration-map-prerequisite { display: flex; gap: 8px; align-items: flex-start; margin: 9px 0; font-size: 12px; cursor: pointer; }
+.orchestration-map-prerequisite input { margin: 1px 0 0; }
+.orchestration-map-prerequisite:has(input:disabled) { cursor: default; color: var(--text-muted); }
+.orchestration-map-link-kind { border-top: 1px solid var(--border); display: grid; gap: 5px; padding-top: 13px; margin-top: 13px; font-size: 11px; }
+.orchestration-map-link-kind label { font-weight: 600; }
 
 .orchestration-map-link { display: flex; align-items: center; border: 1px solid var(--border); border-radius: 6px; margin: 5px 0; }
 .orchestration-map-link.is-selected { border-color: var(--accent); }
+.orchestration-map-link.is-dependencies { border-left: 3px dashed var(--map-prerequisite); }
+.orchestration-map-link.is-contextProviders { border-left: 3px dotted var(--map-provider); }
 .orchestration-map-link button { border: 0; background: transparent; color: var(--text); font-size: 11px; text-align: left; padding: 8px; }
 .orchestration-map-link button:first-child { flex: 1; min-width: 0; overflow-wrap: anywhere; }
 .orchestration-map-link button:last-child:not(:first-child) { font-size: 16px; color: var(--text-muted); }

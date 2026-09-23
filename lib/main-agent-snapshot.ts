@@ -17,6 +17,7 @@ export interface MainSessionResources {
   orchestration?: {
     allowedChildren: string[];
     dependencies?: Record<string, string[]>;
+    contextProviders?: Record<string, string[]>;
     childProfiles: Record<string, SubagentChildProfileFingerprint>;
   };
 }
@@ -64,6 +65,7 @@ export function readMainSessionResources(entries: readonly SessionEntry[]): Main
     orchestration = {
       allowedChildren: validated.allowedChildren,
       ...(validated.dependencies !== undefined ? { dependencies: validated.dependencies } : {}),
+      ...(validated.contextProviders !== undefined ? { contextProviders: validated.contextProviders } : {}),
       childProfiles,
     };
   }

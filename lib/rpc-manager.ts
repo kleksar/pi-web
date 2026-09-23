@@ -41,6 +41,7 @@ import {
   SUBAGENT_CONTROL_TOOL_NAMES,
 } from "./subagents";
 import { createSubagentController, profileAuthorityPin } from "./subagent-runtime";
+import { applyFastMode } from "./subagent-fast-mode";
 import { readMainAgentConfig } from "./main-agent-config";
 import { MAIN_RESOURCE_META_TYPE, readMainSessionResources, type MainSessionResources } from "./main-agent-snapshot";
 import {
@@ -2138,6 +2139,8 @@ export async function startRpcSession(
       allowedChildren: [...mainConfig.orchestration.allowedChildren],
       ...(mainConfig.orchestration.dependencies !== undefined
         ? { dependencies: mainConfig.orchestration.dependencies } : {}),
+      ...(mainConfig.orchestration.contextProviders !== undefined
+        ? { contextProviders: mainConfig.orchestration.contextProviders } : {}),
       childProfiles: Object.fromEntries(mainConfig.orchestration.allowedChildren.map((name) => {
         const child = resolveSubagentProfile(sessionCwd, name);
         if (!child) throw new Error(`Main allowed child agent is missing or disabled: ${name}`);
@@ -2209,6 +2212,7 @@ export async function startRpcSession(
           {
             allowedChildren: subagentResources.orchestration.allowedChildren,
             dependencies: subagentResources.orchestration.dependencies,
+            contextProviders: subagentResources.orchestration.contextProviders,
           },
         )
       : undefined;
@@ -2225,7 +2229,8 @@ export async function startRpcSession(
               })())),
           isBuiltInSubagentsEnabled,
           mainOrchestration ? { allowedChildren: mainOrchestration.allowedChildren,
-            dependencies: mainOrchestration.dependencies } : undefined,
+            dependencies: mainOrchestration.dependencies,
+            contextProviders: mainOrchestration.contextProviders } : undefined,
         ) : undefined;
     const mainHasReadTool = resolveShellTools(
       selectedToolNames ?? settingsManager.getDefaultTools() ?? [], settingsManager.getDefaultTools(),
@@ -2381,6 +2386,7 @@ export async function startRpcSession(
         ? { excludeTools: [...SUBAGENT_CONTROL_TOOL_NAMES] }
         : {}),
     });
+    if (subagentResources) applyFastMode(inner, subagentResources.fastMode);
 
     const persistedPreferences = await persistExplicitStartupPreferences(
       services.settingsManager,

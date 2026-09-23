@@ -7,7 +7,7 @@ import type { SubagentProfilesResponse, SubagentSettingsResponse } from "@/lib/a
 import { sendAgentCommand } from "@/lib/agent-client";
 import type { ModelsData } from "@/lib/models-cache";
 import type { MainAgentConfig } from "@/lib/main-agent-config";
-import { MAIN_NODE_ID, effectiveMapProfiles } from "@/lib/orchestration-map";
+import { MAIN_NODE_ID, effectiveMapProfiles, mapOwnersForAgent } from "@/lib/orchestration-map";
 import { isSubagentProfileOverridden } from "@/lib/subagent-profile-precedence";
 import type { SubagentProfile, SubagentProfileInput, SubagentScope, SubagentWritableScope } from "@/lib/subagents";
 import {
@@ -58,6 +58,7 @@ const EMPTY_PROFILE: EditableProfile = {
   promptMode: "append",
   inheritContext: false,
   runInBackground: false,
+  fastMode: false,
   orchestration: null,
   enabled: true,
 };
@@ -100,11 +101,15 @@ function editableProfile(profile: SubagentProfile): EditableProfile {
     ...(profile.maxTurns ? { maxTurns: profile.maxTurns } : {}),
     inheritContext: profile.inheritContext,
     runInBackground: profile.runInBackground,
+    fastMode: profile.fastMode,
     orchestration: profile.orchestration
       ? {
           allowedChildren: [...profile.orchestration.allowedChildren],
           ...(profile.orchestration.dependencies
             ? { dependencies: Object.fromEntries(Object.entries(profile.orchestration.dependencies).map(([name, producers]) => [name, [...producers]])) }
+            : {}),
+          ...(profile.orchestration.contextProviders
+            ? { contextProviders: Object.fromEntries(Object.entries(profile.orchestration.contextProviders).map(([name, providers]) => [name, [...providers]])) }
             : {}),
         }
       : null,
@@ -115,29 +120,37 @@ function editableProfile(profile: SubagentProfile): EditableProfile {
 type DependencyIssue =
   | { type: "unknown"; names: string[] }
   | { type: "self"; name: string }
+  | { type: "limit"; name: string }
   | { type: "cycle"; names: string[] };
 
-function findDependencyIssue(children: string[], dependencies: Record<string, string[]>): DependencyIssue | null {
+function findDependencyIssue(children: string[], dependencies: Record<string, string[]>, contextProviders: Record<string, string[]> = {}): DependencyIssue | null {
   const known = new Map(children.map((name) => [name.toLowerCase(), name]));
   const unknown = new Set<string>();
   const graph = new Map<string, string[]>();
   let self: string | undefined;
 
-  for (const [consumer, producers] of Object.entries(dependencies)) {
-    const consumerName = known.get(consumer.toLowerCase());
-    if (!consumerName) unknown.add(consumer);
-    for (const producer of producers) {
-      const producerName = known.get(producer.toLowerCase());
-      if (!producerName) unknown.add(producer);
-      if (!consumerName || !producerName) continue;
-      if (consumerName.toLowerCase() === producerName.toLowerCase()) self = consumerName;
-      const edges = graph.get(consumerName) ?? [];
-      edges.push(producerName);
-      graph.set(consumerName, edges);
+  for (const relation of [dependencies, contextProviders]) {
+    for (const [consumer, producers] of Object.entries(relation)) {
+      const consumerName = known.get(consumer.toLowerCase());
+      if (!consumerName) unknown.add(consumer);
+      for (const producer of producers) {
+        const producerName = known.get(producer.toLowerCase());
+        if (!producerName) unknown.add(producer);
+        if (!consumerName || !producerName) continue;
+        if (consumerName.toLowerCase() === producerName.toLowerCase()) self = consumerName;
+        const edges = graph.get(consumerName) ?? [];
+        if (!edges.includes(producerName)) edges.push(producerName);
+        graph.set(consumerName, edges);
+      }
     }
   }
   if (unknown.size > 0) return { type: "unknown", names: [...unknown] };
   if (self) return { type: "self", name: self };
+  for (const name of children) {
+    const prerequisites = Object.entries(dependencies).find(([key]) => key.toLowerCase() === name.toLowerCase())?.[1] ?? [];
+    const providers = Object.entries(contextProviders).find(([key]) => key.toLowerCase() === name.toLowerCase())?.[1] ?? [];
+    if (prerequisites.length > 8 || providers.length > 8 || (graph.get(name)?.length ?? 0) > 8) return { type: "limit", name };
+  }
 
   const visiting = new Set<string>();
   const visited = new Set<string>();
@@ -206,9 +219,9 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
   return <ConfigField label={label}>{children}</ConfigField>;
 }
 
-function Toggle({ checked, disabled, label, onChange }: { checked: boolean; disabled: boolean; label: string; onChange: (checked: boolean) => void }) {
+function Toggle({ checked, disabled, label, hint, onChange }: { checked: boolean; disabled: boolean; label: string; hint?: string; onChange: (checked: boolean) => void }) {
   return (
-    <label style={{ display: "flex", alignItems: "center", gap: 7, color: disabled ? "var(--text-dim)" : "var(--text-muted)", fontSize: 12, cursor: disabled ? "default" : "pointer" }}>
+    <label title={hint} style={{ display: "flex", alignItems: "center", gap: 7, color: disabled ? "var(--text-dim)" : "var(--text-muted)", fontSize: 12, cursor: disabled ? "default" : "pointer" }}>
       <input type="checkbox" checked={checked} disabled={disabled} onChange={(event) => onChange(event.target.checked)} />
       {label}
     </label>
@@ -239,6 +252,7 @@ export function AgentsConfig({
   const [selectedKey, setSelectedKey] = useState<string | null>(() => getLastSettingsSelection("agents", cwd));
   const [draft, setDraft] = useState<EditableProfile>(EMPTY_PROFILE);
   const [mode, setMode] = useState<EditorMode>("view");
+  const [customizingBuiltIn, setCustomizingBuiltIn] = useState(false);
   const [targetScope, setTargetScope] = useState<SubagentWritableScope>("global");
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -255,12 +269,15 @@ export function AgentsConfig({
   const [childrenQuery, setChildrenQuery] = useState("");
   const [view, setView] = useState<"profiles" | "map">("profiles");
   const [mapOwner, setMapOwner] = useState<string | null>(null);
+  const [mapFocusNode, setMapFocusNode] = useState<string | null>(null);
+  const [pendingMapAgent, setPendingMapAgent] = useState<string | null>(null);
   const [mainConfig, setMainConfig] = useState<MainAgentConfig>({});
   const [mainDraft, setMainDraft] = useState<MainAgentConfig>({});
   const [mainRevision, setMainRevision] = useState<string | null>(null);
   const [mainMapError, setMainMapError] = useState<string | null>(null);
   const [mainMapSaving, setMainMapSaving] = useState(false);
-  const lastMainMapRequest = useRef(openMainMapRequest);
+  // AgentsConfig mounts lazily. A request issued from Main can already be positive on first mount.
+  const lastMainMapRequest = useRef(0);
 
   const selected = useMemo(
     () => profiles.find((profile) => profileKey(profile) === selectedKey) ?? null,
@@ -274,7 +291,7 @@ export function AgentsConfig({
   const validChildNames = useMemo(() => new Set(childProfiles.map((profile) => profile.name.toLowerCase())), [childProfiles]);
   const unavailableChildren = draft.orchestration?.allowedChildren.filter((name) => !validChildNames.has(name.toLowerCase())) ?? [];
   const dependencyIssue = draft.orchestration
-    ? findDependencyIssue(draft.orchestration.allowedChildren, draft.orchestration.dependencies ?? {})
+    ? findDependencyIssue(draft.orchestration.allowedChildren, draft.orchestration.dependencies ?? {}, draft.orchestration.contextProviders ?? {})
     : null;
   const visibleChildProfiles = childProfiles.filter((profile) =>
     profile.name.toLowerCase().includes(childrenQuery.trim().toLowerCase())
@@ -305,7 +322,7 @@ export function AgentsConfig({
     }
   }, [cwd]);
 
-  useEffect(() => { if (view === "map" && mainRevision === null) void loadMainForMap(); }, [view, mainRevision, loadMainForMap]);
+  useEffect(() => { if (mainRevision === null) void loadMainForMap(); }, [mainRevision, loadMainForMap]);
 
   useEffect(() => {
     const onMainConfigUpdated = (event: Event) => {
@@ -408,17 +425,18 @@ export function AgentsConfig({
     return () => controller.abort();
   }, [cwd]);
 
-  const selectProfile = (profile: SubagentProfile, confirmed = false): boolean => {
+  const selectProfile = useCallback((profile: SubagentProfile, confirmed = false): boolean => {
     if (selectedKey === profileKey(profile) && mode !== "create") return true;
     if (!confirmed && profileDraftChanged && !window.confirm(t("agents.discardChanges"))) return false;
     setSelectedKey(profileKey(profile));
     setDraft(editableProfile(profile));
     setMode(isWritableScope(profile.scope) ? "edit" : "view");
+    setCustomizingBuiltIn(false);
     if (isWritableScope(profile.scope)) setTargetScope(profile.scope);
     setError(null);
     setChildrenQuery("");
     return true;
-  };
+  }, [selectedKey, mode, profileDraftChanged, t]);
 
   const beginCreate = () => {
     if (profileDraftChanged && !window.confirm(t("agents.discardChanges"))) return;
@@ -428,6 +446,7 @@ export function AgentsConfig({
     setSelectedKey(null);
     setDraft({ ...EMPTY_PROFILE, name, displayName: name });
     setMode("create");
+    setCustomizingBuiltIn(false);
     setTargetScope("global");
     setError(null);
     setChildrenQuery("");
@@ -444,7 +463,21 @@ export function AgentsConfig({
       displayName: t("agents.copyName", { name: selected.displayName }),
     });
     setMode("create");
+    setCustomizingBuiltIn(false);
     setTargetScope(isWritableScope(selected.scope) ? selected.scope : "global");
+    setError(null);
+    setChildrenQuery("");
+  };
+
+  const beginCustomizeBuiltIn = () => {
+    if (!selected || selected.scope !== "builtin") return;
+    const existing = profiles.find((profile) => profile.scope === "global" && profile.name.toLowerCase() === selected.name.toLowerCase());
+    if (existing) { selectProfile(existing); return; }
+    setSelectedKey(null);
+    setDraft(editableProfile(selected));
+    setMode("create");
+    setCustomizingBuiltIn(true);
+    setTargetScope("global");
     setError(null);
     setChildrenQuery("");
   };
@@ -459,6 +492,8 @@ export function AgentsConfig({
         ? t("agents.unknownDependencies", { names: dependencyIssue.names.join(", ") })
         : dependencyIssue.type === "self"
           ? t("agents.selfDependency", { name: dependencyIssue.name })
+          : dependencyIssue.type === "limit"
+            ? t("agents.tooManySources", { name: dependencyIssue.name })
           : t("agents.cyclicDependencies", { names: dependencyIssue.names.join(" → ") }));
       return;
     }
@@ -545,12 +580,19 @@ export function AgentsConfig({
           .map(([consumer, producers]) => [consumer, producers.filter((producer) => allowed.has(producer.toLowerCase()))])
           .filter(([, producers]) => producers.length > 0),
       );
+      const contextProviders = Object.fromEntries(
+        Object.entries(current.orchestration.contextProviders ?? {})
+          .filter(([consumer]) => allowed.has(consumer.toLowerCase()))
+          .map(([consumer, providers]) => [consumer, providers.filter((provider) => allowed.has(provider.toLowerCase()))])
+          .filter(([, providers]) => providers.length > 0),
+      );
       return {
         ...current,
         orchestration: {
           ...current.orchestration,
           allowedChildren,
           ...(Object.keys(dependencies).length > 0 ? { dependencies } : { dependencies: undefined }),
+          ...(Object.keys(contextProviders).length > 0 ? { contextProviders } : { contextProviders: undefined }),
         },
       };
     });
@@ -579,19 +621,25 @@ export function AgentsConfig({
     setDraft((current) => {
       if (!current.orchestration) return current;
       const allowed = new Map(current.orchestration.allowedChildren.map((name) => [name.toLowerCase(), name]));
-      const dependencies: Record<string, string[]> = {};
-      for (const [consumer, producers] of Object.entries(current.orchestration.dependencies ?? {})) {
-        const knownConsumer = allowed.get(consumer.toLowerCase());
-        if (!knownConsumer) continue;
-        const validProducers = producers
-          .map((producer) => allowed.get(producer.toLowerCase()))
-          .filter((producer): producer is string => producer !== undefined && producer.toLowerCase() !== knownConsumer.toLowerCase());
-        const unique = [...new Set(validProducers)];
-        if (unique.length > 0) dependencies[knownConsumer] = unique;
-      }
+      const clean = (entries: Record<string, string[]> | undefined): Record<string, string[]> => {
+        const sanitized: Record<string, string[]> = {};
+        for (const [consumer, producers] of Object.entries(entries ?? {})) {
+          const knownConsumer = allowed.get(consumer.toLowerCase());
+          if (!knownConsumer) continue;
+          const validProducers = producers
+            .map((producer) => allowed.get(producer.toLowerCase()))
+            .filter((producer): producer is string => producer !== undefined && producer.toLowerCase() !== knownConsumer.toLowerCase());
+          const unique = [...new Set(validProducers)];
+          if (unique.length > 0) sanitized[knownConsumer] = unique;
+        }
+        return sanitized;
+      };
+      const dependencies = clean(current.orchestration.dependencies);
+      const contextProviders = clean(current.orchestration.contextProviders);
       return { ...current, orchestration: {
         ...current.orchestration,
         ...(Object.keys(dependencies).length > 0 ? { dependencies } : { dependencies: undefined }),
+        ...(Object.keys(contextProviders).length > 0 ? { contextProviders } : { contextProviders: undefined }),
       } };
     });
   };
@@ -677,8 +725,8 @@ export function AgentsConfig({
     }
   };
 
-  const selectMapOwner = (ownerId: string | null) => {
-    if (ownerId === mapOwner) return;
+  const selectMapOwner = useCallback((ownerId: string | null): boolean => {
+    if (ownerId === mapOwner && (ownerId === null || ownerId === MAIN_NODE_ID || selected?.name.toLowerCase() === ownerId.toLowerCase())) return true;
     const nextProfile = ownerId && ownerId !== MAIN_NODE_ID
       ? mapProfiles.find((profile) => profile.name.toLowerCase() === ownerId.toLowerCase())
       : undefined;
@@ -688,13 +736,34 @@ export function AgentsConfig({
       || nextProfile !== undefined && profileKey(nextProfile) !== selectedKey
       || mapOwner === null && ownerId === MAIN_NODE_ID
     );
-    if ((leavingMain || leavingProfile) && !window.confirm(t("agents.discardChanges"))) return;
+    if ((leavingMain || leavingProfile) && !window.confirm(t("agents.discardChanges"))) return false;
     if (leavingMain) setMainDraft(mainConfig);
     if (leavingProfile && selected) setDraft(editableProfile(selected));
     if (nextProfile && (profileKey(nextProfile) !== selectedKey || mode === "create")) selectProfile(nextProfile, true);
     setMapOwner(ownerId);
     setMainMapError(null);
+    return true;
+  }, [mapOwner, mapProfiles, mainDraftChanged, profileDraftChanged, selected, selectedKey, mode, mainConfig, selectProfile, t]);
+
+  const openSelectedOnMap = () => {
+    if (!selected) return;
+    if (profileDraftChanged && !window.confirm(t("agents.discardChanges"))) return;
+    if (profileDraftChanged) setDraft(editableProfile(selected));
+    setMapFocusNode(selected.name);
+    setPendingMapAgent(selected.name);
+    setView("map");
   };
+
+  useEffect(() => {
+    if (!pendingMapAgent || mainRevision === null) return;
+    const owners = mapOwnersForAgent(pendingMapAgent, mapProfiles, mainDraft.orchestration ?? null);
+    const preferred = mapProfiles.find((profile) => profile.name.toLowerCase() === pendingMapAgent.toLowerCase())?.orchestration
+      ? pendingMapAgent
+      : owners.length === 1 ? owners[0] : null;
+    const switched = selectMapOwner(preferred);
+    setPendingMapAgent(null);
+    if (!switched) { setMapFocusNode(null); setView("profiles"); }
+  }, [pendingMapAgent, mainRevision, mapProfiles, mainDraft.orchestration, selectMapOwner]);
 
   const openMapProfile = (name: string) => {
     const profile = mapProfiles.find((candidate) => candidate.name.toLowerCase() === name.toLowerCase());
@@ -737,6 +806,8 @@ export function AgentsConfig({
       setMainDraft((current) => ({ ...current, orchestration: next }));
     } else if (ownerId.toLowerCase() === selected?.name.toLowerCase()) {
       setDraft((current) => ({ ...current, orchestration: next }));
+    } else {
+      setMainMapError(t("map.errorOwnerUnavailable"));
     }
   };
 
@@ -752,6 +823,8 @@ export function AgentsConfig({
       && !window.confirm(t("agents.discardChanges"))) return;
     if (profileDraftChanged && selected) setDraft(editableProfile(selected));
     if (mainDraftChanged) setMainDraft(mainConfig);
+    setMapFocusNode(null);
+    setPendingMapAgent(null);
     setMapOwner(MAIN_NODE_ID);
     setView("map");
   }, [openMainMapRequest, mainConfig, mainDraftChanged, mapOwner, profileDraftChanged, selected, t]);
@@ -794,7 +867,13 @@ export function AgentsConfig({
       </div>
       <div role="group" aria-label={t("common.agents")} style={{ display: "flex", gap: 4, padding: "7px 16px", borderBottom: "1px solid var(--border)" }}>
         <ConfigButton size="small" variant={view === "profiles" ? "primary" : undefined} onClick={() => setView("profiles")}>{t("agents.profiles")}</ConfigButton>
-        <ConfigButton size="small" variant={view === "map" ? "primary" : undefined} onClick={() => setView("map")}>{t("agents.map")}</ConfigButton>
+        <ConfigButton size="small" variant={view === "map" ? "primary" : undefined} onClick={() => {
+          if (view === "map" && !selectMapOwner(null)) return;
+          setMapFocusNode(null);
+          setPendingMapAgent(null);
+          setMapOwner(null);
+          setView("map");
+        }}>{t("agents.openMap")}</ConfigButton>
         {view === "map" && <span style={{ marginLeft: "auto", alignSelf: "center", color: "var(--text-dim)", fontSize: 11 }}>{t("agents.mapMainScope")}</span>}
       </div>
       {view === "map" ? (
@@ -805,13 +884,16 @@ export function AgentsConfig({
             selectedSkills: mainDraft.selectedSkills,
             selectedExtensionTools: mainDraft.selectedExtensionTools }}
           ownerId={mapOwner}
+          focusNodeId={mapFocusNode}
           draftOrchestration={mapOwner === MAIN_NODE_ID ? mainDraft.orchestration
             : mapOwner && selected?.name.toLowerCase() === mapOwner.toLowerCase() ? draft.orchestration : undefined}
           canEdit={mapEditable}
           onSelectOwner={selectMapOwner}
           onOpenProfile={openMapProfile}
+          onRestrictMain={() => setMainDraft((current) => ({ ...current, orchestration: { allowedChildren: [] } }))}
           onToggleChild={(ownerId, _childName, _enabled, next) => updateMapPolicy(ownerId, next)}
           onToggleDependency={(ownerId, _producerName, _consumerName, _enabled, next) => updateMapPolicy(ownerId, next)}
+          onToggleContextProvider={(ownerId, _providerName, _consumerName, _enabled, next) => updateMapPolicy(ownerId, next)}
         />
       ) : (
       <ConfigSplitView>
@@ -869,6 +951,9 @@ export function AgentsConfig({
                       </span>
                     </ConfigDetailHeaderInfo>
                     <ConfigDetailActions>
+                      {selected && !creating && <ConfigButton size="small" onClick={openSelectedOnMap} disabled={saving || toggling}>{t("agents.mapForAgent")}</ConfigButton>}
+                      {selected?.scope === "builtin" && !creating && <ConfigButton size="small" onClick={beginCustomizeBuiltIn} disabled={saving || toggling}
+                        title={t("agents.customizeBuiltInHelp")}>{t("agents.customizeBuiltIn")}</ConfigButton>}
                       {selected && (mode === "view" || mode === "edit") && <ConfigButton size="small" onClick={beginDuplicate} disabled={saving || toggling}>{t("agents.duplicate")}</ConfigButton>}
                       {selected && isWritableScope(selected.scope) && mode === "edit" && <ConfigButton variant="danger" size="small" onClick={() => void remove()} disabled={saving || toggling}>{t("agents.delete")}</ConfigButton>}
                       <ConfigSwitch checked={draft.enabled} disabled={switchDisabled} label={draft.enabled ? t("agents.disable") : t("agents.enable")} onChange={(checked) => void toggleEnabled(checked)} />
@@ -885,6 +970,7 @@ export function AgentsConfig({
 
                   {creating && (
                     <Field label={t("agents.saveScope")}>
+                      {customizingBuiltIn && <span style={{ color: "var(--text-muted)", fontSize: 11 }}>{t("agents.customizeBuiltInHelp")}</span>}
                       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 3, padding: 3, border: "1px solid var(--border)", borderRadius: 5, background: "var(--bg-panel)" }}>
                         {(["global", "project"] as const).map((scope) => (
                           <button
@@ -1035,8 +1121,10 @@ export function AgentsConfig({
                             ? t("agents.unknownDependencies", { names: dependencyIssue.names.join(", ") })
                             : dependencyIssue.type === "self"
                               ? t("agents.selfDependency", { name: dependencyIssue.name })
-                              : t("agents.cyclicDependencies", { names: dependencyIssue.names.join(" → ") })}</span>
-                          {dependencyIssue.type !== "cycle" && !disabled && (
+                              : dependencyIssue.type === "limit"
+                                ? t("agents.tooManySources", { name: dependencyIssue.name })
+                                : t("agents.cyclicDependencies", { names: dependencyIssue.names.join(" → ") })}</span>
+                          {(dependencyIssue.type === "unknown" || dependencyIssue.type === "self") && !disabled && (
                             <button type="button" onClick={repairInvalidDependencies} style={{ color: "var(--text)", background: "var(--bg)", border: "1px solid var(--border)", borderRadius: 4, padding: "3px 6px", cursor: "pointer" }}>
                               {t("agents.removeInvalidDependencies")}
                             </button>
@@ -1097,7 +1185,12 @@ export function AgentsConfig({
                   <div style={{ display: "flex", flexWrap: "wrap", gap: "10px 20px" }}>
                     <Toggle label={t("agents.inheritContext")} disabled={disabled} checked={draft.inheritContext} onChange={(checked) => update("inheritContext", checked)} />
                     <Toggle label={t("agents.background")} disabled={disabled} checked={draft.runInBackground} onChange={(checked) => update("runInBackground", checked)} />
+                    <Toggle label={t("agents.fastMode")} disabled={disabled} checked={draft.fastMode} hint={t("agents.fastModeDescription")} onChange={(checked) => update("fastMode", checked)} />
                   </div>
+                  {draft.fastMode && <span style={{ color: "var(--text-muted)", fontSize: 11 }}>{t("agents.fastModeDescription")}</span>}
+                  {!creating && selected && mapOwnersForAgent(selected.name, mapProfiles, mainDraft.orchestration ?? null).some((id) => id !== MAIN_NODE_ID) && (
+                    <span style={{ color: "var(--text-muted)", fontSize: 11 }}>{t("agents.nestedForegroundHint")}</span>
+                  )}
                 </ConfigDetailStack>
               )}
           </ConfigDetailStack>
@@ -1105,6 +1198,9 @@ export function AgentsConfig({
       </ConfigSplitView>
       )}
       <ConfigFooter status={(settingsError || error || mainMapError) && <span role="alert" style={{ color: "#ef4444" }}>{settingsError || error || mainMapError}</span>}>
+        {view === "map" && mapOwner === null && (profileDraftChanged || mainDraftChanged) && (
+          <span role="status" style={{ color: "var(--text-muted)", fontSize: 11 }}>{t("agents.unsavedMapNotice")}</span>
+        )}
         {view === "map" && mapOwner === MAIN_NODE_ID && !mainMapError && (
           <span style={{ color: "var(--text-muted)", fontSize: 11 }}>{t("main.newSessionsOnly")}</span>
         )}

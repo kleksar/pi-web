@@ -6,12 +6,13 @@ export const MAP_NODE_WIDTH = 216;
 export const MAP_NODE_HEIGHT = 100;
 export const MAP_MIN_SCALE = 0.22;
 
-export type OrchestrationMapLayer = "delegation" | "dependencies";
+export type OrchestrationMapLayer = "all" | "delegation" | "dependencies" | "contextProviders";
+export type OrchestrationMapEdgeKind = Exclude<OrchestrationMapLayer, "all">;
 export type OrchestrationMapOwner = typeof MAIN_NODE_ID | string;
 export type MapProfile = Pick<SubagentProfile,
   "name" | "displayName" | "scope" | "enabled" | "orchestration" | "description" | "configurationError"
 > & Partial<Pick<SubagentProfile,
-  "model" | "thinking" | "tools" | "extensionTools" | "selectedSkills" | "selectedExtensionTools" | "loadSkills" | "loadExtensions"
+  "model" | "thinking" | "fastMode" | "tools" | "extensionTools" | "selectedSkills" | "selectedExtensionTools" | "loadSkills" | "loadExtensions"
 >>;
 
 export interface MapNode {
@@ -28,7 +29,7 @@ export interface MapEdge {
   ownerId: OrchestrationMapOwner;
   source: string;
   target: string;
-  kind: OrchestrationMapLayer;
+  kind: OrchestrationMapEdgeKind;
 }
 
 export interface OrchestrationGraph {
@@ -71,6 +72,30 @@ export function effectiveMapProfiles<T extends MapProfile>(sources: readonly T[]
 
 export function findMapProfile<T extends MapProfile>(profiles: readonly T[], name: string): T | undefined {
   return profiles.find((profile) => key(profile.name) === key(name));
+}
+
+/** An agent's prerequisites belong to the coordinator that launches it. */
+export function mapOwnersForAgent(
+  agentId: string,
+  profiles: readonly MapProfile[],
+  main: SubagentOrchestration | null,
+  activeOwnerId: OrchestrationMapOwner | null = null,
+  draft?: SubagentOrchestration | null,
+): OrchestrationMapOwner[] {
+  const effective = effectiveMapProfiles(profiles);
+  const owners: OrchestrationMapOwner[] = [];
+  const mainPolicy = activeOwnerId === MAIN_NODE_ID && draft !== undefined ? mainPolicyForMap(effective, draft) : mainPolicyForMap(effective, main);
+  if (mainPolicy.allowedChildren.some((child) => key(child) === key(agentId))) {
+    owners.push(MAIN_NODE_ID);
+  }
+  for (const profile of effective) {
+    const policy = activeOwnerId !== null && key(activeOwnerId) === key(profile.name) && draft !== undefined
+      ? draft : profile.orchestration;
+    if (policy?.allowedChildren.some((child) => key(child) === key(agentId))) {
+      owners.push(profile.name);
+    }
+  }
+  return owners;
 }
 
 /** Older Main sessions have unrestricted delegation. The first edit materializes this list. */
@@ -126,16 +151,23 @@ function buildEdges(
 ): MapEdge[] {
   if (!orchestration) return [];
   const childIds = new Map(orchestration.allowedChildren.map((name) => [key(name), findMapProfile(profiles, name)?.name ?? name]));
-  if (layer === "delegation") {
-    return [...childIds.values()].map((target) => ({ kind: layer, ownerId, source: ownerId, target }));
-  }
-  return Object.entries(orchestration.dependencies ?? {}).flatMap(([consumer, producers]) => {
+  const delegation: MapEdge[] = layer === "dependencies" || layer === "contextProviders" ? [] : [...childIds.values()]
+    .map((target) => ({ kind: "delegation", ownerId, source: ownerId, target }));
+  const prerequisites: MapEdge[] = layer === "delegation" || layer === "contextProviders" ? [] : Object.entries(orchestration.dependencies ?? {}).flatMap(([consumer, producers]) => {
     const target = childIds.get(key(consumer));
     return target ? producers.flatMap((producer) => {
       const source = childIds.get(key(producer));
-      return source ? [{ kind: layer, ownerId, source, target }] : [];
+      return source ? [{ kind: "dependencies" as const, ownerId, source, target }] : [];
     }) : [];
   });
+  const providers: MapEdge[] = layer === "delegation" || layer === "dependencies" ? [] : Object.entries(orchestration.contextProviders ?? {}).flatMap(([consumer, producers]) => {
+    const target = childIds.get(key(consumer));
+    return target ? producers.flatMap((producer) => {
+      const source = childIds.get(key(producer));
+      return source ? [{ kind: "contextProviders" as const, ownerId, source, target }] : [];
+    }) : [];
+  });
+  return [...delegation, ...prerequisites, ...providers];
 }
 
 /** A flat overview or one owner's direct children. No source file is modified. */
@@ -181,17 +213,18 @@ export function buildOrchestrationGraph({ profiles: sources, main, ownerId, draf
   const visibleIds = new Set(matchedIds);
   if (needle) {
     visibleIds.add(ownerId ?? MAIN_NODE_ID);
-    if (layer === "delegation" && ownerId === null) {
+    if (layer !== "dependencies" && layer !== "contextProviders" && ownerId === null) {
       // Keep the shortest delegation path from Main so a found agent still has visible lineage.
       for (const node of matches) {
         for (const id of mapPathFromMain(node.id, profiles, main)) {
           visibleIds.add(findMapProfile(profiles, id)?.name ?? id);
         }
       }
-    } else if (layer === "dependencies") {
+    }
+    if (layer !== "delegation") {
       // A filtered dependency is useful only with its other endpoint and owner visible.
       // Expand once from the actual matches; expanding recursively can restore the full roster.
-      for (const edge of edges) {
+      for (const edge of edges.filter((edge) => edge.kind !== "delegation")) {
         if (matchedIds.has(edge.source) || matchedIds.has(edge.target) || matchedIds.has(edge.ownerId)) {
           visibleIds.add(edge.source);
           visibleIds.add(edge.target);
@@ -212,14 +245,17 @@ export function autoLayoutGraph(nodes: readonly MapNode[], edges: readonly MapEd
   if (ids.has(MAIN_NODE_ID)) depth.set(MAIN_NODE_ID, 0);
   if (ownerId !== null) depth.set(ownerId, 0);
   const outgoing = new Map<string, string[]>();
-  for (const edge of edges) {
+  const layoutEdges = ownerId !== null && edges.some((edge) => edge.kind !== "delegation")
+    ? edges.filter((edge) => edge.kind !== "delegation")
+    : edges.filter((edge) => edge.kind === "delegation");
+  for (const edge of layoutEdges) {
     const children = outgoing.get(edge.source) ?? [];
     children.push(edge.target);
     outgoing.set(edge.source, children);
   }
-  if (ownerId !== null && edges.some((edge) => edge.kind === "dependencies")) {
+  if (ownerId !== null && edges.some((edge) => edge.kind !== "delegation")) {
     const waiting = new Map(nodes.filter((node) => node.id !== ownerId).map((node) => [node.id, 0]));
-    for (const edge of edges) if (waiting.has(edge.target)) waiting.set(edge.target, (waiting.get(edge.target) ?? 0) + 1);
+    for (const edge of layoutEdges) if (waiting.has(edge.target)) waiting.set(edge.target, (waiting.get(edge.target) ?? 0) + 1);
     const queue = [...waiting].filter(([, count]) => count === 0).map(([id]) => id);
     for (const id of waiting.keys()) depth.set(id, 1);
     for (let index = 0; index < queue.length; index++) {
@@ -254,6 +290,34 @@ export function autoLayoutGraph(nodes: readonly MapNode[], edges: readonly MapEd
 
 export type LinkChangeResult = { ok: true; next: SubagentOrchestration } | { ok: false; error: string };
 
+function hasCombinedCycle(policy: SubagentOrchestration): boolean {
+  const graph = new Map(policy.allowedChildren.map((child) => {
+    const prerequisites = Object.entries(policy.dependencies ?? {}).find(([name]) => key(name) === key(child))?.[1] ?? [];
+    const providers = Object.entries(policy.contextProviders ?? {}).find(([name]) => key(name) === key(child))?.[1] ?? [];
+    return [key(child), [...new Set([...prerequisites, ...providers].map(key))]] as const;
+  }));
+  const visiting = new Set<string>();
+  const visited = new Set<string>();
+  const visit = (name: string): boolean => {
+    if (visiting.has(name)) return true;
+    if (visited.has(name)) return false;
+    visiting.add(name);
+    for (const dependency of graph.get(name) ?? []) if (visit(dependency)) return true;
+    visiting.delete(name);
+    visited.add(name);
+    return false;
+  };
+  return policy.allowedChildren.some((name) => visit(key(name)));
+}
+
+function exceedsProviderLimit(policy: SubagentOrchestration): boolean {
+  return policy.allowedChildren.some((child) => {
+    const prerequisites = Object.entries(policy.dependencies ?? {}).find(([name]) => key(name) === key(child))?.[1] ?? [];
+    const providers = Object.entries(policy.contextProviders ?? {}).find(([name]) => key(name) === key(child))?.[1] ?? [];
+    return new Set([...prerequisites, ...providers].map(key)).size > 8;
+  });
+}
+
 export function changeChildLink(
   ownerId: string,
   policy: SubagentOrchestration,
@@ -272,7 +336,14 @@ export function changeChildLink(
     .filter(([consumer]) => allowed.has(key(consumer)))
     .map(([consumer, producers]) => [consumer, producers.filter((producer) => allowed.has(key(producer)))])
     .filter(([, producers]) => producers.length > 0));
-  return { ok: true, next: { allowedChildren, ...(Object.keys(dependencies).length ? { dependencies } : {}) } };
+  const contextProviders = Object.fromEntries(Object.entries(policy.contextProviders ?? {})
+    .filter(([consumer]) => allowed.has(key(consumer)))
+    .map(([consumer, providers]) => [consumer, providers.filter((provider) => allowed.has(key(provider)))])
+    .filter(([, providers]) => providers.length > 0));
+  return { ok: true, next: { allowedChildren,
+    ...(Object.keys(dependencies).length ? { dependencies } : {}),
+    ...(Object.keys(contextProviders).length ? { contextProviders } : {}),
+  } };
 }
 
 export function changeDependencyLink(
@@ -295,18 +366,40 @@ export function changeDependencyLink(
     : before.filter((name) => key(name) !== key(from));
   if (after.length > 8) return { ok: false, error: "An agent may have at most 8 prerequisites." };
   if (after.length) dependencies[to] = after;
-  const graph = new Map<string, string[]>(Object.entries(dependencies).map(([name, values]) => [key(name), values.map(key)]));
-  const visiting = new Set<string>();
-  const visited = new Set<string>();
-  const visit = (name: string): boolean => {
-    if (visiting.has(name)) return true;
-    if (visited.has(name)) return false;
-    visiting.add(name);
-    for (const dependency of graph.get(name) ?? []) if (visit(dependency)) return true;
-    visiting.delete(name);
-    visited.add(name);
-    return false;
+  const next: SubagentOrchestration = { ...policy, allowedChildren: [...policy.allowedChildren],
+    ...(Object.keys(dependencies).length ? { dependencies } : { dependencies: undefined }),
   };
-  if (policy.allowedChildren.some((name) => visit(key(name)))) return { ok: false, error: "This link creates a dependency cycle." };
-  return { ok: true, next: { allowedChildren: [...policy.allowedChildren], ...(Object.keys(dependencies).length ? { dependencies } : {}) } };
+  if (exceedsProviderLimit(next)) return { ok: false, error: "An agent may have at most 8 prerequisites." };
+  if (hasCombinedCycle(next)) return { ok: false, error: "This link creates a dependency cycle." };
+  return { ok: true, next };
+}
+
+/** A coordinator may ask a sibling for extra data while a consumer is running. */
+export function changeContextProviderLink(
+  policy: SubagentOrchestration,
+  provider: string,
+  consumer: string,
+  enabled: boolean,
+): LinkChangeResult {
+  const names = new Map(policy.allowedChildren.map((name) => [key(name), name]));
+  const from = names.get(key(provider));
+  const to = names.get(key(consumer));
+  if (!from || !to) return { ok: false, error: "Both agents must be direct children of this orchestrator." };
+  if (key(from) === key(to)) return { ok: false, error: "An agent cannot depend on itself." };
+  const contextProviders = Object.fromEntries(Object.entries(policy.contextProviders ?? {})
+    .map(([name, values]) => [name, [...values]]));
+  const oldKey = Object.keys(contextProviders).find((name) => key(name) === key(to));
+  const before = oldKey ? contextProviders[oldKey] : [];
+  if (oldKey) delete contextProviders[oldKey];
+  const after = enabled
+    ? before.some((name) => key(name) === key(from)) ? before : [...before, from]
+    : before.filter((name) => key(name) !== key(from));
+  if (after.length > 8) return { ok: false, error: "An agent may have at most 8 prerequisites." };
+  if (after.length) contextProviders[to] = after;
+  const next: SubagentOrchestration = { ...policy, allowedChildren: [...policy.allowedChildren],
+    ...(Object.keys(contextProviders).length ? { contextProviders } : { contextProviders: undefined }),
+  };
+  if (exceedsProviderLimit(next)) return { ok: false, error: "An agent may have at most 8 prerequisites." };
+  if (hasCombinedCycle(next)) return { ok: false, error: "This link creates a dependency cycle." };
+  return { ok: true, next };
 }

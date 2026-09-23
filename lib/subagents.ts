@@ -7,6 +7,7 @@ import { parseFrontmatter } from "./frontmatter";
 import { writePrivateFileAtomicSync } from "./atomic-file";
 import { isExistingPathWithinRoots, isPathWithinRoots } from "./path-security";
 import { disabledBuiltInSubagents } from "./subagent-settings";
+import { pendingContextRequest } from "./subagent-context-handoff";
 import { PRESET_READ_ONLY } from "./tool-presets";
 import type { SessionEntry, SubagentSessionStatus } from "./types";
 import {
@@ -31,6 +32,15 @@ export interface SubagentOrchestration {
   allowedChildren: string[];
   /** A child may run only after all of its listed producer children succeed. */
   dependencies?: Record<string, string[]>;
+  /** A running child may request context from these siblings via its parent. */
+  contextProviders?: Record<string, string[]>;
+}
+
+export interface SubagentContextRequest {
+  status: "needs_context";
+  provider: string;
+  request: string;
+  missingFiles?: string[];
 }
 
 export interface SubagentChildProfileFingerprint {
@@ -58,6 +68,8 @@ export interface SubagentProfile {
   selectedExtensionTools?: Array<{ extensionPath: string; toolName: string }>;
   loadSkills: boolean;
   loadExtensions: boolean;
+  /** Requests the native OpenAI priority service tier for this agent's turns. */
+  fastMode: boolean;
   model?: string;
   thinking?: ThinkingLevel;
   maxTurns?: number;
@@ -92,6 +104,8 @@ export interface SubagentMetadata {
   resourceSnapshot: SubagentResourceSnapshot;
   /** Creation epoch of a dependency-bound child, pinned to its parent run. */
   dependencyEpoch?: string;
+  contextFor?: string;
+  contextForResultId?: string;
   worktreePath?: string;
   worktreeBranch?: string;
 }
@@ -101,6 +115,8 @@ interface SubagentResourceSnapshotFields {
   tools: string[];
   loadSkills: boolean;
   loadExtensions: boolean;
+  /** Older session snapshots omit this setting and remain on the default tier. */
+  fastMode?: boolean;
   exactSystemPrompt?: string;
 }
 
@@ -116,6 +132,7 @@ export interface SubagentSessionResources {
   tools: string[];
   loadSkills: boolean;
   loadExtensions: boolean;
+  fastMode: boolean;
   exactSystemPrompt?: string;
   orchestration?: SubagentSessionOrchestration;
   selectedSkills?: PinnedSkill[];
@@ -127,6 +144,9 @@ export interface SubagentResultMetadata {
   status: Exclude<SubagentStatus, "starting" | "running" | "queued" | "interrupted">;
   completedAt: string;
   result?: string;
+  contextRequest?: SubagentContextRequest;
+  contextFor?: string;
+  contextForResultId?: string;
   error?: string;
   worktreeCleanupError?: string;
   parentToolCallId?: string;
@@ -157,6 +177,9 @@ export interface SubagentRunInfo {
   createdAt: string;
   completedAt?: string;
   result?: string;
+  contextRequest?: SubagentContextRequest;
+  contextFor?: string;
+  contextForResultId?: string;
   error?: string;
   worktreePath?: string;
   worktreeBranch?: string;
@@ -185,6 +208,7 @@ const MANAGED_FRONTMATTER_KEYS = new Set([
   "enabled",
   "inherit_context",
   "run_in_background",
+  "pi_web_fast_mode",
   "model",
   "thinking",
   "max_turns",
@@ -216,6 +240,7 @@ const BUILTIN_PROFILES: SubagentProfile[] = [
     tools: DEFAULT_TOOLS,
     loadSkills: false,
     loadExtensions: false,
+    fastMode: false,
     promptMode: "append",
     inheritContext: false,
     runInBackground: false,
@@ -230,6 +255,7 @@ const BUILTIN_PROFILES: SubagentProfile[] = [
     tools: [...PRESET_READ_ONLY],
     loadSkills: false,
     loadExtensions: false,
+    fastMode: false,
     promptMode: "append",
     inheritContext: false,
     runInBackground: false,
@@ -244,6 +270,7 @@ const BUILTIN_PROFILES: SubagentProfile[] = [
     tools: [...PRESET_READ_ONLY],
     loadSkills: false,
     loadExtensions: false,
+    fastMode: false,
     promptMode: "append",
     inheritContext: false,
     runInBackground: false,
@@ -336,6 +363,18 @@ function dependencyGraph(value: unknown, children: readonly string[]): Record<st
   return visited === children.length ? graph : null;
 }
 
+/** Both edge types are directed producer -> consumer; mixed cycles would deadlock. */
+function contextProviderGraph(
+  value: unknown, children: readonly string[], dependencies?: Record<string, string[]>,
+): Record<string, string[]> | null {
+  const contextProviders = dependencyGraph(value, children);
+  if (contextProviders === null) return null;
+  const combined = Object.fromEntries(children.map((child) => [child, [...new Set([
+    ...(dependencies?.[child] ?? []), ...(contextProviders[child] ?? []),
+  ])]]));
+  return dependencyGraph(combined, children) === null ? null : contextProviders;
+}
+
 function profileOrchestration(value: unknown, profileName: string): SubagentOrchestration | undefined {
   if (!isRecord(value) || value.kind !== "orchestrator") return undefined;
   const children = allowedChildren(value.allowed_children);
@@ -344,7 +383,12 @@ function profileOrchestration(value: unknown, profileName: string): SubagentOrch
     ? dependencyGraph(value.depends_on, children)
     : undefined;
   if (dependencies === null) return undefined;
-  return { allowedChildren: children, ...(dependencies !== undefined ? { dependencies } : {}) };
+  const contextProviders = Object.prototype.hasOwnProperty.call(value, "context_providers")
+    ? contextProviderGraph(value.context_providers, children, dependencies)
+    : undefined;
+  if (contextProviders === null) return undefined;
+  return { allowedChildren: children, ...(dependencies !== undefined ? { dependencies } : {}),
+    ...(contextProviders !== undefined ? { contextProviders } : {}) };
 }
 
 function hasOrchestrationMarker(data: Record<string, unknown>): boolean {
@@ -480,6 +524,7 @@ function parseProfileFile(filePath: string, scope: SubagentScope): SubagentProfi
     ...(selectedExtensionTools !== undefined && selectedExtensionTools !== null ? { selectedExtensionTools } : {}),
     loadSkills,
     loadExtensions,
+    fastMode: booleanValue(data?.pi_web_fast_mode, false),
     ...(stringValue(data?.model) ? { model: stringValue(data?.model) } : {}),
     ...(thinkingValue && THINKING_LEVELS.has(thinkingValue) ? { thinking: thinkingValue } : {}),
     ...(maxTurnsValue && maxTurnsValue > 0 ? { maxTurns: maxTurnsValue } : {}),
@@ -624,6 +669,9 @@ export function saveSubagentProfile(
   if (profile.thinking && !THINKING_LEVELS.has(profile.thinking)) {
     throw new Error(`Invalid thinking level: ${profile.thinking}`);
   }
+  if (profile.fastMode !== undefined && typeof profile.fastMode !== "boolean") {
+    throw new Error("Fast mode must be a boolean");
+  }
   if (profile.maxTurns !== undefined && (!Number.isFinite(profile.maxTurns) || profile.maxTurns < 0)) {
     throw new Error("Max turns must be a non-negative number");
   }
@@ -636,6 +684,7 @@ export function saveSubagentProfile(
   const model = profile.model?.trim() || undefined;
   const loadSkills = profile.loadSkills === true;
   const loadExtensions = profile.loadExtensions === true;
+  const fastMode = profile.fastMode ?? booleanValue(stored.pi_web_fast_mode, false);
   const promptMode = profile.promptMode === "replace" ? "replace" : "append";
   const requestedChildren = profile.orchestration == null
     ? undefined
@@ -651,6 +700,14 @@ export function saveSubagentProfile(
       : undefined;
   if (requestedDependencies === null) {
     throw new Error(`Orchestrator dependencies must be an acyclic graph of unique allowed child profiles with at most ${MAX_SUBAGENT_DEPENDENCIES} prerequisites per child`);
+  }
+  const requestedContextProviders = requestedChildren === undefined
+    ? undefined
+    : profile.orchestration && Object.prototype.hasOwnProperty.call(profile.orchestration, "contextProviders")
+      ? contextProviderGraph(profile.orchestration.contextProviders, requestedChildren, requestedDependencies)
+      : undefined;
+  if (requestedContextProviders === null) {
+    throw new Error(`Orchestrator context providers must be an acyclic graph of unique allowed child profiles with at most ${MAX_SUBAGENT_DEPENDENCIES} providers per child`);
   }
   mkdirSync(dir, { recursive: true });
   if (scope === "project" && !isProjectProfilePathAllowed(cwd, dir)) {
@@ -671,6 +728,7 @@ export function saveSubagentProfile(
           kind: "orchestrator",
           allowed_children: requestedChildren,
           ...(requestedDependencies !== undefined ? { depends_on: requestedDependencies } : {}),
+          ...(requestedContextProviders !== undefined ? { context_providers: requestedContextProviders } : {}),
         };
   const orchestration = profileOrchestration(orchestrationField, name);
   if (orchestration && (tools.length > 0 || extensionTools.length > 0
@@ -687,6 +745,7 @@ export function saveSubagentProfile(
     enabled: profile.enabled,
     inherit_context: profile.inheritContext,
     run_in_background: profile.runInBackground,
+    pi_web_fast_mode: fastMode,
     prompt_mode: promptMode,
   };
   syncFlagAlias(managed, "skills", stored.skills, loadSkills);
@@ -722,6 +781,7 @@ export function saveSubagentProfile(
     ...(selectedExtensionTools !== undefined ? { selectedExtensionTools } : {}),
     loadSkills,
     loadExtensions,
+    fastMode,
     ...(model ? { model } : { model: undefined }),
     ...(maxTurns ? { maxTurns } : { maxTurns: undefined }),
     promptMode,
@@ -814,6 +874,7 @@ export function readSubagentSessionResources(
     || !snapshot.appendSystemPrompt.every((item) => typeof item === "string")
     || !Array.isArray(snapshot.tools)
     || (snapshot.exactSystemPrompt !== undefined && typeof snapshot.exactSystemPrompt !== "string")
+    || (snapshot.fastMode !== undefined && typeof snapshot.fastMode !== "boolean")
     || ((snapshot.version === 2 || snapshot.version === 3) &&
       (typeof snapshot.loadSkills !== "boolean" || typeof snapshot.loadExtensions !== "boolean"))
   ) {
@@ -839,6 +900,10 @@ export function readSubagentSessionResources(
     && Object.prototype.hasOwnProperty.call(orchestration, "dependencies")
     ? dependencyGraph(orchestration.dependencies, children)
     : undefined;
+  const contextProviders = isRecord(orchestration) && children !== null
+    && Object.prototype.hasOwnProperty.call(orchestration, "contextProviders")
+    ? contextProviderGraph(orchestration.contextProviders, children, dependencies ?? undefined)
+    : undefined;
   if (
     (snapshot.version === 1 && "orchestration" in snapshot)
     || ((snapshot.version === 2 || snapshot.version === 3) && "orchestration" in snapshot && (
@@ -846,6 +911,7 @@ export function readSubagentSessionResources(
       || children === null
       || pins === null
       || dependencies === null
+      || contextProviders === null
       || typeof data.profile !== "string"
       || children?.some((child) => child.toLowerCase() === (data.profile as string).toLowerCase())
       || typeof orchestration.rootSessionId !== "string"
@@ -878,6 +944,7 @@ export function readSubagentSessionResources(
     tools: [...new Set(tools as string[])],
     loadSkills,
     loadExtensions,
+    fastMode: snapshot.fastMode === true,
     ...(selectedSkills !== undefined ? { selectedSkills } : {}),
     ...(selectedExtensionTools !== undefined ? { selectedExtensionTools } : {}),
     ...(typeof snapshot.exactSystemPrompt === "string" ? { exactSystemPrompt: snapshot.exactSystemPrompt } : {}),
@@ -885,6 +952,7 @@ export function readSubagentSessionResources(
       ? { orchestration: {
           allowedChildren: children,
           ...(dependencies !== undefined && dependencies !== null ? { dependencies } : {}),
+          ...(contextProviders !== undefined && contextProviders !== null ? { contextProviders } : {}),
           rootSessionId: orchestration.rootSessionId as string,
           depth: orchestration.depth as number,
           childProfiles: pins,
@@ -929,6 +997,10 @@ export function selectSubagentExtensionTools(
 export function readSubagentRun(entries: readonly SessionEntry[], sessionId: string, sessionPath: string): SubagentRunInfo | null {
   const data = subagentMetadataData(entries);
   if (!data) return null;
+  if ((typeof data.contextFor === "string") !== (typeof data.contextForResultId === "string")
+    || (typeof data.contextFor === "string" && (!data.contextFor || !data.contextForResultId))) {
+    throw new Error("Invalid pinned context requester metadata");
+  }
   const lifecycleEntry = [...entries].reverse().find((entry) =>
     entry.type === "custom" && (entry.customType === SUBAGENT_RESULT_TYPE || entry.customType === SUBAGENT_STATUS_TYPE)
   );
@@ -936,11 +1008,15 @@ export function readSubagentRun(entries: readonly SessionEntry[], sessionId: str
     ? lifecycleEntry
     : undefined;
   const result = resultEntry?.type === "custom" && isRecord(resultEntry.data) ? resultEntry.data : undefined;
+  if (result && ((result.contextFor !== undefined && result.contextFor !== data.contextFor)
+    || (result.contextForResultId !== undefined && result.contextForResultId !== data.contextForResultId))) {
+    throw new Error("Context requester changed in subagent result");
+  }
   const statusEntry = lifecycleEntry?.type === "custom" && lifecycleEntry.customType === SUBAGENT_STATUS_TYPE
     ? lifecycleEntry
     : undefined;
   const statusData = statusEntry?.type === "custom" && isRecord(statusEntry.data) ? statusEntry.data : undefined;
-  const persistedStatus = result && (result.status === "completed" || result.status === "failed" || result.status === "aborted")
+  const persistedStatus = result && (result.status === "completed" || result.status === "failed" || result.status === "aborted" || result.status === "needs_context")
     ? result.status
     : statusData?.version === 1 && (statusData.status === "queued" || statusData.status === "running")
       ? statusData.status
@@ -948,6 +1024,8 @@ export function readSubagentRun(entries: readonly SessionEntry[], sessionId: str
   // The first marker identifies the session; later status/result entries identify
   // the latest invocation when a failed or interrupted child is resumed.
   const invocation = result ?? statusData;
+  const contextRequest = persistedStatus === "needs_context" ? pendingContextRequest(entries)?.request : undefined;
+  if (persistedStatus === "needs_context" && !contextRequest) throw new Error("Invalid stored needs_context request");
   return {
     sessionId,
     sessionPath,
@@ -969,6 +1047,9 @@ export function readSubagentRun(entries: readonly SessionEntry[], sessionId: str
     createdAt: typeof data.createdAt === "string" ? data.createdAt : "",
     ...(result && typeof result.completedAt === "string" ? { completedAt: result.completedAt } : {}),
     ...(result && typeof result.result === "string" ? { result: result.result } : {}),
+    ...(contextRequest ? { contextRequest } : {}),
+    ...(typeof data.contextFor === "string" ? { contextFor: data.contextFor } : {}),
+    ...(typeof data.contextForResultId === "string" ? { contextForResultId: data.contextForResultId } : {}),
     ...(result && typeof result.error === "string" ? { error: result.error } : {}),
     ...(typeof data.worktreePath === "string" ? { worktreePath: data.worktreePath } : {}),
     ...(typeof data.worktreeBranch === "string" ? { worktreeBranch: data.worktreeBranch } : {}),

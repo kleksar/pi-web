@@ -288,7 +288,7 @@ export function dependencyRefsStillCurrent(options: {
   return true;
 }
 
-/** Write only after the gate succeeded, and before any child setup or worktree creation. */
+/** Write only after the read-only gate and final start validation, before creating the child session. */
 export function admitDependencyChild(options: {
   appendCustomEntry: (type: string, data: unknown) => unknown;
   parentSessionId: string;

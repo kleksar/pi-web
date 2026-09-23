@@ -6,6 +6,19 @@ const source = await readFile(new URL("./AgentsConfig.tsx", import.meta.url), "u
 const cssSource = await readFile(new URL("../app/settings.css", import.meta.url), "utf8");
 const chatInputSource = await readFile(new URL("./ChatInput.tsx", import.meta.url), "utf8");
 const modelSelectorSource = await readFile(new URL("./ModelSelector.tsx", import.meta.url), "utf8");
+const mapSource = await readFile(new URL("./OrchestrationMap.tsx", import.meta.url), "utf8");
+
+test("opens the full map from the top button, focuses profiles without filtering siblings, and handles a first Main request", () => {
+  assert.match(source, /const lastMainMapRequest = useRef\(0\)/);
+  assert.match(source, /if \(openMainMapRequest === lastMainMapRequest\.current\) return;/);
+  const topMapButton = source.slice(source.indexOf('{t("agents.profiles")}'), source.indexOf('{view === "map" && <span'));
+  assert.match(topMapButton, /setMapFocusNode\(null\)/);
+  assert.match(topMapButton, /setMapOwner\(null\)/);
+  assert.match(topMapButton, /t\("agents\.openMap"\)/);
+  assert.match(source, /const openSelectedOnMap = \(\) => \{[\s\S]*?setMapFocusNode\(selected\.name\)/);
+  assert.match(mapSource, /const \[query, setQuery\] = useState\(""\)/);
+  assert.doesNotMatch(mapSource, /setQuery\(focusNodeId\)/);
+});
 
 test("keeps same-name profiles selectable by scope and groups writable sources first", () => {
   assert.match(source, /return `\$\{profile\.scope\}:\$\{profile\.name\}`/);

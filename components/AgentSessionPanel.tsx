@@ -31,6 +31,7 @@ function formatRelativeTime(value: string, locale: string): string {
 
 function statusColor(status: SubagentSessionStatus): string {
   if (status === "running" || status === "starting") return "var(--accent)";
+  if (status === "needs_context") return "#0d9488";
   if (status === "completed") return "#16a34a";
   if (status === "failed") return "#dc2626";
   if (status === "aborted") return "#d97706";
@@ -38,6 +39,13 @@ function statusColor(status: SubagentSessionStatus): string {
 }
 
 function StatusIcon({ status }: { status: SubagentSessionStatus }) {
+  if (status === "needs_context") {
+    return (
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+        <path d="M5 4h10l4 4v12H5z" /><path d="M15 4v4h4" /><path d="M9 13h6M9 17h4" />
+      </svg>
+    );
+  }
   if (status === "running" || status === "starting") {
     return (
       <svg className="animate-spin" width="13" height="13" viewBox="0 0 24 24" fill="none" aria-hidden="true">
