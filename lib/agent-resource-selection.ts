@@ -1,8 +1,9 @@
 import { createHash } from "node:crypto";
 import { readFileSync, realpathSync, statSync } from "node:fs";
-import { isAbsolute } from "node:path";
+import { isAbsolute, relative, resolve, sep } from "node:path";
 import { DefaultResourceLoader, getAgentDir, type InlineExtension, type Skill } from "@earendil-works/pi-coding-agent";
 import { projectTrustReloadOptions } from "./project-trust";
+import { getRepositorySkillPaths } from "./repository-roster";
 
 export interface SelectedExtensionTool {
   extensionPath: string;
@@ -25,6 +26,65 @@ export interface PinnedExtensionTool extends SelectedExtensionTool {
 }
 
 const SHA256_RE = /^[a-f0-9]{64}$/;
+const PORTABLE_SKILL_PREFIXES = new Set(["skills", ".pi/skills", "orchestration/skills"]);
+
+/** Only a named SKILL.md below a known skill directory can be a portable reference. */
+function isPortableSkillReference(reference: string, prefix?: string): boolean {
+  if (!reference || reference.includes("\\") || reference.includes("\0") || isAbsolute(reference)) return false;
+  const parts = reference.split("/");
+  const base = prefix?.split("/") ?? (parts[0] === ".pi" || parts[0] === "orchestration"
+    ? parts.slice(0, 2) : parts.slice(0, 1));
+  if (!PORTABLE_SKILL_PREFIXES.has(base.join("/")) || parts.length <= base.length + 1
+    || parts.slice(0, base.length).some((part, index) => part !== base[index])
+    || parts.at(-1) !== "SKILL.md") return false;
+  return parts.slice(base.length, -1).every((part) => part !== "." && part !== ".." && part !== ""
+    && !part.includes(":") && !part.includes("\0"));
+}
+
+function withinDirectory(root: string, path: string): boolean {
+  const rel = relative(root, path);
+  return !!rel && rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel);
+}
+
+/** Resolve repository-owned references before passing them to the absolute-path-only runtime. */
+export function resolveSelectedSkillReferences(root: string, references: readonly string[]): string[] {
+  const realRoot = realpathSync(root);
+  return references.map((reference) => {
+    if (isAbsolute(reference)) return reference; // Existing user/global assignments retain their format.
+    if (!isPortableSkillReference(reference)) throw new Error(`Invalid portable skill reference: ${reference}`);
+    const target = resolve(realRoot, reference);
+    let realTarget: string;
+    try {
+      realTarget = realpathSync(target);
+      if (!statSync(realTarget).isFile()) throw new Error("Not a regular file");
+    } catch (error) {
+      throw new Error(`Portable skill is missing or cannot be resolved: ${reference}`, { cause: error });
+    }
+    if (!withinDirectory(realRoot, realTarget)) {
+      throw new Error(`Portable skill escapes the repository root: ${reference}`);
+    }
+    return realTarget;
+  });
+}
+
+/** Store a skill in Git without embedding the checkout's absolute path. */
+export function portableSelectedSkillReferences(root: string, paths: readonly string[], prefix = "skills"): string[] {
+  if (!PORTABLE_SKILL_PREFIXES.has(prefix)) throw new Error("Invalid portable skill prefix");
+  const realRoot = realpathSync(root);
+  return paths.map((path) => {
+    if (!isAbsolute(path)) throw new Error(`Selected skill path must be absolute: ${path}`);
+    // An external/global skill keeps its original absolute reference for older profiles.
+    let realTarget: string;
+    try {
+      realTarget = realpathSync(path);
+    } catch {
+      return path;
+    }
+    if (!withinDirectory(realRoot, realTarget)) return path;
+    const reference = relative(realRoot, realTarget).split(sep).join("/");
+    return isPortableSkillReference(reference, prefix) ? reference : path;
+  });
+}
 /** SDK built-ins can be replaced by extension tools with the same name. Keep those names out of assignments. */
 export const RESERVED_EXTENSION_TOOL_NAMES = new Set([
   "read", "bash", "powershell", "edit", "write", "grep", "find", "ls",
@@ -97,11 +157,21 @@ export function pinSelectedSkills(discovered: readonly Skill[], paths: readonly 
   if (new Set(paths).size !== paths.length) throw new Error("Duplicate selected skill");
   const byPath = new Map(discovered.map((skill) => [skill.filePath, skill]));
   const pinned = paths.map((path) => {
-    const skill = byPath.get(path);
+    // The SDK may discover a directory-linked skill under ~/.pi/agent/skills,
+    // while a repository profile points at its physical source in Git.
+    let realPath: string | undefined;
+    if (!byPath.has(path)) {
+      try { realPath = realpathSync(path); } catch { /* An unavailable source has no SDK match. */ }
+    }
+    const matches = realPath === undefined ? [] : discovered.filter((candidate) => {
+      try { return realpathSync(candidate.filePath) === realPath; } catch { return false; }
+    });
+    if (matches.length > 1) throw new Error(`Selected skill resolves to multiple discovered skills: ${path}`);
+    const skill = byPath.get(path) ?? matches[0];
     if (!skill) throw new Error(`Selected skill is no longer available: ${path}`);
     return {
-      filePath: path,
-      ...pinFile(path, "Selected skill"),
+      filePath: skill.filePath,
+      ...pinFile(skill.filePath, "Selected skill"),
       name: skill.name,
       description: skill.description,
       disableModelInvocation: skill.disableModelInvocation,
@@ -228,7 +298,9 @@ export async function validateSelectedAgentResources(
   );
   if (selectedSkills === undefined && selectedExtensionTools === undefined) return;
   const agentDir = getAgentDir();
-  const loader = new DefaultResourceLoader({ cwd, agentDir });
+  const loader = new DefaultResourceLoader({ cwd, agentDir,
+    ...(selectedSkills?.length ? { additionalSkillPaths: getRepositorySkillPaths() } : {}),
+  });
   await loader.reload(projectTrustReloadOptions(cwd, agentDir));
   if (selectedSkills !== undefined) pinSelectedSkills(loader.getSkills().skills, selectedSkills);
   if (selectedExtensionTools !== undefined) {

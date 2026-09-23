@@ -42,6 +42,7 @@ function shortenPath(p: string): string {
 }
 
 function sourceLabel(skill: Skill): string {
+  if (skill.readOnly) return "repository";
   const src = skill.sourceInfo?.source;
   const scope = skill.sourceInfo?.scope;
   if (scope === "user" || src === "user") return "global";
@@ -119,15 +120,22 @@ function SkillDetail({
             </span>
           </ConfigDetailHeaderInfo>
           <ConfigDetailActions>
-            <ConfigSwitch
-              checked={enabled}
-              loading={toggling}
-              label={enabled ? t("i18n.visibleInPrompt") : t("i18n.hiddenFromPrompt")}
-              onChange={() => onToggle(skill)}
-            />
+            {!skill.readOnly && (
+              <ConfigSwitch
+                checked={enabled}
+                loading={toggling}
+                label={enabled ? t("i18n.visibleInPrompt") : t("i18n.hiddenFromPrompt")}
+                onChange={() => onToggle(skill)}
+              />
+            )}
           </ConfigDetailActions>
         </ConfigDetailHeader>
         <div className="skill-detail-status-row">
+          {skill.readOnly && (
+            <span style={{ fontSize: 12, color: "var(--text-dim)" }}>
+              {t("skills.repositoryManaged")}
+            </span>
+          )}
           {!enabled && (
             <span style={{ fontSize: 11, color: "var(--text-dim)" }}>
               {t("i18n.hiddenButInvocable")}
@@ -698,6 +706,7 @@ export function SkillsConfig({
   }, [cwd, loadSkills]);
 
   const toggle = useCallback(async (skill: Skill) => {
+    if (skill.readOnly) return;
     const next = !skill.disableModelInvocation;
     setToggling((s) => new Set(s).add(skill.filePath));
     setSaveError(null);
@@ -768,8 +777,13 @@ export function SkillsConfig({
                     project: t("skills.scope.project"),
                     global: t("skills.scope.global"),
                     path: t("skills.scope.path"),
+                    repository: t("skills.scope.repository"),
                   };
                   const groupDefinitions = [
+                    {
+                      label: scopeLabels.repository,
+                      matches: (skill: Skill) => sourceLabel(skill) === "repository",
+                    },
                     {
                       label: `${scopeLabels.project} / skills.sh`,
                       matches: (skill: Skill) =>

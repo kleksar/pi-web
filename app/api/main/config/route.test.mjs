@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, readFile, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { after } from "node:test";
@@ -25,6 +25,7 @@ const jiti = createJiti(import.meta.url, {
 });
 const { GET, PUT } = await jiti.import("./route.ts");
 const { saveSubagentProfile } = await jiti.import("../../../../lib/subagents.ts");
+const { trustProject } = await jiti.import("../../../../lib/project-trust.ts");
 const configPath = join(agentDir, "main-agent-config.json");
 const url = `http://localhost/api/main/config?cwd=${encodeURIComponent(cwd)}`;
 
@@ -109,4 +110,69 @@ test("PUT rejects unknown or disabled children and preserves the winner on stale
   assert.equal(disabled.status, 400);
   assert.match((await disabled.json()).error, /missing or disabled/);
   assert.deepEqual(JSON.parse(await readFile(configPath, "utf8")).orchestration, expected.orchestration);
+});
+
+test("project Main saves a tracked override, requires explicit trust, and inherits absent fields", async () => {
+  const projectUrl = `${url}&scope=project`;
+  const initial = await (await GET(new Request(projectUrl))).json();
+  assert.equal(initial.trusted, false);
+  assert.equal(initial.revision.length, 64);
+  const requested = { ...initial.config, orchestration: { allowedChildren: [] } };
+  const first = await PUT(new Request("http://localhost/api/main/config", {
+    method: "PUT",
+    headers: { Host: "localhost", Origin: "http://localhost", "Sec-Fetch-Site": "same-origin", "Content-Type": "application/json" },
+    body: JSON.stringify({ cwd, scope: "project", config: requested,
+      previous: initial.config, overrides: initial.overrides, expectedRevision: initial.revision }),
+  }));
+  assert.equal(first.status, 400);
+  assert.match((await first.json()).error, /Trust this project/);
+  await assert.rejects(readFile(join(cwd, ".pi", "main-agent-config.json"), "utf8"), /ENOENT/);
+  trustProject(cwd, agentDir);
+  // The general trust helper intentionally does not approve a repository with
+  // no trust-requiring resources. Main requires its explicit purpose instead.
+  const { trustProjectForMainConfig } = await jiti.import("../../../../lib/project-trust.ts");
+  trustProjectForMainConfig(cwd, agentDir);
+  const ready = await (await GET(new Request(projectUrl))).json();
+  assert.equal(ready.trusted, true);
+  const saved = await PUT(new Request("http://localhost/api/main/config", {
+    method: "PUT",
+    headers: { Host: "localhost", Origin: "http://localhost", "Sec-Fetch-Site": "same-origin", "Content-Type": "application/json" },
+    body: JSON.stringify({ cwd, scope: "project", config: requested,
+      previous: ready.config, overrides: ready.overrides, expectedRevision: ready.revision }),
+  }));
+  assert.equal(saved.status, 200);
+  assert.deepEqual(JSON.parse(await readFile(join(cwd, ".pi", "main-agent-config.json"), "utf8")), {
+    version: 1, orchestration: { allowedChildren: [] },
+  });
+  assert.equal((await saved.json()).trusted, true);
+  const trusted = await (await GET(new Request(projectUrl))).json();
+  assert.equal(trusted.trusted, true);
+  assert.deepEqual(trusted.config.orchestration, { allowedChildren: [] });
+  assert.deepEqual(trusted.overrides, { orchestration: { allowedChildren: [] } });
+});
+
+test("roster Main cannot commit an external absolute skill path", async () => {
+  const root = join(testRoot, "versioned-roster");
+  const skillPath = join(agentDir, "skills", "machine-only", "SKILL.md");
+  await mkdir(join(root, "agents"), { recursive: true });
+  await mkdir(join(root, "skills"), { recursive: true });
+  await mkdir(join(agentDir, "skills", "machine-only"), { recursive: true });
+  await writeFile(skillPath, "---\nname: machine-only\ndescription: Host-only skill\n---\nLocal skill.\n");
+  const oldRoot = process.env.PI_WEB_ROSTER_ROOT;
+  process.env.PI_WEB_ROSTER_ROOT = root;
+  try {
+    const before = await (await GET(new Request(`${url}&scope=roster`))).json();
+    assert.deepEqual(before.config, {});
+    const attempted = await PUT(new Request("http://localhost/api/main/config", {
+      method: "PUT",
+      headers: { Host: "localhost", Origin: "http://localhost", "Sec-Fetch-Site": "same-origin", "Content-Type": "application/json" },
+      body: JSON.stringify({ cwd, scope: "roster", config: { selectedSkills: [skillPath] }, expectedRevision: before.revision }),
+    }));
+    assert.equal(attempted.status, 400);
+    assert.match((await attempted.json()).error, /relative/);
+    await assert.rejects(readFile(join(root, "main-agent-config.json"), "utf8"), /ENOENT/);
+  } finally {
+    if (oldRoot === undefined) delete process.env.PI_WEB_ROSTER_ROOT;
+    else process.env.PI_WEB_ROSTER_ROOT = oldRoot;
+  }
 });

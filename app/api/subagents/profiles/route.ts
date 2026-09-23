@@ -11,6 +11,7 @@ import {
 } from "@/lib/subagents";
 import { writeDisabledBuiltInSubagent } from "@/lib/subagent-settings";
 import { validateSelectedAgentResources } from "@/lib/agent-resource-selection";
+import { getRepositoryRosterRoot } from "@/lib/repository-roster";
 import { hasJsonContentType, isApiRequestAllowed } from "@/lib/request-security";
 
 export const dynamic = "force-dynamic";
@@ -28,14 +29,18 @@ async function validateCwd(cwd: unknown): Promise<string> {
 }
 
 function validateScope(scope: unknown): SubagentWritableScope {
-  if (scope !== "global" && scope !== "project") throw new Error("scope must be global or project");
+  if (scope !== "roster" && scope !== "global" && scope !== "project") {
+    throw new Error("scope must be roster, global, or project");
+  }
   return scope;
 }
 
 /** A built-in has no file to save or delete, but its switch is persisted all the same. */
 function validateToggleScope(scope: unknown): SubagentWritableScope | "builtin" {
   if (scope === "builtin") return scope;
-  if (scope !== "global" && scope !== "project") throw new Error("scope must be global, project, or builtin");
+  if (scope !== "roster" && scope !== "global" && scope !== "project") {
+    throw new Error("scope must be roster, global, project, or builtin");
+  }
   return scope;
 }
 
@@ -56,7 +61,9 @@ function validateAllowedChildren(cwd: string, profile: SubagentProfileInput): vo
 export async function GET(req: Request) {
   try {
     const cwd = await validateCwd(new URL(req.url).searchParams.get("cwd"));
-    return NextResponse.json({ profiles: listSubagentProfileSources(cwd) });
+    const rosterRoot = getRepositoryRosterRoot();
+    return NextResponse.json({ profiles: listSubagentProfileSources(cwd), rosterAvailable: Boolean(rosterRoot),
+      ...(rosterRoot ? { rosterRoot } : {}) });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     return NextResponse.json({ error: message }, { status: message === "Access denied" ? 403 : 400 });

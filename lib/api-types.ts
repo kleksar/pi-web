@@ -56,6 +56,8 @@ export interface SkillInfo {
   filePath: string;
   baseDir: string;
   disableModelInvocation: boolean;
+  /** Repository skills are assigned in Pi Web but authored and tracked in Git. */
+  readOnly?: boolean;
   sourceInfo: {
     source?: string;
     scope?: string;

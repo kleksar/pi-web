@@ -53,6 +53,7 @@ import {
 } from "./agent-resource-selection";
 import { appendSubagentInputFiles, loadSubagentInputFiles } from "./subagent-input";
 import { projectTrustReloadOptions } from "./project-trust";
+import { getRepositorySkillPaths } from "./repository-roster";
 import { resolveShellTools } from "./powershell-settings";
 import { isBuiltInSubagentsEnabled, readSubagentSettings } from "./subagent-settings";
 import { SubagentQueue } from "./subagent-queue";
@@ -834,6 +835,7 @@ export function createSubagentController(
         resourceLoaderOptions: {
           noExtensions: !loadExtensions,
           noSkills: !loadSkills,
+          ...(loadSkills ? { additionalSkillPaths: getRepositorySkillPaths() } : {}),
           noPromptTemplates: true,
           noThemes: true,
           noContextFiles: true,

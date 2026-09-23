@@ -1,8 +1,13 @@
 import { hasTrustRequiringProjectResources, ProjectTrustStore } from "@earendil-works/pi-coding-agent";
+import { existsSync } from "node:fs";
+import { join } from "node:path";
 import type { ProjectTrustStatus } from "./api-types";
 
 export function getProjectTrustStatus(cwd: string, agentDir: string): ProjectTrustStatus {
-  const requiresTrust = Boolean(cwd) && hasTrustRequiringProjectResources(cwd);
+  const requiresTrust = Boolean(cwd) && (
+    hasTrustRequiringProjectResources(cwd)
+    || existsSync(join(cwd, ".pi", "main-agent-config.json"))
+  );
   if (!requiresTrust) return { requiresTrust: false, trusted: true };
 
   const trustStore = new ProjectTrustStore(agentDir);
@@ -18,6 +23,16 @@ export function trustProject(cwd: string, agentDir: string): ProjectTrustStatus 
 
   new ProjectTrustStore(agentDir).set(cwd, true);
   return { requiresTrust: true, trusted: true };
+}
+
+/** The repository-owned Main policy requires an explicit trust record even before its file exists. */
+export function isProjectMainConfigTrusted(cwd: string, agentDir: string): boolean {
+  return new ProjectTrustStore(agentDir).get(cwd) === true;
+}
+
+export function trustProjectForMainConfig(cwd: string, agentDir: string): ProjectTrustStatus {
+  new ProjectTrustStore(agentDir).set(cwd, true);
+  return getProjectTrustStatus(cwd, agentDir);
 }
 
 /**

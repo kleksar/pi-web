@@ -1120,7 +1120,7 @@ export function AppShell() {
     if (!projectTrustCwd) return;
 
     const controller = new AbortController();
-    fetch(`/api/project-trust?cwd=${encodeURIComponent(projectTrustCwd)}`, {
+    const refreshTrust = () => { fetch(`/api/project-trust?cwd=${encodeURIComponent(projectTrustCwd)}`, {
       signal: controller.signal,
     })
       .then(async (response) => {
@@ -1131,8 +1131,10 @@ export function AppShell() {
       .catch((error) => {
         if (error instanceof DOMException && error.name === "AbortError") return;
         console.error("Failed to load project trust:", error);
-      });
-    return () => controller.abort();
+      }); };
+    refreshTrust();
+    window.addEventListener("pi-web:project-trust-updated", refreshTrust);
+    return () => { controller.abort(); window.removeEventListener("pi-web:project-trust-updated", refreshTrust); };
   }, [projectTrustCwd]);
 
   const handleTrustProject = useCallback(async () => {

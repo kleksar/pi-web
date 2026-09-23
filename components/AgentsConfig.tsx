@@ -91,7 +91,7 @@ function editableProfile(profile: SubagentProfile): EditableProfile {
     systemPrompt: profile.systemPrompt,
     tools: profile.orchestration ? [] : [...profile.tools],
     ...(profile.orchestration ? { extensionTools: [] } : {}),
-    loadSkills: profile.orchestration ? false : profile.loadSkills,
+    loadSkills: profile.loadSkills,
     loadExtensions: profile.orchestration ? false : profile.loadExtensions,
     ...(profile.selectedSkills !== undefined ? { selectedSkills: [...profile.selectedSkills] } : {}),
     ...(profile.selectedExtensionTools !== undefined
@@ -132,7 +132,7 @@ function duplicateProfileName(name: string, profiles: readonly SubagentProfile[]
 }
 
 function isWritableScope(scope: SubagentScope): scope is SubagentWritableScope {
-  return scope === "global" || scope === "project";
+  return scope === "global" || scope === "project" || scope === "roster";
 }
 
 /**
@@ -150,7 +150,7 @@ function shortenPath(path: string): string {
 
 function displayProfilePath(profile: SubagentProfile, cwd: string): string | null {
   if (!profile.filePath) return null;
-  if ((profile.scope === "project" || profile.scope === "workspace") && profile.filePath.startsWith(cwd)) {
+  if ((profile.scope === "project" || profile.scope === "workspace" || profile.scope === "roster") && profile.filePath.startsWith(cwd)) {
     const relative = profile.filePath.slice(cwd.length).replace(/^[/\\]/, "");
     return `./${relative}`;
   }
@@ -195,7 +195,9 @@ export function AgentsConfig({
   const [draft, setDraft] = useState<EditableProfile>(EMPTY_PROFILE);
   const [mode, setMode] = useState<EditorMode>("view");
   const [customizingBuiltIn, setCustomizingBuiltIn] = useState(false);
-  const [targetScope, setTargetScope] = useState<SubagentWritableScope>("global");
+  const [targetScope, setTargetScope] = useState<SubagentWritableScope>("roster");
+  const [rosterAvailable, setRosterAvailable] = useState(false);
+  const [rosterRoot, setRosterRoot] = useState("");
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [savedOk, setSavedOk] = useState(false);
@@ -215,7 +217,9 @@ export function AgentsConfig({
   const [pendingMapAgent, setPendingMapAgent] = useState<string | null>(null);
   const [mainConfig, setMainConfig] = useState<MainAgentConfig>({});
   const [mainDraft, setMainDraft] = useState<MainAgentConfig>({});
+  const [mainOverrides, setMainOverrides] = useState<MainAgentConfig>({});
   const [mainRevision, setMainRevision] = useState<string | null>(null);
+  const [mainProjectTrusted, setMainProjectTrusted] = useState(true);
   const [mainMapError, setMainMapError] = useState<string | null>(null);
   const [mainMapSaving, setMainMapSaving] = useState(false);
   // AgentsConfig mounts lazily. A request issued from Main can already be positive on first mount.
@@ -252,11 +256,13 @@ export function AgentsConfig({
   const loadMainForMap = useCallback(async () => {
     setMainMapError(null);
     try {
-      const response = await fetch(`/api/main/config?cwd=${encodeURIComponent(cwd)}`, { cache: "no-store" });
-      const data = await response.json() as { config?: MainAgentConfig; revision?: string; error?: string };
+      const response = await fetch(`/api/main/config?cwd=${encodeURIComponent(cwd)}&scope=project`, { cache: "no-store" });
+      const data = await response.json() as { config?: MainAgentConfig; overrides?: MainAgentConfig; trusted?: boolean; revision?: string; error?: string };
       if (!response.ok || data.error || !data.config || !data.revision) throw new Error(data.error ?? `HTTP ${response.status}`);
       setMainConfig(data.config);
       setMainDraft(data.config);
+      setMainOverrides(data.overrides ?? {});
+      setMainProjectTrusted(data.trusted ?? true);
       setMainRevision(data.revision);
     } catch (cause) {
       setMainMapError(cause instanceof Error ? cause.message : String(cause));
@@ -268,14 +274,15 @@ export function AgentsConfig({
 
   useEffect(() => {
     const onMainConfigUpdated = (event: Event) => {
-      const detail = (event as CustomEvent<{ config: MainAgentConfig; revision: string; origin?: string }>).detail;
-      if (!detail?.config || typeof detail.revision !== "string" || detail.origin === "map") return;
+      const detail = (event as CustomEvent<{ config: MainAgentConfig; revision: string; origin?: string; scope?: string; overrides?: MainAgentConfig }>).detail;
+      if (!detail?.config || typeof detail.revision !== "string" || detail.origin === "map" || detail.scope !== "project") return;
       if (mainDraftChanged) {
         setMainMapError(t("main.configChanged"));
         return;
       }
       setMainConfig(detail.config);
       setMainDraft(detail.config);
+      setMainOverrides(detail.overrides ?? {});
       setMainRevision(detail.revision);
       setMainMapError(null);
     };
@@ -288,9 +295,11 @@ export function AgentsConfig({
     setError(null);
     try {
       const response = await fetch(`/api/subagents/profiles?cwd=${encodeURIComponent(cwd)}`, { cache: "no-store" });
-      const data = await response.json() as Partial<SubagentProfilesResponse> & { error?: string };
+      const data = await response.json() as Partial<SubagentProfilesResponse> & { error?: string; rosterAvailable?: boolean; rosterRoot?: string };
       if (!response.ok || data.error) throw new Error(data.error ?? `HTTP ${response.status}`);
       const next = data.profiles ?? [];
+      setRosterAvailable(Boolean(data.rosterAvailable));
+      setRosterRoot(data.rosterRoot ?? "");
       setProfiles(next);
       window.dispatchEvent(new CustomEvent("pi-web:subagent-profiles-updated", { detail: { cwd } }));
       const rememberedKey = preferredKey ?? getLastSettingsSelection("agents", cwd);
@@ -389,7 +398,7 @@ export function AgentsConfig({
     setDraft({ ...EMPTY_PROFILE, name, displayName: name });
     setMode("create");
     setCustomizingBuiltIn(false);
-    setTargetScope("global");
+    setTargetScope(rosterAvailable ? "roster" : "project");
     setError(null);
     setChildrenQuery("");
   };
@@ -406,7 +415,7 @@ export function AgentsConfig({
     });
     setMode("create");
     setCustomizingBuiltIn(false);
-    setTargetScope(isWritableScope(selected.scope) ? selected.scope : "global");
+    setTargetScope(isWritableScope(selected.scope) ? selected.scope : rosterAvailable ? "roster" : "project");
     setError(null);
     setChildrenQuery("");
   };
@@ -488,7 +497,8 @@ export function AgentsConfig({
   const displayedPath = creating
     ? targetScope === "global"
       ? `~/.pi/agent/agents/${draft.name || "..."}.md`
-      : `./.pi/agents/${draft.name || "..."}.md`
+      : targetScope === "roster" ? `${rosterRoot || "Shared roster"}/agents/${draft.name || "..."}.md`
+        : `./.pi/agents/${draft.name || "..."}.md`
     : selected
       ? displayProfilePath(selected, cwd) ?? t("agents.builtinPath")
       : "";
@@ -701,23 +711,27 @@ export function AgentsConfig({
   };
 
   const saveMapMain = async () => {
-    if (!mainRevision || !mainDraftChanged || mainMapSaving) return;
+    if (!mainRevision || !mainDraftChanged || mainMapSaving || !mainProjectTrusted) return;
     setMainMapSaving(true);
     setMainMapError(null);
     try {
       const response = await fetch("/api/main/config", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ cwd, config: mainDraft, expectedRevision: mainRevision }),
+        body: JSON.stringify({ cwd, scope: "project", config: mainDraft,
+          expectedRevision: mainRevision, previous: mainConfig, overrides: mainOverrides }),
       });
-      const data = await response.json() as { config?: MainAgentConfig; revision?: string; error?: string };
+      const data = await response.json() as { config?: MainAgentConfig; overrides?: MainAgentConfig; trusted?: boolean; revision?: string; error?: string };
       if (!response.ok || data.error || !data.config || !data.revision) throw new Error(data.error ?? `HTTP ${response.status}`);
       setMainConfig(data.config);
       setMainDraft(data.config);
+      setMainOverrides(data.overrides ?? {});
+      setMainProjectTrusted(data.trusted ?? true);
       setMainRevision(data.revision);
       window.dispatchEvent(new CustomEvent("pi-web:main-config-updated", {
-        detail: { config: data.config, revision: data.revision, origin: "map" },
+        detail: { config: data.config, revision: data.revision, overrides: data.overrides ?? {}, origin: "map", scope: "project" },
       }));
+      window.dispatchEvent(new Event("pi-web:project-trust-updated"));
     } catch (cause) {
       setMainMapError(cause instanceof Error ? cause.message : String(cause));
     } finally {
@@ -736,7 +750,7 @@ export function AgentsConfig({
   };
 
   const mapEditable = mapOwner === MAIN_NODE_ID
-    ? mainRevision !== null && !mainMapSaving
+    ? mainRevision !== null && !mainMapSaving && mainProjectTrusted
     : Boolean(mapOwner && selected && mapOwner.toLowerCase() === selected.name.toLowerCase()
       && isWritableScope(selected.scope) && !selected.configurationError && !saving);
 
@@ -798,7 +812,7 @@ export function AgentsConfig({
           setMapOwner(MAIN_NODE_ID);
           setView("map");
         }}>{t("agents.openMap")}</ConfigButton>
-        {view === "map" && <span style={{ marginLeft: "auto", alignSelf: "center", color: "var(--text-dim)", fontSize: 11 }}>{t("agents.mapMainScope")}</span>}
+        {view === "map" && <span style={{ marginLeft: "auto", alignSelf: "center", color: "var(--text-dim)", fontSize: 11 }}>{t("main.projectScope")}</span>}
       </div>
       {view === "map" ? (
         <OrchestrationMap
@@ -825,7 +839,7 @@ export function AgentsConfig({
           <ConfigSidebarList>
               {loading ? (
                 <div style={{ padding: 10, color: "var(--text-dim)", fontSize: 12 }}>{t("agents.loading")}</div>
-              ) : (["project", "global", "workspace", "builtin"] as const).map((scope) => {
+              ) : (["project", ...(rosterAvailable ? ["roster" as const] : []), "global", "workspace", "builtin"] as const).map((scope) => {
                 const scopedProfiles = profiles.filter((profile) => profile.scope === scope);
                 if (scopedProfiles.length === 0) return null;
                 return (
@@ -896,7 +910,7 @@ export function AgentsConfig({
                     <Field label={t("agents.saveScope")}>
                       {customizingBuiltIn && <span style={{ color: "var(--text-muted)", fontSize: 11 }}>{t("agents.customizeBuiltInHelp")}</span>}
                       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 3, padding: 3, border: "1px solid var(--border)", borderRadius: 5, background: "var(--bg-panel)" }}>
-                        {(["global", "project"] as const).map((scope) => (
+                        {([...(rosterAvailable ? ["roster" as const] : []), "project", "global"] as const).map((scope) => (
                           <button
                             key={scope}
                             type="button"
@@ -1067,13 +1081,14 @@ export function AgentsConfig({
                     )}
                     <AgentResourceSelector
                       cwd={cwd}
+                      allowedSkillRoot={displayedScope === "roster" ? `${rosterRoot}/skills` : undefined}
                       selectedSkills={draft.selectedSkills}
                       selectedExtensionTools={draft.selectedExtensionTools}
                       onChangeSkills={(skills) => setDraft((current) => ({ ...current, selectedSkills: skills, loadSkills: false }))}
                       onChangeExtensionTools={(tools) => setDraft((current) => ({ ...current, selectedExtensionTools: tools, loadExtensions: false }))}
                       legacySkills={draft.loadSkills}
                       legacyExtensions={draft.loadExtensions}
-                      hideExtensionTools={Boolean(draft.orchestration)}
+                      hideExtensionTools={Boolean(draft.orchestration) || displayedScope === "roster"}
                       disabled={disabled}
                     />
                   </Field>
@@ -1125,11 +1140,22 @@ export function AgentsConfig({
         {view === "map" && mapOwner === null && (profileDraftChanged || mainDraftChanged) && (
           <span role="status" style={{ color: "var(--text-muted)", fontSize: 11 }}>{t("agents.unsavedMapNotice")}</span>
         )}
+        {view === "map" && mapOwner === MAIN_NODE_ID && !mainProjectTrusted && (
+          <ConfigButton size="small" onClick={async () => {
+            try {
+              const response = await fetch("/api/project-trust", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ cwd, purpose: "main-config" }) });
+              const data = await response.json() as { error?: string };
+              if (!response.ok) throw new Error(data.error ?? `HTTP ${response.status}`);
+              window.dispatchEvent(new Event("pi-web:project-trust-updated"));
+              await loadMainForMap();
+            } catch (cause) { setMainMapError(cause instanceof Error ? cause.message : String(cause)); }
+          }}>{t("main.trustProject")}</ConfigButton>
+        )}
         {view === "map" && mapOwner === MAIN_NODE_ID && !mainMapError && (
           <span style={{ color: "var(--text-muted)", fontSize: 11 }}>{t("main.newSessionsOnly")}</span>
         )}
         {view === "map" && mapOwner === MAIN_NODE_ID && mainDraftChanged && (
-          <ConfigButton variant="primary" onClick={() => void saveMapMain()} disabled={mainMapSaving || !mainRevision}>
+          <ConfigButton variant="primary" onClick={() => void saveMapMain()} disabled={mainMapSaving || !mainRevision || !mainProjectTrusted}>
             {mainMapSaving ? t("agents.saving") : t("agents.save")}
           </ConfigButton>
         )}
