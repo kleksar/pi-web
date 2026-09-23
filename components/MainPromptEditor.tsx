@@ -18,8 +18,8 @@ type ErrorResponse = { error?: string; code?: string };
 export function MainPromptEditor({ cwd, sessionId, onReloaded }: Props) {
   const { t } = useI18n();
   const [state, setState] = useState<MainPromptState | null>(null);
-  const [drafts, setDrafts] = useState<Drafts>({ global: "", project: "" });
-  const [revisions, setRevisions] = useState<Drafts>({ global: "absent", project: "absent" });
+  const [drafts, setDrafts] = useState<Drafts>({ roster: "", global: "", project: "" });
+  const [revisions, setRevisions] = useState<Drafts>({ roster: "absent", global: "absent", project: "absent" });
   const [scope, setScope] = useState<MainPromptScope>("global");
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -34,8 +34,8 @@ export function MainPromptEditor({ cwd, sessionId, onReloaded }: Props) {
     const controller = new AbortController();
     setLoading(true);
     setState(null);
-    setDrafts({ global: "", project: "" });
-    setRevisions({ global: "absent", project: "absent" });
+    setDrafts({ roster: "", global: "", project: "" });
+    setRevisions({ roster: "absent", global: "absent", project: "absent" });
     setError(null);
     setConflictedScope(null);
     setReloadNeeded(false);
@@ -45,8 +45,8 @@ export function MainPromptEditor({ cwd, sessionId, onReloaded }: Props) {
         if (!response.ok || data.error) throw new Error(data.error ?? `HTTP ${response.status}`);
         if (controller.signal.aborted) return;
         setState(data);
-        setDrafts({ global: data.global.content, project: data.project.content });
-        setRevisions({ global: data.global.revision, project: data.project.revision });
+        setDrafts({ roster: data.roster?.content ?? "", global: data.global.content, project: data.project.content });
+        setRevisions({ roster: data.roster?.revision ?? "absent", global: data.global.revision, project: data.project.revision });
         setScope(data.effectiveScope ?? "global");
       })
       .catch((cause) => {
@@ -81,9 +81,11 @@ export function MainPromptEditor({ cwd, sessionId, onReloaded }: Props) {
         return;
       }
       if (!response.ok || data.error) throw new Error(data.error ?? `HTTP ${response.status}`);
+      const savedFile = data[scope];
+      if (!savedFile) throw new Error("Saved prompt source unavailable");
       setState(data);
-      setDrafts((previous) => ({ ...previous, [scope]: data[scope].content }));
-      setRevisions((previous) => ({ ...previous, [scope]: data[scope].revision }));
+      setDrafts((previous) => ({ ...previous, [scope]: savedFile.content }));
+      setRevisions((previous) => ({ ...previous, [scope]: savedFile.revision }));
       setReloadNeeded((previous) => previous || data.effectiveScope === scope);
     } catch (cause) {
       if (cwdRef.current === cwd) setError(cause instanceof Error ? cause.message : String(cause));
@@ -117,7 +119,7 @@ export function MainPromptEditor({ cwd, sessionId, onReloaded }: Props) {
       {state && (
         <>
           <div className="main-prompt-scopes" role="tablist" aria-label={t("mainPrompt.scope")}>
-            {(["global", "project"] as const).map((item) => (
+            {(["roster", "global", "project"] as const).filter((item) => item !== "roster" || state.roster).map((item) => (
               <button
                 key={item}
                 type="button"
@@ -126,9 +128,9 @@ export function MainPromptEditor({ cwd, sessionId, onReloaded }: Props) {
                 className={scope === item ? "is-selected" : ""}
                 onClick={() => { setScope(item); setError(null); }}
               >
-                {item === "global" ? t("mainPrompt.global") : t("mainPrompt.project")}
-                {state[item].effective && <span className="main-prompt-badge">{t("mainPrompt.effective")}</span>}
-                {state[item].exists && !state[item].effective && <span className="main-prompt-badge">{t("mainPrompt.inactive")}</span>}
+                {item === "roster" ? t("mainPrompt.repository") : item === "global" ? t("mainPrompt.global") : t("mainPrompt.project")}
+                {state[item]?.effective && <span className="main-prompt-badge">{t("mainPrompt.effective")}</span>}
+                {state[item]?.exists && !state[item]?.effective && <span className="main-prompt-badge">{t("mainPrompt.inactive")}</span>}
               </button>
             ))}
           </div>
@@ -138,6 +140,10 @@ export function MainPromptEditor({ cwd, sessionId, onReloaded }: Props) {
             {scope === "global" && state.project.effective && <span>{t("mainPrompt.overridden")}</span>}
             {scope === "project" && !state.projectTrusted && (
               <span role="status">{t("mainPrompt.untrusted")}</span>
+            )}
+            {state.effectiveScope && state.effectiveScope !== scope && (
+              <span role="status">{t("mainPrompt.activeSource").replace("{scope}", state.effectiveScope)
+                .replace("{path}", state[state.effectiveScope]?.path ?? "")}</span>
             )}
           </div>
           <label className="main-prompt-label" htmlFor="main-prompt-text">{t("mainPrompt.instructions")}</label>
@@ -169,7 +175,7 @@ export function MainPromptEditor({ cwd, sessionId, onReloaded }: Props) {
           )}
           <div className="main-prompt-footer">
             <span role="status">
-              {error ?? (reloadNeeded
+              {error ?? (scope === "roster" ? t("mainPrompt.repositoryTracked") : reloadNeeded
                 ? t("mainPrompt.savedReload")
                 : t("mainPrompt.newSessions"))}
             </span>

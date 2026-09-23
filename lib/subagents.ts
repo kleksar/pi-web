@@ -9,6 +9,7 @@ import { isExistingPathWithinRoots, isPathWithinRoots } from "./path-security";
 import { disabledBuiltInSubagents } from "./subagent-settings";
 import { pendingContextRequest } from "./subagent-context-handoff";
 import { getRepositoryRosterRoot } from "./repository-roster";
+import { isProjectMainConfigTrusted } from "./project-trust";
 import { PRESET_READ_ONLY } from "./tool-presets";
 import type { SessionEntry, SubagentSessionStatus } from "./types";
 import {
@@ -598,6 +599,25 @@ function profileDirectories(cwd: string): Array<[string, Exclude<SubagentScope, 
   ];
 }
 
+/** A project must be explicitly trusted before its profiles can replace a shared roster ID. */
+function configuredProfileSources(cwd: string): SubagentProfile[] {
+  const profiles: SubagentProfile[] = [];
+  const rosterIds = new Set<string>();
+  let projectTrusted: boolean | undefined;
+  for (const [dir, scope] of profileDirectories(cwd)) {
+    for (const profile of readProfileDirectory(dir, scope, cwd)) {
+      const id = profile.name.toLowerCase();
+      if (scope === "roster") rosterIds.add(id);
+      if ((scope === "workspace" || scope === "project") && rosterIds.has(id)) {
+        projectTrusted ??= isProjectMainConfigTrusted(cwd, getAgentDir());
+        if (!projectTrusted) continue;
+      }
+      profiles.push(profile);
+    }
+  }
+  return profiles;
+}
+
 /**
  * A built-in has no file, so `enabled: false` cannot be written next to it the way
  * it is for a profile on disk. Its off state is a name in `agents/settings.json`
@@ -613,21 +633,16 @@ function builtInProfiles(): SubagentProfile[] {
   }));
 }
 
-/** Every configured source, including profiles shadowed by a higher-precedence scope. */
+/** Every eligible source, including profiles shadowed by a higher-precedence scope. */
 export function listSubagentProfileSources(cwd: string): SubagentProfile[] {
-  const profiles = builtInProfiles();
-  for (const [dir, scope] of profileDirectories(cwd)) {
-    profiles.push(...readProfileDirectory(dir, scope, cwd));
-  }
+  const profiles = [...builtInProfiles(), ...configuredProfileSources(cwd)];
   return profiles.sort((a, b) => a.displayName.localeCompare(b.displayName));
 }
 
 export function listSubagentProfiles(cwd: string): SubagentProfile[] {
   // A same-name file replaces the built-in outright, its own `enabled` included.
   const byName = new Map(builtInProfiles().map((profile) => [profile.name.toLowerCase(), profile]));
-  for (const [dir, scope] of profileDirectories(cwd)) {
-    for (const profile of readProfileDirectory(dir, scope, cwd)) byName.set(profile.name.toLowerCase(), profile);
-  }
+  for (const profile of configuredProfileSources(cwd)) byName.set(profile.name.toLowerCase(), profile);
   return [...byName.values()].sort((a, b) => a.displayName.localeCompare(b.displayName));
 }
 
@@ -686,6 +701,14 @@ export function saveSubagentProfile(
   profile: SubagentProfileInput,
 ): SubagentProfile {
   const name = assertProfileName(profile.name);
+  if (scope === "project") {
+    const rosterRoot = getRepositoryRosterRoot();
+    if (rosterRoot && !isProjectMainConfigTrusted(cwd, getAgentDir())
+      && readProfileDirectory(join(rosterRoot, "agents"), "roster", cwd)
+        .some((candidate) => candidate.name.toLowerCase() === name.toLowerCase())) {
+      throw new Error(`Trust this project before overriding repository agent ${name}`);
+    }
+  }
   const tools = [...new Set(profile.tools.filter((tool) => BUILTIN_TOOLS.has(tool)))];
   const extensionTools = [...new Set(profile.extensionTools ?? [])];
   const dir = assertWritableProfileDirectory(cwd, scope);

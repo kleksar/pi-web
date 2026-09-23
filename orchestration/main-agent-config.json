@@ -5,7 +5,9 @@
   ],
   "orchestration": {
     "allowedChildren": [
-      "task-coordinator"
+      "small-task-coordinator",
+      "task-coordinator",
+      "complex-task-coordinator"
     ]
   }
 }

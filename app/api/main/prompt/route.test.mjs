@@ -156,3 +156,77 @@ test("prompt writes enforce same origin and JSON", async (t) => {
   }));
   assert.equal(formRequest.status, 415);
 });
+
+test("repository Main prompt is editable through UI with revision checks and yields to local and trusted project files", async (t) => {
+  const location = await cwd(t);
+  const roster = join(fixture, "roster-main-prompt");
+  await mkdir(join(roster, "agents"), { recursive: true });
+  await mkdir(join(roster, "skills"));
+  const repositoryPrompt = join(roster, "APPEND_SYSTEM.md");
+  await writeFile(repositoryPrompt, "Versioned coordinator");
+  const previousRoster = process.env.PI_WEB_ROSTER_ROOT;
+  process.env.PI_WEB_ROSTER_ROOT = roster;
+  const globalPrompt = join(agentDir, "APPEND_SYSTEM.md");
+  let previousGlobal = null;
+  try { previousGlobal = await readFile(globalPrompt); } catch { /* The global experiment can be absent. */ }
+  await rm(globalPrompt, { force: true });
+  t.after(async () => {
+    if (previousRoster === undefined) delete process.env.PI_WEB_ROSTER_ROOT;
+    else process.env.PI_WEB_ROSTER_ROOT = previousRoster;
+    if (previousGlobal !== null) await writeFile(globalPrompt, previousGlobal);
+    else await rm(globalPrompt, { force: true });
+    await rm(roster, { recursive: true, force: true });
+  });
+
+  let { state } = await readState(location);
+  assert.equal(state.effectiveScope, "roster");
+  assert.equal(state.roster.path, repositoryPrompt);
+  assert.equal(state.roster.content, "Versioned coordinator");
+  const firstRevision = state.roster.revision;
+  let response = await save(location, "roster", "Reviewed coordinator", firstRevision);
+  assert.equal(response.status, 200);
+  state = await response.json();
+  assert.equal(state.effectiveScope, "roster");
+  assert.equal(await readFile(repositoryPrompt, "utf8"), "Reviewed coordinator");
+  response = await save(location, "roster", "Stale", firstRevision);
+  assert.equal(response.status, 409);
+  assert.equal(await readFile(repositoryPrompt, "utf8"), "Reviewed coordinator");
+  const simultaneous = await Promise.all([
+    save(location, "roster", "Concurrent A", state.roster.revision),
+    save(location, "roster", "Concurrent B", state.roster.revision),
+  ]);
+  assert.deepEqual(simultaneous.map((item) => item.status).sort(), [200, 409]);
+  state = (await readState(location)).state;
+
+  const { repositoryMainPromptFallback } = await jiti.import("../../../../lib/main-prompt.ts");
+  const loader = new DefaultResourceLoader({
+    cwd: location, agentDir, noExtensions: true, noSkills: true, noPromptTemplates: true,
+    noThemes: true, noContextFiles: true,
+    appendSystemPromptOverride: (base) => base.length ? base : repositoryMainPromptFallback(location, agentDir),
+  });
+  await loader.reload(projectTrustReloadOptions(location, agentDir));
+  assert.deepEqual(loader.getAppendSystemPrompt(), [state.roster.content]);
+
+  response = await save(location, "global", "Local experiment", state.global.revision);
+  state = await response.json();
+  assert.equal(state.effectiveScope, "global");
+  await loader.reload(projectTrustReloadOptions(location, agentDir));
+  assert.deepEqual(loader.getAppendSystemPrompt(), ["Local experiment"]);
+
+  response = await save(location, "project", "", state.project.revision);
+  state = await response.json();
+  assert.equal(state.effectiveScope, "global", "untrusted project prompt remains inactive");
+  trustProject(location, agentDir);
+  ({ state } = await readState(location));
+  assert.equal(state.effectiveScope, "project");
+  await loader.reload(projectTrustReloadOptions(location, agentDir));
+  assert.deepEqual(loader.getAppendSystemPrompt(), [""], "an empty trusted project prompt shadows both fallbacks");
+
+  const outside = join(fixture, "repo-prompt-outside.md");
+  await writeFile(outside, "untouched");
+  await rm(repositoryPrompt);
+  await symlink(outside, repositoryPrompt);
+  response = await save(location, "roster", "attack", "absent");
+  assert.equal(response.status, 403);
+  assert.equal(await readFile(outside, "utf8"), "untouched");
+});

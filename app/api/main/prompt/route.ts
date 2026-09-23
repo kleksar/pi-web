@@ -58,8 +58,8 @@ export async function PUT(request: Request) {
     }
     const input = body as Record<string, unknown>;
     const cwd = await validateCwd(input.cwd);
-    if (input.scope !== "global" && input.scope !== "project") {
-      throw new MainPromptValidationError("scope must be global or project");
+    if (input.scope !== "global" && input.scope !== "project" && input.scope !== "roster") {
+      throw new MainPromptValidationError("scope must be roster, global, or project");
     }
     if (typeof input.content !== "string" || typeof input.revision !== "string") {
       throw new MainPromptValidationError("content and revision required");

@@ -9,7 +9,13 @@ import {
   type SubagentProfileInput,
   type SubagentWritableScope,
 } from "@/lib/subagents";
-import { writeDisabledBuiltInSubagent } from "@/lib/subagent-settings";
+import {
+  disabledBuiltInSubagents,
+  getRepositorySubagentSettingsPath,
+  getSubagentSettingsPath,
+  readSubagentSettingsSources,
+  writeDisabledBuiltInSubagent,
+} from "@/lib/subagent-settings";
 import { validateSelectedAgentResources } from "@/lib/agent-resource-selection";
 import { getRepositoryRosterRoot } from "@/lib/repository-roster";
 import { hasJsonContentType, isApiRequestAllowed } from "@/lib/request-security";
@@ -108,8 +114,13 @@ export async function PATCH(req: Request) {
     );
     if (!source) return NextResponse.json({ error: "Agent profile not found" }, { status: 404 });
     if (scope === "builtin") {
-      writeDisabledBuiltInSubagent(source.name, !body.enabled);
-      return NextResponse.json({ profile: { ...source, enabled: body.enabled } });
+      writeDisabledBuiltInSubagent(source.name, !body.enabled,
+        getRepositorySubagentSettingsPath() ?? getSubagentSettingsPath());
+      const effectiveEnabled = !disabledBuiltInSubagents().has(source.name.toLowerCase());
+      return NextResponse.json({
+        profile: { ...source, enabled: effectiveEnabled },
+        source: readSubagentSettingsSources().disabledBuiltIns,
+      });
     }
     const profile: SubagentProfileInput = { ...source, enabled: body.enabled };
     await validateSelectedAgentResources(cwd, profile);

@@ -58,6 +58,7 @@ import {
   type PinnedExtensionTool,
 } from "./agent-resource-selection";
 import { isBuiltInSubagentsEnabled } from "./subagent-settings";
+import { repositoryMainPromptFallback } from "./main-prompt";
 import { resolveShellTools } from "./powershell-settings";
 import { CHAT_ONLY_RESOURCE_LOADER_OPTIONS, contextFilesSystemPrompt } from "./chat-only";
 import { createExactSystemPromptExtension } from "./exact-system-prompt";
@@ -2238,6 +2239,10 @@ export async function startRpcSession(
       selectedToolNames ?? settingsManager.getDefaultTools() ?? [], settingsManager.getDefaultTools(),
     ).some((name) => name === "read" || name === "bash");
     const mainNeedsSkillInjection = Boolean(effectiveSelectedSkillPaths?.length) && !mainHasReadTool;
+    const mainAppendSystemPromptOverride = (base: string[]): string[] => [
+      ...(base.length ? base : repositoryMainPromptFallback(sessionCwd, agentDir)),
+      ...(mainNeedsSkillInjection && pinnedMainSkills ? [pinnedSkillsPrompt(pinnedMainSkills)] : []),
+    ];
     const mainSkillsOverride = effectiveSelectedSkillPaths !== undefined
       ? (base: { skills: import("@earendil-works/pi-coding-agent").Skill[];
           diagnostics: import("@earendil-works/pi-coding-agent").ResourceDiagnostic[] }) => {
@@ -2290,19 +2295,17 @@ export async function startRpcSession(
         : chatOnly
           ? {
               ...CHAT_ONLY_RESOURCE_LOADER_OPTIONS,
-              // Main's editable APPEND_SYSTEM.md is used even in chat-only mode.
+              // Main's effective project, local, or repository prompt is used even in chat-only mode.
               appendSystemPrompt: undefined,
-              appendSystemPromptOverride: undefined,
+              appendSystemPromptOverride: mainAppendSystemPromptOverride,
               extensionFactories: [exactSystemPromptExtension],
             }
         : {
             ...(effectiveSelectedSkillPaths !== undefined ? {
               noSkills: effectiveSelectedSkillPaths.length === 0,
               skillsOverride: mainSkillsOverride,
-              ...(mainNeedsSkillInjection ? { appendSystemPromptOverride: (base: string[]) => [
-                ...base, pinnedSkillsPrompt(pinnedMainSkills ?? []),
-              ] } : {}),
             } : {}),
+            appendSystemPromptOverride: mainAppendSystemPromptOverride,
             ...((effectiveSelectedSkillPaths === undefined || effectiveSelectedSkillPaths.length > 0)
               ? { additionalSkillPaths: getRepositorySkillPaths() } : {}),
             ...(effectiveSelectedToolRefs !== undefined ? { noExtensions: effectiveSelectedToolRefs.length === 0 } : {}),

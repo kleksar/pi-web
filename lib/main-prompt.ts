@@ -6,8 +6,10 @@ import lockfile from "proper-lockfile";
 import { writePrivateFileAtomicSync } from "./atomic-file";
 import { isPathWithinRoots } from "./path-security";
 import { getProjectTrustStatus } from "./project-trust";
+import { getRepositoryRosterRoot } from "./repository-roster";
 
-export type MainPromptScope = "global" | "project";
+export type MainPromptScope = "global" | "project" | "roster";
+type LegacyPromptScope = Exclude<MainPromptScope, "roster">;
 
 export interface MainPromptFile {
   path: string;
@@ -22,6 +24,7 @@ export interface MainPromptState {
   projectTrusted: boolean;
   global: MainPromptFile;
   project: MainPromptFile;
+  roster?: MainPromptFile;
 }
 
 const FILENAME = "APPEND_SYSTEM.md";
@@ -32,7 +35,7 @@ export class MainPromptAccessError extends Error {}
 export class MainPromptConflictError extends Error {}
 export class MainPromptValidationError extends Error {}
 
-function promptPath(cwd: string, scope: MainPromptScope, agentDir: string): string {
+function promptPath(cwd: string, scope: LegacyPromptScope, agentDir: string): string {
   return scope === "global"
     ? join(resolve(agentDir), FILENAME)
     : join(resolve(cwd), ".pi", FILENAME);
@@ -43,7 +46,7 @@ function promptPath(cwd: string, scope: MainPromptScope, agentDir: string): stri
  * following a symlink in APPEND_SYSTEM.md, so saves never rewrite a linked repo.
  * Project .pi directories may be linked within the project, but never outside it.
  */
-function checkedParent(cwd: string, scope: MainPromptScope, agentDir: string, create: boolean): string | null {
+function checkedParent(cwd: string, scope: LegacyPromptScope, agentDir: string, create: boolean): string | null {
   const root = scope === "global" ? resolve(agentDir) : realpathSync(cwd);
   const dir = scope === "global" ? resolve(agentDir) : join(resolve(cwd), ".pi");
   if (create) mkdirSync(dir, { recursive: true, mode: 0o700 });
@@ -62,7 +65,7 @@ function checkedParent(cwd: string, scope: MainPromptScope, agentDir: string, cr
   return realDir;
 }
 
-function readPromptFile(cwd: string, scope: MainPromptScope, agentDir: string): MainPromptFile {
+function readPromptFile(cwd: string, scope: LegacyPromptScope, agentDir: string): MainPromptFile {
   const path = promptPath(cwd, scope, agentDir);
   const parent = checkedParent(cwd, scope, agentDir, false);
   if (!parent) return { path, exists: false, content: "", revision: ABSENT_REVISION, effective: false };
@@ -91,16 +94,53 @@ function readPromptFile(cwd: string, scope: MainPromptScope, agentDir: string): 
   };
 }
 
-/** Mirrors Pi's ordinary discovery: trusted project file wins; otherwise global. */
+function readRosterPrompt(): MainPromptFile | undefined {
+  const root = getRepositoryRosterRoot();
+  if (!root) return undefined;
+  const path = join(root, FILENAME);
+  let stat: ReturnType<typeof lstatSync>;
+  try {
+    stat = lstatSync(path);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      return { path, exists: false, content: "", revision: ABSENT_REVISION, effective: false };
+    }
+    throw error;
+  }
+  if (stat.isSymbolicLink() || !stat.isFile()) {
+    throw new MainPromptAccessError("Repository APPEND_SYSTEM.md must be a regular file, not a symlink");
+  }
+  if (stat.size > MAX_CONTENT_LENGTH) throw new MainPromptValidationError("Repository APPEND_SYSTEM.md is too large");
+  const bytes = readFileSync(path);
+  if (bytes.length > MAX_CONTENT_LENGTH) throw new MainPromptValidationError("Repository APPEND_SYSTEM.md is too large");
+  return {
+    path,
+    exists: true,
+    content: bytes.toString("utf8"),
+    revision: `sha256:${createHash("sha256").update(bytes).digest("hex")}`,
+    effective: false,
+  };
+}
+
+/** Trusted project > local experiment > repository default, matching the SDK override. */
 export function readMainPrompt(cwd: string, agentDir = getAgentDir()): MainPromptState {
   const global = readPromptFile(cwd, "global", agentDir);
   const project = readPromptFile(cwd, "project", agentDir);
   const projectTrusted = getProjectTrustStatus(cwd, agentDir).trusted;
-  const effectiveScope: MainPromptScope | null =
-    project.exists && projectTrusted ? "project" : global.exists ? "global" : null;
+  const roster = readRosterPrompt();
+  const effectiveScope: MainPromptState["effectiveScope"] =
+    project.exists && projectTrusted ? "project"
+      : global.exists ? "global" : roster?.exists ? "roster" : null;
   global.effective = effectiveScope === "global";
   project.effective = effectiveScope === "project";
-  return { effectiveScope, projectTrusted, global, project };
+  if (roster) roster.effective = effectiveScope === "roster";
+  return { effectiveScope, projectTrusted, global, project, ...(roster ? { roster } : {}) };
+}
+
+/** Called at each resource-loader reload; an empty project or local file still shadows the roster. */
+export function repositoryMainPromptFallback(cwd: string, agentDir = getAgentDir()): string[] {
+  const prompt = readMainPrompt(cwd, agentDir);
+  return prompt.effectiveScope === "roster" && prompt.roster ? [prompt.roster.content] : [];
 }
 
 /** Compare and replace under one lock; a stale editor cannot overwrite a newer edit. */
@@ -111,12 +151,31 @@ export async function saveMainPrompt(
   expectedRevision: string,
   agentDir = getAgentDir(),
 ): Promise<MainPromptState> {
-  if (scope !== "global" && scope !== "project") throw new MainPromptValidationError("Invalid prompt scope");
+  if (scope !== "global" && scope !== "project" && scope !== "roster") {
+    throw new MainPromptValidationError("Invalid prompt scope");
+  }
   if (typeof content !== "string" || Buffer.byteLength(content, "utf8") > MAX_CONTENT_LENGTH) {
     throw new MainPromptValidationError("Prompt must be text shorter than 512 KiB");
   }
   if (typeof expectedRevision !== "string" || !/^(absent|sha256:[0-9a-f]{64})$/.test(expectedRevision)) {
     throw new MainPromptValidationError("Valid expected revision required");
+  }
+
+  if (scope === "roster") {
+    const before = readRosterPrompt();
+    if (!before) throw new MainPromptAccessError("Repository roster is not configured");
+    if (before.revision !== expectedRevision) throw new MainPromptConflictError("Prompt changed on disk");
+    const root = getRepositoryRosterRoot();
+    if (!root) throw new MainPromptAccessError("Repository roster is not configured");
+    const release = await lockfile.lock(root, { retries: { retries: 8, factor: 1, minTimeout: 20, maxTimeout: 100 } });
+    try {
+      const current = readRosterPrompt();
+      if (!current || current.revision !== expectedRevision) throw new MainPromptConflictError("Prompt changed on disk");
+      writePrivateFileAtomicSync(join(root, FILENAME), content);
+    } finally {
+      await release();
+    }
+    return readMainPrompt(cwd, agentDir);
   }
 
   // Resolve the existing file before creating a directory. A missing .pi

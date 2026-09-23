@@ -8,6 +8,12 @@ export interface SubagentProfilesResponse {
 export interface SubagentSettingsResponse {
   enabled: boolean;
   maxConcurrent: number;
+  sources?: {
+    builtInEnabled: "local" | "roster" | "default";
+    disabledBuiltIns: "local" | "roster" | "default";
+    maxConcurrent: "local" | "roster" | "default";
+  };
+  defaultEditScope?: "local" | "roster";
 }
 
 export interface ShellToolSettingsResponse {

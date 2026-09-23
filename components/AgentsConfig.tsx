@@ -205,6 +205,9 @@ export function AgentsConfig({
   const [error, setError] = useState<string | null>(null);
   const [builtInEnabled, setBuiltInEnabled] = useState(false);
   const [maxConcurrent, setMaxConcurrent] = useState(10);
+  const [settingsEditScope, setSettingsEditScope] = useState<"roster" | "local">("local");
+  const [settingsSources, setSettingsSources] = useState<SubagentSettingsResponse["sources"]>();
+  const [repositorySettingsAvailable, setRepositorySettingsAvailable] = useState(false);
   const [settingsLoading, setSettingsLoading] = useState(true);
   const [settingsSaving, setSettingsSaving] = useState(false);
   const [settingsError, setSettingsError] = useState<string | null>(null);
@@ -220,6 +223,8 @@ export function AgentsConfig({
   const [mainOverrides, setMainOverrides] = useState<MainAgentConfig>({});
   const [mainRevision, setMainRevision] = useState<string | null>(null);
   const [mainProjectTrusted, setMainProjectTrusted] = useState(true);
+  const [loadedMainSource, setLoadedMainSource] = useState<string | null>(null);
+  const mainLoadSerial = useRef(0);
   const [mainMapError, setMainMapError] = useState<string | null>(null);
   const [mainMapSaving, setMainMapSaving] = useState(false);
   // AgentsConfig mounts lazily. A request issued from Main can already be positive on first mount.
@@ -252,30 +257,39 @@ export function AgentsConfig({
   const profileDraftChanged = mode === "create" || Boolean(selected && mode === "edit"
     && JSON.stringify(draft) !== JSON.stringify(editableProfile(selected)));
   const mainDraftChanged = JSON.stringify(mainDraft) !== JSON.stringify(mainConfig);
+  const mainMapScope = rosterAvailable ? "roster" : "project";
+  const wantedMainSource = `${cwd}:${mainMapScope}`;
 
   const loadMainForMap = useCallback(async () => {
+    const loadSerial = ++mainLoadSerial.current;
+    const scope = rosterAvailable ? "roster" : "project";
     setMainMapError(null);
     try {
-      const response = await fetch(`/api/main/config?cwd=${encodeURIComponent(cwd)}&scope=project`, { cache: "no-store" });
+      const response = await fetch(`/api/main/config?cwd=${encodeURIComponent(cwd)}&scope=${scope}`, { cache: "no-store" });
       const data = await response.json() as { config?: MainAgentConfig; overrides?: MainAgentConfig; trusted?: boolean; revision?: string; error?: string };
+      if (loadSerial !== mainLoadSerial.current) return;
       if (!response.ok || data.error || !data.config || !data.revision) throw new Error(data.error ?? `HTTP ${response.status}`);
       setMainConfig(data.config);
       setMainDraft(data.config);
       setMainOverrides(data.overrides ?? {});
       setMainProjectTrusted(data.trusted ?? true);
       setMainRevision(data.revision);
+      setLoadedMainSource(`${cwd}:${scope}`);
     } catch (cause) {
+      if (loadSerial !== mainLoadSerial.current) return;
       setMainMapError(cause instanceof Error ? cause.message : String(cause));
       setMainRevision(null);
     }
-  }, [cwd]);
+  }, [cwd, rosterAvailable]);
 
-  useEffect(() => { if (mainRevision === null) void loadMainForMap(); }, [mainRevision, loadMainForMap]);
+  useEffect(() => {
+    if (!loading && (mainRevision === null || loadedMainSource !== wantedMainSource)) void loadMainForMap();
+  }, [loading, mainRevision, loadedMainSource, wantedMainSource, loadMainForMap]);
 
   useEffect(() => {
     const onMainConfigUpdated = (event: Event) => {
       const detail = (event as CustomEvent<{ config: MainAgentConfig; revision: string; origin?: string; scope?: string; overrides?: MainAgentConfig }>).detail;
-      if (!detail?.config || typeof detail.revision !== "string" || detail.origin === "map" || detail.scope !== "project") return;
+      if (!detail?.config || typeof detail.revision !== "string" || detail.origin === "map" || detail.scope !== mainMapScope) return;
       if (mainDraftChanged) {
         setMainMapError(t("main.configChanged"));
         return;
@@ -288,7 +302,7 @@ export function AgentsConfig({
     };
     window.addEventListener("pi-web:main-config-updated", onMainConfigUpdated);
     return () => window.removeEventListener("pi-web:main-config-updated", onMainConfigUpdated);
-  }, [mainDraftChanged, t]);
+  }, [mainDraftChanged, mainMapScope, t]);
 
   const loadProfiles = useCallback(async (preferredKey?: string) => {
     setLoading(true);
@@ -341,6 +355,9 @@ export function AgentsConfig({
         }
         setBuiltInEnabled(data.enabled);
         if (typeof data.maxConcurrent === "number") setMaxConcurrent(data.maxConcurrent);
+        setSettingsSources(data.sources);
+        setSettingsEditScope(data.defaultEditScope === "roster" ? "roster" : "local");
+        setRepositorySettingsAvailable(data.defaultEditScope === "roster");
       } catch (cause) {
         if (controller.signal.aborted) return;
         setSettingsError(cause instanceof Error ? cause.message : String(cause));
@@ -612,13 +629,14 @@ export function AgentsConfig({
       const response = await fetch("/api/subagents/settings", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ enabled }),
+        body: JSON.stringify({ enabled, scope: settingsEditScope }),
       });
       const data = await response.json() as Partial<SubagentSettingsResponse> & { error?: string };
       if (!response.ok || data.error || typeof data.enabled !== "boolean") {
         throw new Error(data.error ?? `HTTP ${response.status}`);
       }
       setBuiltInEnabled(data.enabled);
+      setSettingsSources(data.sources);
       setReloadNeeded(Boolean(sessionId));
     } catch (cause) {
       setSettingsError(cause instanceof Error ? cause.message : String(cause));
@@ -634,11 +652,12 @@ export function AgentsConfig({
       const response = await fetch("/api/subagents/settings", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ maxConcurrent: value }),
+        body: JSON.stringify({ maxConcurrent: value, scope: settingsEditScope }),
       });
       const data = await response.json() as Partial<SubagentSettingsResponse> & { error?: string };
       if (!response.ok || data.error || typeof data.maxConcurrent !== "number") throw new Error(data.error ?? `HTTP ${response.status}`);
       setMaxConcurrent(data.maxConcurrent);
+      setSettingsSources(data.sources);
     } catch (cause) {
       setSettingsError(cause instanceof Error ? cause.message : String(cause));
     }
@@ -711,15 +730,16 @@ export function AgentsConfig({
   };
 
   const saveMapMain = async () => {
-    if (!mainRevision || !mainDraftChanged || mainMapSaving || !mainProjectTrusted) return;
+    if (!mainRevision || !mainDraftChanged || mainMapSaving || (mainMapScope === "project" && !mainProjectTrusted)) return;
     setMainMapSaving(true);
     setMainMapError(null);
     try {
       const response = await fetch("/api/main/config", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ cwd, scope: "project", config: mainDraft,
-          expectedRevision: mainRevision, previous: mainConfig, overrides: mainOverrides }),
+        body: JSON.stringify({ cwd, scope: mainMapScope, config: mainDraft,
+          expectedRevision: mainRevision,
+          ...(mainMapScope === "project" ? { previous: mainConfig, overrides: mainOverrides } : {}) }),
       });
       const data = await response.json() as { config?: MainAgentConfig; overrides?: MainAgentConfig; trusted?: boolean; revision?: string; error?: string };
       if (!response.ok || data.error || !data.config || !data.revision) throw new Error(data.error ?? `HTTP ${response.status}`);
@@ -729,7 +749,7 @@ export function AgentsConfig({
       setMainProjectTrusted(data.trusted ?? true);
       setMainRevision(data.revision);
       window.dispatchEvent(new CustomEvent("pi-web:main-config-updated", {
-        detail: { config: data.config, revision: data.revision, overrides: data.overrides ?? {}, origin: "map", scope: "project" },
+        detail: { config: data.config, revision: data.revision, overrides: data.overrides ?? {}, origin: "map", scope: mainMapScope },
       }));
       window.dispatchEvent(new Event("pi-web:project-trust-updated"));
     } catch (cause) {
@@ -750,7 +770,8 @@ export function AgentsConfig({
   };
 
   const mapEditable = mapOwner === MAIN_NODE_ID
-    ? mainRevision !== null && !mainMapSaving && mainProjectTrusted
+    ? mainRevision !== null && loadedMainSource === wantedMainSource && !mainMapSaving
+      && (mainMapScope === "roster" || mainProjectTrusted)
     : Boolean(mapOwner && selected && mapOwner.toLowerCase() === selected.name.toLowerCase()
       && isWritableScope(selected.scope) && !selected.configurationError && !saving);
 
@@ -773,9 +794,26 @@ export function AgentsConfig({
         <div className="agents-feature-copy">
           <strong>{t("agents.builtInTitle")}</strong>
           <span>{t("agents.builtInDescription")}</span>
+          {settingsSources && <span role="status">
+            {t("agents.settingsSources")
+              .replace("{enabled}", settingsSources.builtInEnabled)
+              .replace("{concurrency}", settingsSources.maxConcurrent)
+              .replace("{profiles}", settingsSources.disabledBuiltIns)}
+          </span>}
           {reloadNeeded && <span role="status" className="agents-feature-reload-notice">{t("agents.reloadRequired")}</span>}
         </div>
         <div className="agents-feature-actions">
+          {repositorySettingsAvailable && <label className="agents-concurrency-control">
+            <span>{t("agents.settingsSaveTo")}</span>
+            <select
+              aria-label={t("agents.settingsSaveTo")}
+              value={settingsEditScope}
+              onChange={(event) => setSettingsEditScope(event.target.value as "roster" | "local")}
+            >
+              <option value="roster">{t("agents.settingsRepo")}</option>
+              <option value="local">{t("agents.settingsLocal")}</option>
+            </select>
+          </label>}
           {reloadNeeded && sessionId && (
             <ConfigButton size="small" onClick={() => void reloadSession()} disabled={reloading || settingsSaving}>
               {reloading ? t("agents.reloading") : t("agents.reloadSession")}
@@ -1140,7 +1178,7 @@ export function AgentsConfig({
         {view === "map" && mapOwner === null && (profileDraftChanged || mainDraftChanged) && (
           <span role="status" style={{ color: "var(--text-muted)", fontSize: 11 }}>{t("agents.unsavedMapNotice")}</span>
         )}
-        {view === "map" && mapOwner === MAIN_NODE_ID && !mainProjectTrusted && (
+        {view === "map" && mapOwner === MAIN_NODE_ID && mainMapScope === "project" && !mainProjectTrusted && (
           <ConfigButton size="small" onClick={async () => {
             try {
               const response = await fetch("/api/project-trust", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ cwd, purpose: "main-config" }) });
@@ -1152,10 +1190,13 @@ export function AgentsConfig({
           }}>{t("main.trustProject")}</ConfigButton>
         )}
         {view === "map" && mapOwner === MAIN_NODE_ID && !mainMapError && (
-          <span style={{ color: "var(--text-muted)", fontSize: 11 }}>{t("main.newSessionsOnly")}</span>
+          <span style={{ color: "var(--text-muted)", fontSize: 11 }}>
+            {t(mainMapScope === "roster" ? "agents.mapRepositorySource" : "agents.mapProjectSource")}
+            {" · "}{t("main.newSessionsOnly")}
+          </span>
         )}
         {view === "map" && mapOwner === MAIN_NODE_ID && mainDraftChanged && (
-          <ConfigButton variant="primary" onClick={() => void saveMapMain()} disabled={mainMapSaving || !mainRevision || !mainProjectTrusted}>
+          <ConfigButton variant="primary" onClick={() => void saveMapMain()} disabled={mainMapSaving || !mainRevision || !mapEditable}>
             {mainMapSaving ? t("agents.saving") : t("agents.save")}
           </ConfigButton>
         )}

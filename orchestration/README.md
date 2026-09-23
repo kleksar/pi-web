@@ -1,53 +1,88 @@
-# Orchestration catalog
+# Versioned orchestration catalog
 
-Profiles in `agents/` and skills in `skills/` are shared across projects when
-Pi Web starts with `PI_WEB_ROSTER_ROOT` pointing to the **absolute path** of
-this directory. Profiles are editable in Pi Web's Sub-agents panel under the
-`roster` scope. Skills stay authored in Git; the UI assigns them to agents.
-
-From the Pi Web checkout, start the development server with:
+This directory is the shared, Git-tracked default for Pi Web's Main prompt,
+delegation settings, agent profiles, and individually assigned skills. Start Pi
+Web with `PI_WEB_ROSTER_ROOT` set by the **server operator** to the absolute path
+of this checkout's `orchestration` directory:
 
 ```bash
 PI_WEB_ROSTER_ROOT="$(pwd)/orchestration" npm run dev
 ```
 
-Set the same environment variable for an installed Pi Web server, pointing
-to this checkout's `orchestration` directory. Open Settings → Main to inspect
-the shared Main default and any personal or project overrides. Saving a
-project override affects only that project's `.pi/main-agent-config.json`;
-editing an agent under `roster` affects this catalog directly. New sessions
-use the current policy; existing sessions keep their pinned configuration.
-Enable Pi Web's built-in sub-agents switch in Settings → Sub-agents before
-running the graph.
+For an installed server, point the same variable at the checkout, independent
+of the task project's working directory. From Settings → Main, edit the shared
+Main policy and `APPEND_SYSTEM.md` in the **Repository** scope. From Settings →
+Sub-agents, edit **Repository** profiles and shared delegation settings. UI
+changes to those sources modify tracked files and still need review, commit,
+and publication to Git. Skills are written and reviewed in Git, then assigned
+by selecting a specific skill in the agent editor. Local global settings are
+for experiments and can shadow shared defaults; the UI shows the effective
+source. Trusted project-specific policies can override shared settings.
 
-This example is one bounded software change:
+## Available agents
+
+| Role | Profiles | When they run |
+| --- | --- | --- |
+| Task coordination | `small-task-coordinator`, `task-coordinator`, `complex-task-coordinator` | Main selects one by impact, uncertainty, and reversibility, never by line count alone. |
+| Complex subteams | `evidence-coordinator`, `implementation-coordinator`, `verification-coordinator` | The complex coordinator requests targeted findings, a bounded implementation, then an independent check. |
+| Source retrieval | `project-policy-reader`, `project-requirements-reader`, `project-docs-reader`, `project-code-reader` | Read only the project files or supplied issue/design artifacts needed for a concrete question. |
+| Analysis | `technical-analyst`, `architecture-reviewer`, `test-planner` | Analyze supplied evidence without file or shell tools; request missing evidence through a permitted provider where configured. |
+| Edits | `bounded-writer`, `documentation-writer` | Receive a settled change order and relevant project constraints, then edit within assigned files. |
+| Checks | `change-verifier` | Inspect diff and run targeted, non-destructive checks independently of the writer. |
+
+All 16 profiles are **available**, not automatically launched. For a narrow
+reversible fix the small coordinator can use just a policy reader, one code
+reader, a writer, and a verifier. If requirements, design sources, or
+architecture are uncertain, Main can use the medium or complex coordinator.
+Even a small code change can have a large blast radius. The reusable skills
+(`coordinate-task`, `extract-project-policy`, `trace-project-context`,
+`assess-architecture`, `implement-change-order`, `plan-verification`,
+`verify-change`) contain role instructions; a skill does not grant a tool.
 
 ```mermaid
 flowchart TD
-  Main --> Coordinator["Task coordinator"]
-  Coordinator --> Reader["Project code reader"]
-  Coordinator --> Analyst["Technical analyst"]
-  Coordinator --> Writer["Bounded writer"]
-  Coordinator --> Verifier["Change verifier"]
-  Reader -. "on-demand evidence" .-> Analyst
+  Main --> Small["Small coordinator"]
+  Main --> Task["Task coordinator"]
+  Main --> Complex["Complex coordinator"]
+  Complex --> Evidence["Evidence coordinator"]
+  Complex --> Analysis["Analyst and architecture reviewer"]
+  Complex --> Implement["Implementation coordinator"]
+  Complex --> Verify["Verification coordinator"]
 ```
 
-The coordinator starts specialists explicitly. The reader can answer an
-analyst's later request through the host-mediated context handoff; it is not
-a strict dependency, so the analyst may begin with the supplied context.
-The writer receives a concrete change order after the coordinator resolves
-or escalates any material decision. The verifier inspects the resulting diff.
+In the complex path, Evidence can delegate to the policy, requirements, docs,
+and code readers. Implementation can delegate to bounded code and documentation
+writers. Verification has a test planner and a change verifier. The Analyst
+and architecture reviewer can start with a small brief, then ask the parent
+for a later handoff from Evidence. A solid delegation edge permits a call; a
+strict `depends_on` edge requires an earlier successful result; a
+`context_providers` edge permits a *requested* handoff. Edges never start a
+child by themselves. The verified graph fits the runtime limit of three agent
+levels below Main, with at most 32 active descendants per root and the shared
+concurrency setting initially set to 10.
 
-No model is hard-coded in these starter profiles. Assign supported models,
-thinking levels, and Fast mode in the UI for your provider and budget. Tool
-selection narrows what Pi Web exposes but is not an operating-system sandbox.
-The roster is a reusable starting point; project-specific rules remain in the
-respective project, and reviewers should check source and design artifacts
-before each change.
+Project-specific approval rules and knowledge belong with their project.
+`project-policy-reader` retrieves applicable boundaries, and the coordinator
+passes a compact change order to the writer. A remotely hosted issue, pull
+request, or Figma design is not accessible to these file-only readers unless
+an artifact or verified excerpt is supplied. Architecture review flags choices
+for the user; prompts alone are **not** a technical approval gate. The runtime
+tool list limits model-visible tools, not operating-system permissions. No
+model or Fast setting is hard-coded: test an authenticated model/effort/fast
+combination for each role against [evaluation scenarios](../docs/orchestration-evaluation.md)
+before committing defaults.
 
-The historical `~/.pi/agent` profiles and skills are not in this catalog.
-Review them before any intentional import to this public repository. Do not
-replace populated global directories with symlinks.
-Links inside the shared `skills/` catalog must remain inside this catalog's
-trusted roster root; independently installed global skills remain available
-through Pi's usual discovery.
+## Before removing historical local resources
+
+The five initial agents and this expanded catalog were authored here; we have
+not read or imported the operator's Mac files. Follow the
+[inventory and reversible smoke guide](../docs/roster-migration.md) after this
+code is committed to `develop`. The guide checks both global skill locations,
+Main overrides, the prompt, agents, and `agents/settings.json`. Running Pi Web
+with the repository root alone does not prove that an older local override or
+another application's skill directory can be removed. Existing sessions pin
+their old resources; use new sessions to validate the Git defaults.
+
+Physical links inside `skills/` must remain inside the trusted roster root.
+Separate external skill repositories need a reviewed reference mechanism
+before their symlinks can replace a versioned catalog entry.
