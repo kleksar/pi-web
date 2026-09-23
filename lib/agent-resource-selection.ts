@@ -26,10 +26,27 @@ export interface PinnedExtensionTool extends SelectedExtensionTool {
 
 const SHA256_RE = /^[a-f0-9]{64}$/;
 /** SDK built-ins can be replaced by extension tools with the same name. Keep those names out of assignments. */
-const RESERVED_EXTENSION_TOOL_NAMES = new Set([
-  "read", "bash", "edit", "write", "grep", "find", "ls",
+export const RESERVED_EXTENSION_TOOL_NAMES = new Set([
+  "read", "bash", "powershell", "edit", "write", "grep", "find", "ls",
   "Agent", "get_subagent_result", "steer_subagent",
 ]);
+
+/** Explicit tool assignments must not activate a different implementation of a built-in. */
+export function assertNoReservedExtensionToolCollisions(
+  extensions: readonly { path: string; tools: ReadonlyMap<string, unknown> }[],
+): void {
+  for (const extension of extensions) {
+    for (const name of extension.tools.keys()) {
+      if (!RESERVED_EXTENSION_TOOL_NAMES.has(name)) continue;
+      // These two inline extensions are installed by Pi Web itself and checked
+      // separately by the orchestration host integrity check.
+      if (extension.path === "<inline:pi-web-project-command-environment>" && name === "bash") continue;
+      if (extension.path === "<inline:pi-web-subagents>"
+        && (name === "Agent" || name === "get_subagent_result" || name === "steer_subagent")) continue;
+      throw new Error(`Extension ${extension.path} overrides reserved built-in tool ${name}; remove the conflicting extension before assigning extension tools`);
+    }
+  }
+}
 
 export function validateAgentResourceSelection(
   selectedSkills: unknown,
@@ -136,6 +153,9 @@ export function pinSelectedExtensionTools(
   extensions: readonly { path: string; tools: ReadonlyMap<string, unknown> }[],
   selected: readonly SelectedExtensionTool[],
 ): PinnedExtensionTool[] {
+  const reserved = selected.find(({ toolName }) => RESERVED_EXTENSION_TOOL_NAMES.has(toolName));
+  if (reserved) throw new Error(`Built-in or Pi Web delegation tool cannot be selected as an extension: ${reserved.toolName}`);
+  if (selected.length > 0) assertNoReservedExtensionToolCollisions(extensions);
   const seen = new Set<string>();
   return selected.map(({ extensionPath, toolName }) => {
     const key = `${extensionPath}\u0000${toolName}`;
@@ -145,9 +165,6 @@ export function pinSelectedExtensionTools(
     if (!source) throw new Error(`Selected extension tool is no longer available: ${toolName} (${extensionPath})`);
     if (extensions.filter((extension) => extension.tools.has(toolName)).length !== 1) {
       throw new Error(`Selected extension tool name is ambiguous: ${toolName}`);
-    }
-    if (RESERVED_EXTENSION_TOOL_NAMES.has(toolName)) {
-      throw new Error(`Built-in or Pi Web delegation tool cannot be selected as an extension: ${toolName}`);
     }
     const { realPath, sha256 } = pinFile(extensionPath, "Selected extension");
     return { extensionPath, toolName, realPath, sha256 };

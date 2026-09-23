@@ -44,6 +44,10 @@ describe the same configuration that runs, rather than maintain another copy.
   The host checks selected sources against the effective SDK catalog and pins
   their content/source identity for a run. If a selected source disappears or
   changes, the run fails instead of substituting another skill or tool.
+  When tools are explicitly selected, an extension that registers a Pi Web
+  delegation or built-in coding tool name is rejected, even if that extension
+  tool was not selected; the SDK otherwise gives the extension priority by
+  name. Pi Web's own delegation and command-environment tools are exempt.
 - A new Main session pins its configured resources and allowed direct child
   profile fingerprints. Reopening or reloading that session keeps the pinned
   assignments. Saving Main settings affects **new sessions**; old sessions

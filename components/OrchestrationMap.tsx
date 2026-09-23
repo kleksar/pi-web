@@ -5,6 +5,7 @@ import { useI18n } from "@/hooks/useI18n";
 import type { SubagentOrchestration } from "@/lib/subagents";
 import {
   MAIN_NODE_ID,
+  MAP_MIN_SCALE,
   MAP_NODE_HEIGHT,
   MAP_NODE_WIDTH,
   buildOrchestrationGraph,
@@ -12,6 +13,7 @@ import {
   changeDependencyLink,
   effectiveMapProfiles,
   findMapProfile,
+  fitOrchestrationMap,
   mapPathFromMain,
   orchestrationForOwner,
   type MapEdge,
@@ -51,7 +53,6 @@ type DragState = { type: "pan"; x: number; y: number; start: Viewport }
   | { type: "node"; id: string; x: number; y: number; start: Point; last: Point };
 
 const DEFAULT_VIEW: Viewport = { x: 20, y: 20, scale: 1 };
-const MIN_SCALE = 0.22;
 const MAX_SCALE = 1.6;
 const ERROR_KEYS: Record<string, string> = {
   "Choose an available agent profile.": "map.errorChooseProfile",
@@ -83,17 +84,17 @@ function edgeId(edge: MapEdge): string {
   return [edge.kind, edge.ownerId, edge.source, edge.target].join("\u0000");
 }
 
-function edgePath(source: Point, target: Point): string {
+function edgePath(source: Point, target: Point, offset = 0): string {
   const x1 = source.x + MAP_NODE_WIDTH;
   const y1 = source.y + MAP_NODE_HEIGHT / 2;
   const x2 = target.x;
   const y2 = target.y + MAP_NODE_HEIGHT / 2;
   if (x2 <= x1 + 36) {
-    const bendY = Math.max(y1, y2) + 96;
+    const bendY = Math.max(y1, y2) + 96 + offset;
     return `M ${x1} ${y1} C ${x1 + 65} ${bendY}, ${x2 - 65} ${bendY}, ${x2} ${y2}`;
   }
   const half = Math.max(60, (x2 - x1) / 2);
-  return `M ${x1} ${y1} C ${x1 + half} ${y1}, ${x2 - half} ${y2}, ${x2} ${y2}`;
+  return `M ${x1} ${y1} C ${x1 + half} ${y1 + offset}, ${x2 - half} ${y2 + offset}, ${x2} ${y2}`;
 }
 
 export function OrchestrationMap({
@@ -128,6 +129,23 @@ export function OrchestrationMap({
   const legacySkills = selectedNode === MAIN_NODE_ID ? main.loadSkills ?? true : selected?.loadSkills;
   const legacyExtensions = selectedNode === MAIN_NODE_ID ? main.loadExtensions ?? true : selected?.loadExtensions;
   const selectedLink = graph.edges.find((edge) => edgeId(edge) === selectedEdge);
+  const relatedOverviewEdges = ownerId === null
+    ? graph.edges.filter((edge) => edge.source === selectedNode || edge.target === selectedNode)
+    : [];
+  const overlapOffsets = useMemo(() => {
+    const groups = new Map<string, MapEdge[]>();
+    for (const edge of graph.edges) {
+      const pair = `${edge.source}\u0000${edge.target}`;
+      const group = groups.get(pair) ?? [];
+      group.push(edge);
+      groups.set(pair, group);
+    }
+    const offsets = new Map<string, number>();
+    for (const group of groups.values()) {
+      group.forEach((edge, index) => offsets.set(edgeId(edge), Math.max(-120, Math.min(120, (index - (group.length - 1) / 2) * 40))));
+    }
+    return offsets;
+  }, [graph.edges]);
   const canChange = canEdit && ownerId !== null && policy !== null
     && (layer === "delegation" ? Boolean(onToggleChild) : Boolean(onToggleDependency));
   const candidates = profiles.filter((profile) => profile.enabled && !profile.configurationError
@@ -138,14 +156,9 @@ export function OrchestrationMap({
     const element = stage.current;
     if (!element || !currentNodes.length) return;
     const { width, height } = element.getBoundingClientRect();
-    const left = Math.min(...currentNodes.map((node) => node.x));
-    const top = Math.min(...currentNodes.map((node) => node.y));
-    const right = Math.max(...currentNodes.map((node) => node.x + MAP_NODE_WIDTH));
-    const bottom = Math.max(...currentNodes.map((node) => node.y + MAP_NODE_HEIGHT));
-    const scale = Math.min(1, Math.max(MIN_SCALE, (width - 72) / (right - left), (height - 72) / (bottom - top)));
-    setViewport({ x: (width - (right - left) * scale) / 2 - left * scale,
-      y: (height - (bottom - top) * scale) / 2 - top * scale, scale });
-  }, [graph.nodes]);
+    const next = fitOrchestrationMap(currentNodes, width, height, ownerId ?? MAIN_NODE_ID);
+    if (next) setViewport(next);
+  }, [graph.nodes, ownerId]);
 
   useEffect(() => {
     const restored = readLayout(storageKey);
@@ -158,6 +171,10 @@ export function OrchestrationMap({
 
   useEffect(() => { setSelectedNode(ownerId ?? MAIN_NODE_ID); }, [ownerId]);
 
+  useEffect(() => {
+    if (!nodeById.has(selectedNode)) setSelectedNode(ownerId ?? MAIN_NODE_ID);
+  }, [nodeById, ownerId, selectedNode]);
+
   const savePositions = (next: Record<string, Point>) => {
     setPositions(next);
     try { window.localStorage.setItem(storageKey, JSON.stringify(next)); } catch { /* Layout is optional. */ }
@@ -168,7 +185,7 @@ export function OrchestrationMap({
     if (!element) return;
     const { width, height } = element.getBoundingClientRect();
     setViewport((previous) => {
-      const scale = Math.max(MIN_SCALE, Math.min(MAX_SCALE, previous.scale * factor));
+      const scale = Math.max(MAP_MIN_SCALE, Math.min(MAX_SCALE, previous.scale * factor));
       const ratio = scale / previous.scale;
       return { x: width / 2 - (width / 2 - previous.x) * ratio,
         y: height / 2 - (height / 2 - previous.y) * ratio, scale };
@@ -276,7 +293,7 @@ export function OrchestrationMap({
                 const source = nodeById.get(edge.source);
                 const target = nodeById.get(edge.target);
                 if (!source || !target) return null;
-                const d = edgePath(source, target);
+                const d = edgePath(source, target, overlapOffsets.get(edgeId(edge)) ?? 0);
                 return <g key={edgeId(edge)}>
                   <path className={`orchestration-map-edge${selectedEdge === edgeId(edge) ? " is-selected" : ""}`} d={d} markerEnd="url(#orchestration-map-arrow)" />
                   <path className="orchestration-map-edge-target" d={d} onClick={() => { setSelectedEdge(edgeId(edge)); setSelectedNode(edge.target); }} />
@@ -324,7 +341,7 @@ export function OrchestrationMap({
                   title={t("map.dependencyHint")} onClick={() => chooseConnector(node.id)}>●</button> : null}
             </div>)}
           </div>
-          {nodes.length === 0 ? <div className="orchestration-map-empty">{t("map.noMatches")}</div> : null}
+          {query.trim() && graph.matchCount === 0 ? <div className="orchestration-map-empty" role="status">{t("map.noMatches")}</div> : null}
         </div>
         <aside className="orchestration-map-inspector" aria-label={t("map.details")}>
           <h3>{selectedNode === MAIN_NODE_ID ? t("common.main") : selected?.displayName ?? selectedNode}</h3>
@@ -343,6 +360,18 @@ export function OrchestrationMap({
           </div>
           <h4>{t(layer === "delegation" ? "map.directDelegates" : "map.requiredResults")}</h4>
           {ownerId === null ? <>
+            {relatedOverviewEdges.length > 0 && <div className="orchestration-map-overview-links" role="group" aria-label={t(layer === "delegation" ? "map.directDelegates" : "map.requiredResults")}>
+              {relatedOverviewEdges.map((edge) => {
+                const ownerName = edge.ownerId === MAIN_NODE_ID ? t("common.main") : findMapProfile(profiles, edge.ownerId)?.displayName ?? edge.ownerId;
+                const sourceName = edge.source === MAIN_NODE_ID ? t("common.main") : findMapProfile(profiles, edge.source)?.displayName ?? edge.source;
+                const targetName = findMapProfile(profiles, edge.target)?.displayName ?? edge.target;
+                return <button key={edgeId(edge)} type="button" aria-pressed={selectedEdge === edgeId(edge)}
+                  onClick={() => { setSelectedEdge(edgeId(edge)); setSelectedNode(edge.target); }}>
+                  <span>{t("map.overviewOwner", { name: ownerName })}</span>
+                  <strong>{sourceName} → {targetName}</strong>
+                </button>;
+              })}
+            </div>}
             {selectedLink && <div className="orchestration-map-overview-link">
               <p>{t("map.overviewOwner", { name: selectedLink.ownerId === MAIN_NODE_ID ? t("common.main") : findMapProfile(profiles, selectedLink.ownerId)?.displayName ?? selectedLink.ownerId })}</p>
               <button type="button" onClick={() => onSelectOwner(selectedLink.ownerId)}>{t("map.openItsBranch")}</button>

@@ -44,6 +44,7 @@ import { createSubagentController, profileAuthorityPin } from "./subagent-runtim
 import { readMainAgentConfig } from "./main-agent-config";
 import { MAIN_RESOURCE_META_TYPE, readMainSessionResources, type MainSessionResources } from "./main-agent-snapshot";
 import {
+  assertNoReservedExtensionToolCollisions,
   assertSelectedSkillsUnchanged,
   assertSelectedExtensionToolsUnchanged,
   filterPinnedSkills,
@@ -637,6 +638,7 @@ export class AgentSessionWrapper {
       if (type === "prompt" || type === "steer" || type === "follow_up") {
         const imageError = validateAgentImages(command.images);
         if (imageError) throw new Error(imageError);
+        this.assertResourceSourcesUnchanged();
       }
 
       switch (type) {
@@ -1047,6 +1049,7 @@ export class AgentSessionWrapper {
         this.resetExtensionWidgetsForReload();
         this.syncProjectTrust();
         await this.inner.reload();
+        this.assertResourceSourcesUnchanged();
         if (subagentResources) this.inner.setActiveToolsByName(subagentResources.tools);
         else this.setActiveToolSelection(activeToolNames);
         if (typeof this.inner.bindExtensions !== "function") {
@@ -1752,6 +1755,7 @@ export class AgentSessionWrapper {
             this.inner.extensionRunner.setUIContext?.(this.createExtensionUiContext(), "rpc");
           },
         });
+        this.assertResourceSourcesUnchanged();
         if (subagentResources) this.inner.setActiveToolsByName(subagentResources.tools);
         else this.setActiveToolSelection(activeToolNames);
       },
@@ -1764,13 +1768,20 @@ export class AgentSessionWrapper {
   }
 
   private assertResourceSourcesUnchanged(): void {
-    const entries = this.inner.sessionManager.getEntries() as unknown as SessionEntry[];
+    // Lightweight test doubles may omit getEntries; real SDK sessions expose it.
+    const entries = this.inner.sessionManager.getEntries?.() as SessionEntry[] | undefined;
+    if (!entries) return;
     const subagent = readSubagentSessionResources(entries);
     const main = subagent ? null : readMainSessionResources(entries);
     const selectedSkills = subagent?.selectedSkills ?? main?.selectedSkills;
     const selectedExtensionTools = subagent?.selectedExtensionTools ?? main?.selectedExtensionTools;
     if (selectedSkills) assertSelectedSkillsUnchanged(selectedSkills);
     if (selectedExtensionTools) assertSelectedExtensionToolsUnchanged(selectedExtensionTools);
+    if (selectedExtensionTools?.length) {
+      const extensions = this.inner.resourceLoader.getExtensions?.().extensions;
+      if (!extensions) throw new Error("Selected extension tools cannot be verified");
+      assertNoReservedExtensionToolCollisions(extensions);
+    }
   }
 }
 
@@ -2297,6 +2308,10 @@ export async function startRpcSession(
           },
       ...(trustReloadOptions ? { resourceLoaderReloadOptions: trustReloadOptions } : {}),
     });
+    if ((effectiveSelectedToolRefs?.length ?? 0) > 0
+      || (subagentResources?.selectedExtensionTools?.length ?? 0) > 0) {
+      assertNoReservedExtensionToolCollisions(services.resourceLoader.getExtensions().extensions);
+    }
     if (childOrchestratorExtension || (rootSubagentExtension
       && (mainOrchestration !== undefined || effectiveSelectedToolRefs !== undefined))) {
       const extensions = services.resourceLoader.getExtensions().extensions;

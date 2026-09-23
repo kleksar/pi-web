@@ -159,7 +159,18 @@
 .orchestration-map-node-open { right: 5px; bottom: 5px; }
 .orchestration-map-node-port { right: -13px; top: 36px; border-radius: 50%; color: var(--accent); }
 .orchestration-map-node-port.is-active { background: var(--accent); color: var(--bg); }
-.orchestration-map-empty { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); color: var(--text-muted); }
+.orchestration-map-empty {
+  position: absolute;
+  top: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 7px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-panel);
+  color: var(--text-muted);
+  pointer-events: none;
+}
 
 .orchestration-map-inspector {
   flex: 0 0 276px;
@@ -175,6 +186,23 @@
 .orchestration-map-inspector p { color: var(--text-muted); font-size: 12px; line-height: 1.5; margin: 10px 0; }
 .orchestration-map-inspector > button { margin: 5px 5px 0 0; font-size: 12px; }
 .orchestration-map-overview-link button { border: 1px solid var(--border); border-radius: 6px; padding: 7px 10px; background: var(--bg); color: var(--text); font-size: 12px; }
+.orchestration-map-overview-links { display: grid; gap: 5px; max-height: 255px; overflow-y: auto; }
+.orchestration-map-overview-links button {
+  display: grid;
+  gap: 3px;
+  width: 100%;
+  min-width: 0;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text);
+  text-align: left;
+  font-size: 11px;
+}
+.orchestration-map-overview-links button[aria-pressed="true"] { border-color: var(--accent); background: var(--bg-selected); }
+.orchestration-map-overview-links span { color: var(--text-muted); }
+.orchestration-map-overview-links strong { overflow-wrap: anywhere; }
 .orchestration-map-meta { color: var(--text-muted); font-size: 11px; overflow-wrap: anywhere; }
 .orchestration-map-inspector-resources { display: grid; gap: 5px; padding-top: 14px; font-size: 12px; }
 .orchestration-map-inspector-resources > span { color: var(--text-muted); overflow-wrap: anywhere; margin-bottom: 6px; }

@@ -1037,46 +1037,46 @@ export function createSubagentController(
     if (wrapper.isRunning()) throw new Error("Subagent is already running");
     if (request.signal?.aborted || !parentMayContinue(parent, parentSessionId, parentGeneration)) throw new Error("Subagent resume was stopped");
     const manager = wrapper.inner.sessionManager;
-    if (depth > 1) {
-      const parentEntries = parent.inner.sessionManager.getEntries() as unknown as SessionEntry[];
-      const orchestration = readSubagentSessionResources(parentEntries)?.orchestration;
-      dependencyGraph = orchestration?.dependencies;
-      if (dependencyGraph !== undefined) {
-        if (getSubagentRuns().get(parentSessionId)?.run.status !== "running") {
-          throw new Error("Orchestrator invocation is not active");
-        }
-        const epoch = currentDependencyEpoch(parentEntries);
-        const childEntries = manager.getEntries() as unknown as SessionEntry[];
-        const childMarker = childEntries.find((entry) => entry.type === "custom" && entry.customType === SUBAGENT_META_TYPE);
-        if (childMarker?.type !== "custom" || !childMarker.data || typeof childMarker.data !== "object"
-          || (childMarker.data as Partial<SubagentMetadata>).dependencyEpoch !== epoch) {
-          throw new Error(`Subagent ${request.sessionId} belongs to a previous orchestrator invocation; start ${existing.profile} again`);
-        }
-        releaseDependencyClaim = reserveDependencyProfile(parentSessionId, epoch, existing.profile, dependencyGraph);
-        const inputs = await resolveDependencyInputs({
-          entries: parentEntries, parentSessionId, parentSessionPath: parent.sessionFile,
-          childProfile: existing.profile, graph: dependencyGraph,
-          resolveChildPath: dependencies.resolveSessionPath,
-          loadChild: ({ sessionId, sessionPath: path }) => {
-            const live = dependencies.getSession(sessionId);
-            const childManager = live?.isAlive() ? live.inner.sessionManager : SessionManager.open(path);
-            return { sessionId: childManager.getSessionId(), entries: childManager.getEntries() as unknown as SessionEntry[] };
-          },
-        });
-        const currentEntries = parent.inner.sessionManager.getEntries() as unknown as SessionEntry[];
-        if (request.signal?.aborted || !parentMayContinue(parent, parentSessionId, parentGeneration)) throw new Error("Subagent resume was stopped");
-          if (inputs.epoch !== epoch || !dependencyRefsStillCurrent({ entries: currentEntries,
-            parentSessionId, epoch, artifacts: inputs.artifacts, graph: dependencyGraph })) {
-          throw new Error(`Dependency results changed while preparing ${existing.profile}; launch it again`);
-        }
-        assertParentMayStart(parent, parentSessionId, existing.profile, dependencies.getSession);
-        assertDependencyProvidersPinned(parent.cwd, existing.profile, orchestration);
-        dependencyAdmission = admitDependencyChild({
-          appendCustomEntry: (type, data) => parent.inner.sessionManager.appendCustomEntry(type, data),
-          parentSessionId, childProfile: existing.profile, epoch,
-          suffix: inputs.suffix, artifacts: inputs.artifacts,
-        });
+    const parentEntries = parent.inner.sessionManager.getEntries() as unknown as SessionEntry[];
+    const orchestration = depth > 1
+      ? readSubagentSessionResources(parentEntries)?.orchestration
+      : readMainSessionResources(parentEntries)?.orchestration;
+    dependencyGraph = orchestration?.dependencies;
+    if (dependencyGraph !== undefined) {
+      if (depth > 1 && getSubagentRuns().get(parentSessionId)?.run.status !== "running") {
+        throw new Error("Orchestrator invocation is not active");
       }
+      const epoch = currentDependencyEpoch(parentEntries);
+      const childEntries = manager.getEntries() as unknown as SessionEntry[];
+      const childMarker = childEntries.find((entry) => entry.type === "custom" && entry.customType === SUBAGENT_META_TYPE);
+      if (childMarker?.type !== "custom" || !childMarker.data || typeof childMarker.data !== "object"
+        || (childMarker.data as Partial<SubagentMetadata>).dependencyEpoch !== epoch) {
+        throw new Error(`Subagent ${request.sessionId} belongs to a previous orchestrator invocation; start ${existing.profile} again`);
+      }
+      releaseDependencyClaim = reserveDependencyProfile(parentSessionId, epoch, existing.profile, dependencyGraph);
+      const inputs = await resolveDependencyInputs({
+        entries: parentEntries, parentSessionId, parentSessionPath: parent.sessionFile,
+        childProfile: existing.profile, graph: dependencyGraph,
+        resolveChildPath: dependencies.resolveSessionPath,
+        loadChild: ({ sessionId, sessionPath: path }) => {
+          const live = dependencies.getSession(sessionId);
+          const childManager = live?.isAlive() ? live.inner.sessionManager : SessionManager.open(path);
+          return { sessionId: childManager.getSessionId(), entries: childManager.getEntries() as unknown as SessionEntry[] };
+        },
+      });
+      const currentEntries = parent.inner.sessionManager.getEntries() as unknown as SessionEntry[];
+      if (request.signal?.aborted || !parentMayContinue(parent, parentSessionId, parentGeneration)) throw new Error("Subagent resume was stopped");
+      if (inputs.epoch !== epoch || !dependencyRefsStillCurrent({ entries: currentEntries,
+        parentSessionId, epoch, artifacts: inputs.artifacts, graph: dependencyGraph })) {
+        throw new Error(`Dependency results changed while preparing ${existing.profile}; launch it again`);
+      }
+      assertParentMayStart(parent, parentSessionId, existing.profile, dependencies.getSession);
+      assertDependencyProvidersPinned(parent.cwd, existing.profile, orchestration);
+      dependencyAdmission = admitDependencyChild({
+        appendCustomEntry: (type, data) => parent.inner.sessionManager.appendCustomEntry(type, data),
+        parentSessionId, childProfile: existing.profile, epoch,
+        suffix: inputs.suffix, artifacts: inputs.artifacts,
+      });
     }
     stoppedParents().delete(request.sessionId);
 

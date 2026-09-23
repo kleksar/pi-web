@@ -4,6 +4,7 @@ import type { SubagentOrchestration, SubagentProfile } from "./subagents";
 export const MAIN_NODE_ID = "\u0000main";
 export const MAP_NODE_WIDTH = 216;
 export const MAP_NODE_HEIGHT = 100;
+export const MAP_MIN_SCALE = 0.22;
 
 export type OrchestrationMapLayer = "delegation" | "dependencies";
 export type OrchestrationMapOwner = typeof MAIN_NODE_ID | string;
@@ -33,6 +34,25 @@ export interface MapEdge {
 export interface OrchestrationGraph {
   nodes: MapNode[];
   edges: MapEdge[];
+  /** Matching agents before paths and adjacent nodes are added for context. */
+  matchCount: number;
+}
+
+/** Fit readable nodes in the viewport; anchor the root when the minimum zoom still overflows. */
+export function fitOrchestrationMap(
+  nodes: readonly MapNode[], width: number, height: number, rootId: string,
+): { x: number; y: number; scale: number } | null {
+  if (!nodes.length) return null;
+  const left = Math.min(...nodes.map((node) => node.x));
+  const top = Math.min(...nodes.map((node) => node.y));
+  const right = Math.max(...nodes.map((node) => node.x + MAP_NODE_WIDTH));
+  const bottom = Math.max(...nodes.map((node) => node.y + MAP_NODE_HEIGHT));
+  const scale = Math.max(MAP_MIN_SCALE, Math.min(1, (width - 72) / (right - left), (height - 72) / (bottom - top)));
+  const root = nodes.find((node) => node.id === rootId) ?? nodes[0];
+  const position = (size: number, start: number, span: number, rootPosition: number) =>
+    span * scale > size - 72 ? 36 - rootPosition * scale : (size - span * scale) / 2 - start * scale;
+  return { x: position(width, left, right - left, root.x),
+    y: position(height, top, bottom - top, root.y), scale };
 }
 
 const priority = { builtin: 0, global: 1, workspace: 2, project: 3 } as const;
@@ -154,13 +174,35 @@ export function buildOrchestrationGraph({ profiles: sources, main, ownerId, draf
     } : { id, label: id, kind: "missing", enabled: false, x: 0, y: 0 };
   });
   const needle = query.trim().toLowerCase();
-  const visible = needle ? nodes.filter((node) =>
-    node.id === MAIN_NODE_ID || node.id === ownerId
-    || node.id.toLowerCase().includes(needle) || node.label.toLowerCase().includes(needle)
+  const matches = needle ? nodes.filter((node) =>
+    node.id.toLowerCase().includes(needle) || node.label.toLowerCase().includes(needle)
   ) : nodes;
-  const visibleIds = new Set(visible.map((node) => node.id));
+  const matchedIds = new Set(matches.map((node) => node.id));
+  const visibleIds = new Set(matchedIds);
+  if (needle) {
+    visibleIds.add(ownerId ?? MAIN_NODE_ID);
+    if (layer === "delegation" && ownerId === null) {
+      // Keep the shortest delegation path from Main so a found agent still has visible lineage.
+      for (const node of matches) {
+        for (const id of mapPathFromMain(node.id, profiles, main)) {
+          visibleIds.add(findMapProfile(profiles, id)?.name ?? id);
+        }
+      }
+    } else if (layer === "dependencies") {
+      // A filtered dependency is useful only with its other endpoint and owner visible.
+      // Expand once from the actual matches; expanding recursively can restore the full roster.
+      for (const edge of edges) {
+        if (matchedIds.has(edge.source) || matchedIds.has(edge.target) || matchedIds.has(edge.ownerId)) {
+          visibleIds.add(edge.source);
+          visibleIds.add(edge.target);
+          visibleIds.add(edge.ownerId);
+        }
+      }
+    }
+  }
+  const visible = nodes.filter((node) => visibleIds.has(node.id));
   const shownEdges = edges.filter((edge) => visibleIds.has(edge.source) && visibleIds.has(edge.target));
-  return { nodes: autoLayoutGraph(visible, shownEdges, ownerId), edges: shownEdges };
+  return { nodes: autoLayoutGraph(visible, shownEdges, ownerId), edges: shownEdges, matchCount: matches.length };
 }
 
 /** Cycle tolerant: an overview may contain reciprocal delegations even though runtime has a depth limit. */

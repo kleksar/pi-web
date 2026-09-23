@@ -1,8 +1,8 @@
 import { realpathSync, statSync } from "node:fs";
 import { isAbsolute } from "node:path";
-import type { SelectedExtensionTool } from "./agent-resource-selection";
+import { RESERVED_EXTENSION_TOOL_NAMES, type SelectedExtensionTool } from "./agent-resource-selection";
 
-export const RESERVED_AGENT_TOOLS = new Set(["Agent", "get_subagent_result", "steer_subagent"]);
+export const RESERVED_AGENT_TOOLS = RESERVED_EXTENSION_TOOL_NAMES;
 
 export interface AgentResourceSource {
   source?: string;
