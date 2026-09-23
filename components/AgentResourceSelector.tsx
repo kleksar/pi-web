@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState, type CSSProperties } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type {
   AgentExtensionToolResource,
   AgentResourceCatalog,
@@ -18,6 +18,7 @@ import {
 } from "@/lib/agent-resource-selectors";
 import type { SelectedExtensionTool } from "@/lib/agent-resource-selection";
 import { useI18n } from "@/hooks/useI18n";
+import "./AgentResourceSelector.css";
 
 export interface AgentResourceSelectorProps {
   cwd: string;
@@ -33,63 +34,54 @@ export interface AgentResourceSelectorProps {
   hideExtensionTools?: boolean;
 }
 
-const searchStyle: CSSProperties = {
-  width: "100%",
-  minWidth: 0,
-  height: 34,
-  padding: "0 9px",
-  border: "1px solid var(--border)",
-  borderRadius: 5,
-  background: "var(--bg)",
-  color: "var(--text)",
-  fontSize: 12,
-};
-
-const resourceListStyle: CSSProperties = {
-  display: "grid",
-  gap: 6,
-  maxHeight: 300,
-  overflowY: "auto",
-  paddingRight: 4,
-};
-
 const EMPTY_SKILLS: string[] = [];
 const EMPTY_TOOLS: SelectedExtensionTool[] = [];
 
-const resourceLabelStyle: CSSProperties = {
-  display: "grid",
-  gridTemplateColumns: "16px minmax(0, 1fr)",
-  alignItems: "start",
-  gap: 9,
-  padding: "7px 9px",
-  border: "1px solid var(--border)",
-  borderRadius: 5,
-  cursor: "pointer",
-};
-
 function ResourcePath({ logical, real }: { logical: string; real: string | null }) {
+  const { t } = useI18n();
   return (
-    <span title={real && logical !== real ? `${logical} → ${real}` : logical} style={{ color: "var(--text-dim)", overflowWrap: "anywhere", fontSize: 11 }}>
-      {logical}{real && logical !== real ? ` → ${real}` : ""}
+    <details className="agent-resource-path">
+      <summary>{t("agentResources.showPath")}</summary>
+      <code>{logical}</code>
+      {real && logical !== real && <><span>{t("agentResources.resolvedPath")}</span><code>{real}</code></>}
+    </details>
+  );
+}
+
+function ResourceLabel({ title, description, scope }: {
+  title: string;
+  description?: string;
+  scope?: string;
+}) {
+  return (
+    <span className="agent-resource-label">
+      <span className="agent-resource-name" title={title}>
+        {title}{scope ? <span className="agent-resource-scope">{scope}</span> : null}
+      </span>
+      {description ? <span className="agent-resource-description" title={description}>{description}</span> : null}
     </span>
   );
 }
 
-function ResourceLabel({ title, description, scope, logical, real }: {
+function ResourceRow({ title, description, scope, logical, real, checked, disabled, reason, onChange }: {
   title: string;
   description?: string;
   scope?: string;
   logical: string;
   real: string | null;
+  checked: boolean;
+  disabled: boolean;
+  reason?: string;
+  onChange: () => void;
 }) {
   return (
-    <span style={{ minWidth: 0, display: "grid", gap: 2 }}>
-      <span style={{ color: "var(--text)", fontSize: 12, fontWeight: 600, overflowWrap: "anywhere" }}>
-        {title}{scope ? <span style={{ marginLeft: 8, color: "var(--text-dim)", fontWeight: 400 }}>{scope}</span> : null}
-      </span>
-      {description ? <span style={{ color: "var(--text-muted)", fontSize: 11, overflowWrap: "anywhere" }}>{description}</span> : null}
+    <div className={`agent-resource-row${checked ? " is-selected" : ""}${reason ? " is-unavailable" : ""}`}>
+      <label title={reason}>
+        <input type="checkbox" disabled={disabled} checked={checked} onChange={onChange} />
+        <ResourceLabel title={title} description={description} scope={scope} />
+      </label>
       <ResourcePath logical={logical} real={real} />
-    </span>
+    </div>
   );
 }
 
@@ -156,57 +148,58 @@ export function AgentResourceSelector({
   const unavailableTools = catalog?.extensionTools.some((tool) => tool.unavailableReason) ?? false;
 
   return (
-    <div style={{ display: "grid", gap: 14, minWidth: 0 }}>
-      <div style={{ display: "flex", justifyContent: "space-between", gap: 8, alignItems: "center" }}>
-        <span style={{ color: "var(--text-muted)", fontSize: 12 }}>{t("agentResources.assign")}</span>
+    <div className="agent-resource-selector">
+      <div className="agent-resource-selector-header">
+        <span>{t("agentResources.assign")}</span>
         <button type="button" disabled={loading} onClick={() => setReloadKey((key) => key + 1)}>{t("agentResources.refresh")}</button>
       </div>
-      {loading && <span style={{ color: "var(--text-muted)", fontSize: 12 }}>{t("agentResources.loading")}</span>}
-      {error && <span role="alert" style={{ color: "#f87171", fontSize: 12 }}>{t("agentResources.loadError", { error })}</span>}
+      {loading && <span className="agent-resource-status">{t("agentResources.loading")}</span>}
+      {error && <span role="alert" className="agent-resource-error">{t("agentResources.loadError", { error })}</span>}
       {catalog && !catalog.projectResourcesLoaded && (
-        <span role="status" style={{ color: "var(--text-muted)", fontSize: 12 }}>
+        <span role="status" className="agent-resource-status">
           {t("agentResources.untrusted")}
         </span>
       )}
       {catalog && (
         <>
-          <section aria-label={t("agentResources.assignedSkills")} style={{ display: "grid", gap: 8 }}>
-            <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center" }}>
-              <strong style={{ fontSize: 12 }}>{legacyAllSkills
+          <section aria-label={t("agentResources.assignedSkills")} className="agent-resource-section">
+            <div className="agent-resource-section-heading">
+              <strong>{legacyAllSkills
                 ? t("agentResources.skillsAll")
                 : t("agentResources.skillsCount", { count: skills.length })}</strong>
-              {legacyAllSkills && <span style={{ display: "flex", gap: 8 }}>
+              {legacyAllSkills && <span className="agent-resource-section-actions">
                 <button type="button" disabled={disabled || unavailableSkills} title={unavailableSkills ? t("agentResources.resolveSkills") : undefined} onClick={() => onChangeSkills(explicitSkillSelection(selectedSkills, catalog.skills, true))}>
                   {t("agentResources.chooseSkills")}
                 </button>
                 {unavailableSkills && <button type="button" disabled={disabled} onClick={() => onChangeSkills([])}>{t("agentResources.startEmpty")}</button>}
               </span>}
             </div>
-            <input style={searchStyle} aria-label={t("agentResources.searchSkills")} value={skillSearch} onChange={(event) => setSkillSearch(event.target.value)} placeholder={t("agentResources.searchSkillsPlaceholder")} />
-            <div style={resourceListStyle}>
+            {(catalog.skills.length > 5 || skillSearch) && <input className="agent-resource-search" type="search" aria-label={t("agentResources.searchSkills")} value={skillSearch} onChange={(event) => setSkillSearch(event.target.value)} placeholder={t("agentResources.searchSkillsPlaceholder")} />}
+            <div className="agent-resource-list">
               {visibleSkills.map((skill) => (
-                <label key={skill.filePath} title={skill.unavailableReason} style={{ ...resourceLabelStyle, cursor: disabled || legacyAllSkills || Boolean(skill.unavailableReason) ? "default" : "pointer", opacity: skill.unavailableReason ? 0.55 : legacyAllSkills ? 0.75 : 1 }}>
-                  <input type="checkbox" disabled={disabled || legacyAllSkills || Boolean(skill.unavailableReason)} checked={legacyAllSkills || skills.includes(skill.filePath)} onChange={() => onChangeSkills(toggleSelectedSkill(skills, skill.filePath))} />
-                  <ResourceLabel title={skill.name} description={skill.unavailableReason ?? (skill.disableModelInvocation ? t("agentResources.hiddenSkill", { description: skill.description }) : skill.description)} scope={skill.sourceInfo.scope ?? skill.sourceInfo.source} logical={skill.filePath} real={skill.realPath} />
-                </label>
+                <ResourceRow key={skill.filePath} title={skill.name}
+                  description={skill.unavailableReason ?? (skill.disableModelInvocation ? t("agentResources.hiddenSkill", { description: skill.description }) : skill.description)}
+                  scope={skill.sourceInfo.scope ?? skill.sourceInfo.source} logical={skill.filePath} real={skill.realPath}
+                  checked={legacyAllSkills || skills.includes(skill.filePath)}
+                  disabled={disabled || legacyAllSkills || Boolean(skill.unavailableReason)} reason={skill.unavailableReason}
+                  onChange={() => onChangeSkills(toggleSelectedSkill(skills, skill.filePath))} />
               ))}
-              {visibleSkills.length === 0 && <span style={{ color: "var(--text-dim)", fontSize: 12 }}>{t("agentResources.noSkills")}</span>}
+              {visibleSkills.length === 0 && <span className="agent-resource-status">{t("agentResources.noSkills")}</span>}
             </div>
             {!legacyAllSkills && missingSkills.map((filePath) => (
-              <label key={filePath} style={resourceLabelStyle}>
-                <input type="checkbox" checked disabled={disabled} onChange={() => onChangeSkills(toggleSelectedSkill(skills, filePath))} />
-                <ResourceLabel title={t("agentResources.missingSkill")} logical={filePath} real={null} />
-              </label>
+              <ResourceRow key={filePath} title={t("agentResources.missingSkill")} logical={filePath} real={null}
+                checked disabled={disabled} reason={t("agentResources.missingSkill")}
+                onChange={() => onChangeSkills(toggleSelectedSkill(skills, filePath))} />
             ))}
           </section>
 
-          {!hideExtensionTools && <section aria-label={t("agentResources.assignedTools")} style={{ display: "grid", gap: 8 }}>
-            <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center" }}>
-              <strong style={{ fontSize: 12 }}>{legacyAllExtensions
+          {!hideExtensionTools && <section aria-label={t("agentResources.assignedTools")} className="agent-resource-section">
+            <div className="agent-resource-section-heading">
+              <strong>{legacyAllExtensions
                 ? t("agentResources.toolsAll")
                 : t("agentResources.toolsCount", { count: tools.length })}</strong>
               {legacyAllExtensions && (
-                <span style={{ display: "flex", gap: 8 }}>
+                <span className="agent-resource-section-actions">
                   <button type="button" disabled={disabled || unavailableTools} title={unavailableTools ? t("agentResources.resolveTools") : undefined} onClick={() => onChangeExtensionTools(explicitExtensionToolSelection(selectedExtensionTools, catalog.extensionTools, true))}>
                     {t("agentResources.chooseTools")}
                   </button>
@@ -214,21 +207,23 @@ export function AgentResourceSelector({
                 </span>
               )}
             </div>
-            <input style={searchStyle} aria-label={t("agentResources.searchTools")} value={toolSearch} onChange={(event) => setToolSearch(event.target.value)} placeholder={t("agentResources.searchToolsPlaceholder")} />
-            <div style={resourceListStyle}>
+            {(catalog.extensionTools.length > 5 || toolSearch) && <input className="agent-resource-search" type="search" aria-label={t("agentResources.searchTools")} value={toolSearch} onChange={(event) => setToolSearch(event.target.value)} placeholder={t("agentResources.searchToolsPlaceholder")} />}
+            <div className="agent-resource-list">
               {visibleTools.map((tool) => (
-                <label key={extensionToolKey(tool)} title={tool.unavailableReason} style={{ ...resourceLabelStyle, cursor: disabled || legacyAllExtensions || Boolean(tool.unavailableReason) ? "default" : "pointer", opacity: tool.unavailableReason ? 0.55 : 1 }}>
-                  <input type="checkbox" disabled={disabled || legacyAllExtensions || Boolean(tool.unavailableReason)} checked={legacyAllExtensions || selectedToolKeys.has(extensionToolKey(tool))} onChange={() => onChangeExtensionTools(toggleSelectedExtensionTool(tools, tool))} />
-                  <ResourceLabel title={tool.toolName} description={tool.unavailableReason ?? tool.description} scope={tool.sourceInfo.scope ?? tool.sourceInfo.source} logical={tool.extensionPath} real={tool.realPath} />
-                </label>
+                <ResourceRow key={extensionToolKey(tool)} title={tool.toolName}
+                  description={tool.unavailableReason ?? tool.description}
+                  scope={tool.sourceInfo.scope ?? tool.sourceInfo.source} logical={tool.extensionPath} real={tool.realPath}
+                  checked={legacyAllExtensions || selectedToolKeys.has(extensionToolKey(tool))}
+                  disabled={disabled || legacyAllExtensions || Boolean(tool.unavailableReason)} reason={tool.unavailableReason}
+                  onChange={() => onChangeExtensionTools(toggleSelectedExtensionTool(tools, tool))} />
               ))}
-              {visibleTools.length === 0 && <span style={{ color: "var(--text-dim)", fontSize: 12 }}>{t("agentResources.noTools")}</span>}
+              {visibleTools.length === 0 && <span className="agent-resource-status">{t("agentResources.noTools")}</span>}
             </div>
             {!legacyAllExtensions && missingTools.map((tool) => (
-              <label key={extensionToolKey(tool)} style={resourceLabelStyle}>
-                <input type="checkbox" checked disabled={disabled} onChange={() => onChangeExtensionTools(toggleSelectedExtensionTool(tools, tool))} />
-                <ResourceLabel title={t("agentResources.missingTool", { name: tool.toolName })} logical={tool.extensionPath} real={null} />
-              </label>
+              <ResourceRow key={extensionToolKey(tool)} title={t("agentResources.missingTool", { name: tool.toolName })}
+                logical={tool.extensionPath} real={null} checked disabled={disabled}
+                reason={t("agentResources.missingTool", { name: tool.toolName })}
+                onChange={() => onChangeExtensionTools(toggleSelectedExtensionTool(tools, tool))} />
             ))}
           </section>}
           {(catalog.diagnostics.length > 0 || catalog.extensionErrors.length > 0) && (

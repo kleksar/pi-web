@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { SelectedExtensionTool } from "@/lib/agent-resource-selection";
 import type { MainAgentConfig } from "@/lib/main-agent-config";
+import { findOrchestrationLinkIssue, withAllowedChildren } from "@/lib/orchestration-policy";
 import { isSubagentProfileOverridden } from "@/lib/subagent-profile-precedence";
 import type { SubagentProfile, SubagentOrchestration } from "@/lib/subagents";
 import { useI18n } from "@/hooks/useI18n";
@@ -22,52 +23,15 @@ interface Props {
 type Tab = "instructions" | "resources" | "delegation";
 type ConfigResponse = { config?: MainAgentConfig; revision?: string; error?: string };
 
-function normalizedDependencies(
-  allowedChildren: string[],
-  dependencies: Record<string, string[]> | undefined,
-): Record<string, string[]> | undefined {
-  const allowed = new Set(allowedChildren.map((name) => name.toLowerCase()));
-  const filtered = Object.fromEntries(Object.entries(dependencies ?? {})
-    .filter(([consumer]) => allowed.has(consumer.toLowerCase()))
-    .map(([consumer, producers]) => [consumer, producers.filter((name) => allowed.has(name.toLowerCase()))])
-    .filter(([, producers]) => producers.length > 0));
-  return Object.keys(filtered).length ? filtered : undefined;
-}
-
 function dependencyIssue(orchestration: SubagentOrchestration): string | null {
-  const known = new Set(orchestration.allowedChildren.map((name) => name.toLowerCase()));
-  const graph = orchestration.dependencies ?? {};
-  const providers = orchestration.contextProviders ?? {};
-  for (const edges of [graph, providers]) {
-    for (const [consumer, producers] of Object.entries(edges)) {
-      if (!known.has(consumer.toLowerCase())) return `Unknown child: ${consumer}`;
-      if (producers.length > 8) return `${consumer} has more than 8 sources`;
-      for (const producer of producers) {
-        if (!known.has(producer.toLowerCase())) return `Unknown source: ${producer}`;
-        if (consumer.toLowerCase() === producer.toLowerCase()) return `${consumer} cannot depend on itself`;
-      }
-    }
-  }
-  for (const child of orchestration.allowedChildren) {
-    const prerequisites = Object.entries(graph).find(([name]) => name.toLowerCase() === child.toLowerCase())?.[1] ?? [];
-    const optional = Object.entries(providers).find(([name]) => name.toLowerCase() === child.toLowerCase())?.[1] ?? [];
-    if (new Set([...prerequisites, ...optional].map((name) => name.toLowerCase())).size > 8) return `${child} has more than 8 sources`;
-  }
-  const visiting = new Set<string>();
-  const visited = new Set<string>();
-  const visit = (name: string): boolean => {
-    const lower = name.toLowerCase();
-    if (visiting.has(lower)) return true;
-    if (visited.has(lower)) return false;
-    visiting.add(lower);
-    const prerequisites = Object.entries(graph).find(([key]) => key.toLowerCase() === lower)?.[1] ?? [];
-    const optional = Object.entries(providers).find(([key]) => key.toLowerCase() === lower)?.[1] ?? [];
-    for (const producer of new Set([...prerequisites, ...optional].map((value) => value.toLowerCase()))) if (visit(producer)) return true;
-    visiting.delete(lower);
-    visited.add(lower);
-    return false;
-  };
-  return orchestration.allowedChildren.some(visit) ? "Dependency cycle. Remove a link before saving." : null;
+  const issue = findOrchestrationLinkIssue(
+    orchestration.allowedChildren, orchestration.dependencies, orchestration.contextProviders,
+  );
+  if (!issue) return null;
+  if (issue.type === "unknown") return `Unknown ${issue.firstKind}: ${issue.names[0]}`;
+  if (issue.type === "self") return `${issue.name} cannot depend on itself`;
+  if (issue.type === "limit") return `${issue.name} has more than 8 sources`;
+  return "Dependency cycle. Remove a link before saving.";
 }
 
 export function MainAgentConfig({ cwd, sessionId = null, onClose, onReloaded, embedded = false, onOpenMap }: Props) {
@@ -194,15 +158,9 @@ export function MainAgentConfig({ cwd, sessionId = null, onClose, onReloaded, em
     const next = checked
       ? [...current.orchestration.allowedChildren, name]
       : current.orchestration.allowedChildren.filter((child) => child.toLowerCase() !== name.toLowerCase());
-    const dependencies = normalizedDependencies(next, current.orchestration.dependencies);
-    const contextProviders = normalizedDependencies(next, current.orchestration.contextProviders);
     return {
       ...current,
-      orchestration: {
-        allowedChildren: next,
-        ...(dependencies ? { dependencies } : {}),
-        ...(contextProviders ? { contextProviders } : {}),
-      },
+      orchestration: withAllowedChildren(current.orchestration, next),
     };
   });
   const toggleDependency = (consumer: string, producer: string, checked: boolean) => setDraft((current) => {

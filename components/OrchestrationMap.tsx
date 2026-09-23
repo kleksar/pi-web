@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent, type PointerEvent, type WheelEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent, type PointerEvent } from "react";
 import { useI18n } from "@/hooks/useI18n";
 import type { SubagentOrchestration } from "@/lib/subagents";
 import {
@@ -9,15 +9,18 @@ import {
   MAP_NODE_HEIGHT,
   MAP_NODE_WIDTH,
   buildOrchestrationGraph,
+  centerOrchestrationMapNode,
   changeChildLink,
   changeContextProviderLink,
   changeDependencyLink,
   effectiveMapProfiles,
+  filterOrchestrationEdges,
   findMapProfile,
   fitOrchestrationMap,
   mapOwnersForAgent,
   mapPathFromMain,
   orchestrationForOwner,
+  readableOrchestrationMap,
   type MapEdge,
   type MapProfile,
   type OrchestrationMapLayer,
@@ -103,19 +106,25 @@ function edgePath(source: Point, target: Point, offset = 0): string {
   return `M ${x1} ${y1} C ${x1 + half} ${y1 + offset}, ${x2 - half} ${y2 + offset}, ${x2} ${y2}`;
 }
 
+function scaledViewport(previous: Viewport, factor: number, width: number, height: number): Viewport {
+  // Fit all may be smaller than the interactive minimum; zoom in gradually from that overview.
+  const scale = Math.max(Math.min(MAP_MIN_SCALE, previous.scale), Math.min(MAX_SCALE, previous.scale * factor));
+  const ratio = scale / previous.scale;
+  return { x: width / 2 - (width / 2 - previous.x) * ratio,
+    y: height / 2 - (height / 2 - previous.y) * ratio, scale };
+}
+
 export function OrchestrationMap({
   cwd, profiles: sources, main, ownerId, draftOrchestration, focusNodeId, canEdit = false,
   onSelectOwner, onOpenProfile, onRestrictMain, onToggleChild, onToggleDependency, onToggleContextProvider,
 }: OrchestrationMapProps) {
   const { t } = useI18n();
-  const layer: OrchestrationMapLayer = "all";
+  const [layer, setLayer] = useState<OrchestrationMapLayer>("all");
   const [query, setQuery] = useState("");
   const [selectedNode, setSelectedNode] = useState<string>(focusNodeId ?? MAIN_NODE_ID);
   const [userSelectedNode, setUserSelectedNode] = useState(false);
   const [selectedEdge, setSelectedEdge] = useState<string | null>(null);
   const [candidate, setCandidate] = useState("");
-  const [producer, setProducer] = useState("");
-  const [consumer, setConsumer] = useState("");
   const [connectionKind, setConnectionKind] = useState<"dependencies" | "contextProviders">("contextProviders");
   const [connectionSource, setConnectionSource] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -127,8 +136,9 @@ export function OrchestrationMap({
   const lastStorageKey = useRef<string | null>(null);
   const profiles = useMemo(() => effectiveMapProfiles(sources), [sources]);
   const policy = ownerId === null ? null : orchestrationForOwner(ownerId, profiles, main.orchestration ?? null, ownerId, draftOrchestration);
-  const graph = useMemo(() => buildOrchestrationGraph({ profiles, main: main.orchestration ?? null, ownerId, draft: draftOrchestration, layer, query }),
-    [profiles, main.orchestration, ownerId, draftOrchestration, layer, query]);
+  const graph = useMemo(() => buildOrchestrationGraph({ profiles, main: main.orchestration ?? null, ownerId, draft: draftOrchestration, layer: "all", query }),
+    [profiles, main.orchestration, ownerId, draftOrchestration, query]);
+  const visibleEdges = useMemo(() => filterOrchestrationEdges(graph.edges, layer), [graph.edges, layer]);
   const storageKey = layoutStorageKey(cwd, ownerId);
   const layoutFingerprint = `${storageKey}:${graph.nodes.map((node) => node.id).join("\u0000")}`;
   const nodes = useMemo(() => graph.nodes.map((node) => ({ ...node, ...(positions[node.id] ?? {}) })), [graph.nodes, positions]);
@@ -149,13 +159,13 @@ export function OrchestrationMap({
   const visibleTools = selectedNode === MAIN_NODE_ID ? main.selectedExtensionTools : selected?.selectedExtensionTools;
   const legacySkills = selectedNode === MAIN_NODE_ID ? main.loadSkills ?? true : selected?.loadSkills;
   const legacyExtensions = selectedNode === MAIN_NODE_ID ? main.loadExtensions ?? true : selected?.loadExtensions;
-  const selectedLink = graph.edges.find((edge) => edgeId(edge) === selectedEdge);
+  const selectedLink = visibleEdges.find((edge) => edgeId(edge) === selectedEdge);
   const relatedOverviewEdges = ownerId === null
-    ? graph.edges.filter((edge) => edge.source === selectedNode || edge.target === selectedNode)
+    ? visibleEdges.filter((edge) => edge.source === selectedNode || edge.target === selectedNode)
     : [];
   const overlapOffsets = useMemo(() => {
     const groups = new Map<string, MapEdge[]>();
-    for (const edge of graph.edges) {
+    for (const edge of visibleEdges) {
       const pair = `${edge.source}\u0000${edge.target}`;
       const group = groups.get(pair) ?? [];
       group.push(edge);
@@ -166,17 +176,17 @@ export function OrchestrationMap({
       group.forEach((edge, index) => offsets.set(edgeId(edge), Math.max(-120, Math.min(120, (index - (group.length - 1) / 2) * 40))));
     }
     return offsets;
-  }, [graph.edges]);
+  }, [visibleEdges]);
   const canChange = canEdit && ownerId !== null && policy !== null && !mainNeedsRestriction;
   const candidates = profiles.filter((profile) => profile.enabled && !profile.configurationError
     && profile.name.toLowerCase() !== ownerId?.toLowerCase()
     && !policy?.allowedChildren.some((name) => name.toLowerCase() === profile.name.toLowerCase()));
 
-  const fit = useCallback((currentNodes = graph.nodes) => {
+  const fit = useCallback((currentNodes = graph.nodes, readable = false) => {
     const element = stage.current;
     if (!element || !currentNodes.length) return;
     const { width, height } = element.getBoundingClientRect();
-    const next = fitOrchestrationMap(currentNodes, width, height, ownerId ?? MAIN_NODE_ID);
+    const next = (readable ? readableOrchestrationMap : fitOrchestrationMap)(currentNodes, width, height, ownerId ?? MAIN_NODE_ID);
     if (next) setViewport(next);
   }, [graph.nodes, ownerId]);
 
@@ -191,10 +201,8 @@ export function OrchestrationMap({
     const focusNode = focusNodeId ? currentNodes.find((node) => node.id.toLowerCase() === focusNodeId.toLowerCase()) : undefined;
     const rectangle = stage.current?.getBoundingClientRect();
     if (focusNode && rectangle) {
-      const scale = 0.9;
-      setViewport({ x: rectangle.width / 2 - (focusNode.x + MAP_NODE_WIDTH / 2) * scale,
-        y: rectangle.height / 2 - (focusNode.y + MAP_NODE_HEIGHT / 2) * scale, scale });
-    } else fit(currentNodes);
+      setViewport(centerOrchestrationMapNode(focusNode, rectangle.width, rectangle.height, 0.9));
+    } else fit(currentNodes, true);
     setSelectedEdge(null);
     setConnectionSource(null);
     setError(null);
@@ -224,19 +232,35 @@ export function OrchestrationMap({
     const element = stage.current;
     if (!element) return;
     const { width, height } = element.getBoundingClientRect();
-    setViewport((previous) => {
-      const scale = Math.max(MAP_MIN_SCALE, Math.min(MAX_SCALE, previous.scale * factor));
-      const ratio = scale / previous.scale;
-      return { x: width / 2 - (width / 2 - previous.x) * ratio,
-        y: height / 2 - (height / 2 - previous.y) * ratio, scale };
-    });
+    setViewport((previous) => scaledViewport(previous, factor, width, height));
   };
 
-  const wheelZoom = (event: WheelEvent<HTMLDivElement>) => {
-    if (!event.ctrlKey && !event.metaKey) return;
-    event.preventDefault();
-    zoom(event.deltaY < 0 ? 1.08 : 1 / 1.08);
+  const centerSelected = () => {
+    const element = stage.current;
+    const node = nodeById.get(selectedNode);
+    if (!element || !node) return;
+    const { width, height } = element.getBoundingClientRect();
+    setViewport(centerOrchestrationMapNode(node, width, height, Math.max(viewport.scale, 0.9)));
   };
+
+  useEffect(() => {
+    const element = stage.current;
+    if (!element) return;
+    // Browser wheel listeners can be passive by default; keep pan within the canvas.
+    const onWheel = (event: globalThis.WheelEvent) => {
+      event.preventDefault();
+      if (event.ctrlKey || event.metaKey) {
+        const { width, height } = element.getBoundingClientRect();
+        setViewport((previous) => scaledViewport(previous, event.deltaY < 0 ? 1.08 : 1 / 1.08, width, height));
+        return;
+      }
+      const multiplier = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? element.clientHeight : 1;
+      setViewport((previous) => ({ ...previous,
+        x: previous.x - event.deltaX * multiplier, y: previous.y - event.deltaY * multiplier }));
+    };
+    element.addEventListener("wheel", onWheel, { passive: false });
+    return () => element.removeEventListener("wheel", onWheel);
+  }, []);
 
   const panStart = (event: PointerEvent<HTMLDivElement>) => {
     if (event.target !== event.currentTarget && !(event.target as Element).classList.contains("orchestration-map-canvas")) return;
@@ -272,6 +296,7 @@ export function OrchestrationMap({
     const result = changeChildLink(ownerId, policy, child, enabled, profiles);
     if (!result.ok) { setError(result.error); return; }
     setError(null);
+    if (enabled) setLayer("all");
     onToggleChild?.(ownerId, child, enabled, result.next);
   };
 
@@ -280,6 +305,7 @@ export function OrchestrationMap({
     const result = changeDependencyLink(policy, from, to, enabled);
     if (!result.ok) { setError(result.error); return; }
     setError(null);
+    if (enabled) setLayer("dependencies");
     onToggleDependency?.(ownerId, from, to, enabled, result.next);
   };
 
@@ -288,6 +314,7 @@ export function OrchestrationMap({
     const result = changeContextProviderLink(policy, from, to, enabled);
     if (!result.ok) { setError(result.error); return; }
     setError(null);
+    if (enabled) setLayer("contextProviders");
     onToggleContextProvider(ownerId, from, to, enabled, result.next);
   };
 
@@ -324,18 +351,24 @@ export function OrchestrationMap({
           {query && <button type="button" onClick={() => setQuery("")}>{t("map.showAllDirectAgents")}</button>}
           <button type="button" onClick={() => zoom(1.2)} aria-label={t("map.zoomIn")}>＋</button>
           <button type="button" onClick={() => zoom(1 / 1.2)} aria-label={t("map.zoomOut")}>−</button>
-          <button type="button" onClick={() => fit(nodes)} aria-label={t("map.fit")}>{t("map.fitShort")}</button>
-          <button type="button" onClick={() => { savePositions({}); fit(graph.nodes); }} title={t("map.arrange")}>{t("map.arrangeShort")}</button>
+          <button type="button" onClick={centerSelected} disabled={!nodeById.has(selectedNode)}>{t("map.focusSelection")}</button>
+          <button type="button" onClick={() => fit(nodes)} title={t("map.fit")}>{t("map.fit")}</button>
+          <button type="button" onClick={() => { savePositions({}); fit(graph.nodes, true); }} title={t("map.arrange")}>{t("map.arrangeShort")}</button>
         </div>
       </div>
       <div className="orchestration-map-layers" role="group" aria-label={t("map.layers")}>
-        <span className="orchestration-map-legend"><i className="is-delegation" aria-hidden="true" />{t("map.delegationMeaning")}</span>
-        <span className="orchestration-map-legend"><i className="is-dependencies" aria-hidden="true" />{t("map.dependenciesMeaning")}</span>
-        <span className="orchestration-map-legend"><i className="is-contextProviders" aria-hidden="true" />{t("map.contextProvidersMeaning")}</span>
-        <span>{ownerId === null ? t("map.fullRoster") : t("map.directAgents", { count: policy?.allowedChildren.length ?? 0 })}</span>
+        <button type="button" className="orchestration-map-filter" aria-pressed={layer === "all"}
+          onClick={() => { setLayer("all"); setSelectedEdge(null); }}>{t("map.showAllConnections")}</button>
+        {(["delegation", "dependencies", "contextProviders"] as const).map((kind) => <button key={kind} type="button"
+          className="orchestration-map-legend" aria-pressed={layer === kind}
+          onClick={() => { setLayer(kind); setSelectedEdge(null); }}>
+          <i className={`is-${kind}`} aria-hidden="true" />{t(kind === "delegation" ? "map.delegationMeaning" : kind === "dependencies" ? "map.dependenciesMeaning" : "map.contextProvidersMeaning")}
+        </button>)}
+        <span className="orchestration-map-count">{ownerId === null ? t("map.fullRoster") : t("map.directAgents", { count: policy?.allowedChildren.length ?? 0 })}</span>
       </div>
+      <div className="orchestration-map-pan-hint">{t("map.panHint")}</div>
       <div className="orchestration-map-body">
-        <div className="orchestration-map-stage" ref={stage} onWheel={wheelZoom} onPointerDown={panStart}
+        <div className="orchestration-map-stage" ref={stage} onPointerDown={panStart}
           onPointerMove={panMove} onPointerUp={() => { drag.current = null; }}
           onPointerCancel={() => { drag.current = null; }} aria-label={t("map.graph")}>
           <div className="orchestration-map-canvas" style={{ transform: `translate(${viewport.x}px, ${viewport.y}px) scale(${viewport.scale})` }}>
@@ -345,7 +378,7 @@ export function OrchestrationMap({
                 <marker id="orchestration-map-arrow-dependencies" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M 0 0 L 10 5 L 0 10 Z" /></marker>
                 <marker id="orchestration-map-arrow-contextProviders" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M 0 0 L 10 5 L 0 10 Z" /></marker>
               </defs>
-              {graph.edges.map((edge) => {
+              {visibleEdges.map((edge) => {
                 const source = nodeById.get(edge.source);
                 const target = nodeById.get(edge.target);
                 if (!source || !target) return null;
@@ -405,6 +438,7 @@ export function OrchestrationMap({
         </div>
         <aside className="orchestration-map-inspector" aria-label={t("map.details")}>
           <h3>{selectedNode === MAIN_NODE_ID ? t("common.main") : selected?.displayName ?? selectedNode}</h3>
+          {error && <p role="alert" className="orchestration-map-error">{ERROR_KEYS[error] ? t(ERROR_KEYS[error]) : error}</p>}
           {selectedNode !== MAIN_NODE_ID && selected && <>
             <div className="orchestration-map-meta">{t(`agents.scope.${selected.scope}`)} · {t(selected.enabled ? "map.statusEnabled" : "map.statusDisabled")}{selected.orchestration ? ` · ${t("map.kindOrchestrator")}` : ""}{selected.fastMode ? ` · ${t("agents.fastMode")}` : ""}</div>
             <p>{selected.description || t("map.noDescription")}</p>
@@ -413,53 +447,50 @@ export function OrchestrationMap({
           </>}
           {selectedNode !== MAIN_NODE_ID && !selected && <p>{t("map.missingProfile")}</p>}
           {selectedNode === MAIN_NODE_ID && <p>{main.orchestration == null ? t("map.rootLegacy") : t("map.rootConfigured", { count: main.orchestration.allowedChildren.length })}</p>}
-          <div className="orchestration-map-inspector-resources">
-            <strong>{t("map.skills")}</strong><span>{visibleSkills === undefined ? t(legacySkills ? "map.allAvailableLegacy" : "map.noneAssigned") : visibleSkills.join(", ") || t("map.noneAssigned")}</span>
-            <strong>{t("map.extensionTools")}</strong><span>{visibleTools === undefined ? t(legacyExtensions ? "map.allAvailableLegacy" : "map.noneAssigned")
-              : visibleTools.map((tool) => `${tool.toolName} · ${tool.extensionPath}`).join(", ") || t("map.noneAssigned")}</span>
-          </div>
           {selectedNode !== MAIN_NODE_ID && <div className="orchestration-map-context">
             <h4>{t("map.coordinators")}</h4>
             {selectedOwners.length ? <>
-              <p>{t("map.coordinatorHint")}</p>
+              {selectedOwners.length > 1 && <p>{t("map.coordinatorHint")}</p>}
               <div role="group" aria-label={t("map.chooseCoordinator")} className="orchestration-map-owner-choices">
                 {selectedOwners.map((id) => <button key={id} type="button" aria-pressed={id === ownerId} onClick={() => onSelectOwner(id)}>
                   {id === MAIN_NODE_ID ? t("common.main") : findMapProfile(profiles, id)?.displayName ?? id}
                 </button>)}
               </div>
               {selectedIsDirectChild && <div className="orchestration-map-prerequisites">
-                <h4>{t("map.providersForSelected", { name: selected?.displayName ?? selectedNode })}</h4>
-                <p>{t("map.contextProviderHint")}</p>
-                {policy?.allowedChildren.filter((name) => name.toLowerCase() !== selectedNode.toLowerCase()).map((name) => {
-                  const active = selectedProviders.some((provider) => provider.toLowerCase() === name.toLowerCase());
-                  const label = findMapProfile(profiles, name)?.displayName ?? name;
-                  return <label key={name} className="orchestration-map-prerequisite">
-                    <input type="checkbox" checked={active} disabled={!canChange || !onToggleContextProvider}
-                      onChange={(event) => updateContextProvider(name, selectedNode, event.target.checked)} />
-                    <span>{t("map.providerLabel", { name: label })}</span>
-                  </label>;
+                {(["contextProviders", "dependencies"] as const).map((kind) => {
+                  const linked = kind === "contextProviders" ? selectedProviders : selectedPrerequisites;
+                  const update = kind === "contextProviders" ? updateContextProvider : updateDependency;
+                  const title = t(kind === "contextProviders" ? "map.providersForSelected" : "map.requiredBySelected", { name: selected?.displayName ?? selectedNode });
+                  const others = policy?.allowedChildren.filter((name) => name.toLowerCase() !== selectedNode.toLowerCase()) ?? [];
+                  return <div key={kind} className={`orchestration-map-source-group is-${kind}`}>
+                    <h4>{title}</h4>
+                    <p>{t(kind === "contextProviders" ? "map.contextProviderHint" : "map.prerequisiteMeaning")}</p>
+                    {linked.length > 0 && <div className="orchestration-map-active-sources">{linked.map((name) => <button key={name} type="button"
+                      disabled={!canChange || !(kind === "contextProviders" ? onToggleContextProvider : onToggleDependency)}
+                      aria-label={t("map.removeTypedLink", { kind: t(kind === "contextProviders" ? "map.contextProvidersMeaning" : "map.dependenciesMeaning"), source: name, target: selectedNode })}
+                      onClick={() => update(name, selectedNode, false)}>
+                      {findMapProfile(profiles, name)?.displayName ?? name}<span aria-hidden="true">×</span>
+                    </button>)}</div>}
+                    {canChange && (kind === "contextProviders" ? onToggleContextProvider : onToggleDependency) && others.length > 0 &&
+                      <select aria-label={title} value="" onChange={(event) => { if (event.target.value) update(event.target.value, selectedNode, true); }}>
+                        <option value="">{t("map.chooseProducer")}</option>
+                        {others.filter((name) => !linked.some((source) => source.toLowerCase() === name.toLowerCase())).map((name) =>
+                          <option key={name} value={name}>{findMapProfile(profiles, name)?.displayName ?? name}</option>)}
+                      </select>}
+                  </div>;
                 })}
                 {policy?.allowedChildren.length === 1 && <p>{t("map.addSiblingFirst")}</p>}
-                <h4>{t("map.requiredBySelected", { name: selected?.displayName ?? selectedNode })}</h4>
-                <p>{t("map.prerequisiteMeaning")}</p>
-                {policy?.allowedChildren.filter((name) => name.toLowerCase() !== selectedNode.toLowerCase()).map((name) => {
-                  const active = selectedPrerequisites.some((prerequisite) => prerequisite.toLowerCase() === name.toLowerCase());
-                  const label = findMapProfile(profiles, name)?.displayName ?? name;
-                  return <label key={name} className="orchestration-map-prerequisite">
-                    <input type="checkbox" checked={active} disabled={!canChange || !onToggleDependency}
-                      onChange={(event) => updateDependency(name, selectedNode, event.target.checked)} />
-                    <span>{t("map.prerequisiteLabel", { name: label })}</span>
-                  </label>;
-                })}
               </div>}
             </> : <>
               <p>{t("map.noCoordinators")}</p>
               <button type="button" onClick={() => onSelectOwner(MAIN_NODE_ID)}>{t("map.openMainBranch")}</button>
             </>}
           </div>}
-          <h4>{t("map.connections")}</h4>
+          {ownerId !== null && <h4>{t("map.connections")}</h4>}
           {ownerId === null ? <>
-            {relatedOverviewEdges.length > 0 && <div className="orchestration-map-overview-links" role="group" aria-label={t("map.connections")}>
+            {relatedOverviewEdges.length > 0 && <details className="orchestration-map-link-group">
+              <summary>{t("map.connections")}<span>{relatedOverviewEdges.length}</span></summary>
+              <div className="orchestration-map-overview-links" role="group" aria-label={t("map.connections")}>
               {relatedOverviewEdges.map((edge) => {
                 const ownerName = edge.ownerId === MAIN_NODE_ID ? t("common.main") : findMapProfile(profiles, edge.ownerId)?.displayName ?? edge.ownerId;
                 const sourceName = edge.source === MAIN_NODE_ID ? t("common.main") : findMapProfile(profiles, edge.source)?.displayName ?? edge.source;
@@ -470,20 +501,59 @@ export function OrchestrationMap({
                   <strong>{sourceName} → {targetName}</strong>
                 </button>;
               })}
-            </div>}
+              </div>
+            </details>}
             {selectedLink && <div className="orchestration-map-overview-link">
               <p>{t("map.overviewOwner", { name: selectedLink.ownerId === MAIN_NODE_ID ? t("common.main") : findMapProfile(profiles, selectedLink.ownerId)?.displayName ?? selectedLink.ownerId })}</p>
               <button type="button" onClick={() => onSelectOwner(selectedLink.ownerId)}>{t("map.openItsBranch")}</button>
             </div>}
             <p>{t("map.selectToEdit")}</p>
           </> : <>
-            <p className="orchestration-map-hint">{t("map.delegateHint")} {t("map.prerequisiteMeaning")} {t("map.contextProviderHint")}</p>
             {mainNeedsRestriction && <div className="orchestration-map-legacy-note">
               {t("map.legacyWarning")}
               {canEdit && onRestrictMain && <button type="button" onClick={onRestrictMain}>{t("map.restrictMain")}</button>}
             </div>}
-            {(["delegation", "contextProviders", "dependencies"] as const).map((kind) => <div key={kind}>
-              <h4>{t(kind === "delegation" ? "map.directDelegates" : kind === "dependencies" ? "map.requiredResults" : "map.availableProviders")}</h4>
+            {canChange && onToggleChild && <form className="orchestration-map-add" onSubmit={(event) => { event.preventDefault(); if (candidate) { updateChild(candidate, true); setCandidate(""); } }}>
+              <label htmlFor="orchestration-map-candidate">{t("map.addDirectAgent")}</label>
+              <div className="orchestration-map-add-row"><select id="orchestration-map-candidate" value={candidate} onChange={(event) => setCandidate(event.target.value)}>
+                <option value="">{t("map.chooseAgent")}</option>{candidates.map((profile) => <option key={profile.name} value={profile.name}>{profile.displayName} ({profile.name})</option>)}
+              </select><button type="submit" disabled={!candidate}>{t("map.addLink")}</button></div>
+            </form>}
+            {canChange && (onToggleDependency || onToggleContextProvider) && <div className="orchestration-map-link-kind">
+              <label htmlFor="orchestration-map-link-kind">{t("map.linkKind")}</label>
+              <select id="orchestration-map-link-kind" value={connectionKind} onChange={(event) => {
+                setConnectionKind(event.target.value as "dependencies" | "contextProviders"); setConnectionSource(null);
+              }}>
+                <option value="contextProviders">{t("map.contextProvidersMeaning")}</option>
+                <option value="dependencies">{t("map.dependenciesMeaning")}</option>
+              </select>
+              {!selectedIsDirectChild && <p>{t("map.connectHint")}</p>}
+            </div>}
+            {canChange && !selectedIsDirectChild && (connectionKind === "dependencies" ? onToggleDependency : onToggleContextProvider) &&
+              <details className="orchestration-map-link-group"><summary>{t("map.addLink")}</summary>
+                <form className="orchestration-map-add" onSubmit={(event) => {
+                  event.preventDefault();
+                  const data = new FormData(event.currentTarget);
+                  const producer = String(data.get("producer") ?? "");
+                  const consumer = String(data.get("consumer") ?? "");
+                  if (!producer || !consumer) return;
+                  if (connectionKind === "dependencies") updateDependency(producer, consumer, true);
+                  else updateContextProvider(producer, consumer, true);
+                }}>
+                  <label htmlFor="orchestration-map-producer">{t("map.producer")}</label>
+                  <select id="orchestration-map-producer" name="producer" defaultValue="">
+                    <option value="">{t("map.chooseProducer")}</option>{policy?.allowedChildren.map((name) => <option key={name} value={name}>{findMapProfile(profiles, name)?.displayName ?? name}</option>)}
+                  </select>
+                  <label htmlFor="orchestration-map-consumer">{t("map.consumer")}</label>
+                  <select id="orchestration-map-consumer" name="consumer" defaultValue="">
+                    <option value="">{t("map.chooseConsumer")}</option>{policy?.allowedChildren.map((name) => <option key={name} value={name}>{findMapProfile(profiles, name)?.displayName ?? name}</option>)}
+                  </select><button type="submit">{t("map.addLink")}</button>
+                </form>
+              </details>}
+            {(["delegation", "contextProviders", "dependencies"] as const).map((kind) => <details key={`${ownerId}:${kind}`}
+              className="orchestration-map-link-group">
+              <summary>{t(kind === "delegation" ? "map.directDelegates" : kind === "dependencies" ? "map.requiredResults" : "map.availableProviders")}
+                <span>{graph.edges.filter((edge) => edge.ownerId === ownerId && edge.kind === kind).length}</span></summary>
               {graph.edges.filter((edge) => edge.ownerId === ownerId && edge.kind === kind).map((edge) => <div key={edgeId(edge)}
                 className={`orchestration-map-link is-${edge.kind}${selectedEdge === edgeId(edge) ? " is-selected" : ""}`}>
                 <button type="button" onClick={() => { setSelectedEdge(edgeId(edge)); setSelectedNode(edge.target); setUserSelectedNode(true); }}>
@@ -499,43 +569,19 @@ export function OrchestrationMap({
                     source: edge.source === MAIN_NODE_ID ? t("common.main") : edge.source, target: edge.target,
                   })} onClick={() => removeSelectedLink(edge)}>×</button>}
               </div>)}
-            </div>)}
+            </details>)}
             {selectedLink && selectedLink.ownerId !== ownerId && <div className="orchestration-map-meta">{t("map.otherOwner", { name: selectedLink.ownerId === MAIN_NODE_ID ? t("common.main") : selectedLink.ownerId })}</div>}
-            {canChange && onToggleChild && <form className="orchestration-map-add" onSubmit={(event) => { event.preventDefault(); if (candidate) { updateChild(candidate, true); setCandidate(""); } }}>
-              <label htmlFor="orchestration-map-candidate">{t("map.addDirectAgent")}</label>
-              <select id="orchestration-map-candidate" value={candidate} onChange={(event) => setCandidate(event.target.value)}>
-                <option value="">{t("map.chooseAgent")}</option>{candidates.map((profile) => <option key={profile.name} value={profile.name}>{profile.displayName} ({profile.name})</option>)}
-              </select><button type="submit" disabled={!candidate}>{t("map.addLink")}</button>
-            </form>}
-            {canChange && (onToggleDependency || onToggleContextProvider) && <div className="orchestration-map-link-kind">
-              <label htmlFor="orchestration-map-link-kind">{t("map.linkKind")}</label>
-              <select id="orchestration-map-link-kind" value={connectionKind} onChange={(event) => {
-                setConnectionKind(event.target.value as "dependencies" | "contextProviders"); setConnectionSource(null);
-              }}>
-                <option value="contextProviders">{t("map.contextProvidersMeaning")}</option>
-                <option value="dependencies">{t("map.dependenciesMeaning")}</option>
-              </select>
-              <p>{t("map.connectHint")}</p>
-            </div>}
-            {canChange && (connectionKind === "dependencies" ? onToggleDependency : onToggleContextProvider) && <form className="orchestration-map-add" onSubmit={(event) => {
-              event.preventDefault(); if (producer && consumer) {
-                if (connectionKind === "dependencies") updateDependency(producer, consumer, true);
-                else updateContextProvider(producer, consumer, true);
-              }
-            }}>
-              <label htmlFor="orchestration-map-producer">{t("map.producer")}</label>
-              <select id="orchestration-map-producer" value={producer} onChange={(event) => setProducer(event.target.value)}>
-                <option value="">{t("map.chooseProducer")}</option>{policy?.allowedChildren.map((name) => <option key={name} value={name}>{findMapProfile(profiles, name)?.displayName ?? name}</option>)}
-              </select>
-              <label htmlFor="orchestration-map-consumer">{t("map.consumer")}</label>
-              <select id="orchestration-map-consumer" value={consumer} onChange={(event) => setConsumer(event.target.value)}>
-                <option value="">{t("map.chooseConsumer")}</option>{policy?.allowedChildren.map((name) => <option key={name} value={name}>{findMapProfile(profiles, name)?.displayName ?? name}</option>)}
-              </select><button type="submit" disabled={!producer || !consumer}>{t("map.addLink")}</button>
-            </form>}
             {!canEdit && <p className="orchestration-map-hint">{t("map.readOnly")}</p>}
             {canEdit && !policy && <p className="orchestration-map-hint">{t("map.enableOrchestration")}</p>}
           </>}
-          {error && <p role="alert" className="orchestration-map-error">{ERROR_KEYS[error] ? t(ERROR_KEYS[error]) : error}</p>}
+          <details className="orchestration-map-resource-details">
+            <summary>{t("map.skills")} · {t("map.extensionTools")}</summary>
+            <div className="orchestration-map-inspector-resources">
+              <strong>{t("map.skills")}</strong><span>{visibleSkills === undefined ? t(legacySkills ? "map.allAvailableLegacy" : "map.noneAssigned") : visibleSkills.join(", ") || t("map.noneAssigned")}</span>
+              <strong>{t("map.extensionTools")}</strong><span>{visibleTools === undefined ? t(legacyExtensions ? "map.allAvailableLegacy" : "map.noneAssigned")
+                : visibleTools.map((tool) => `${tool.toolName} · ${tool.extensionPath}`).join(", ") || t("map.noneAssigned")}</span>
+            </div>
+          </details>
           <p className="orchestration-map-note">{t("map.layoutNote")}</p>
         </aside>
       </div>

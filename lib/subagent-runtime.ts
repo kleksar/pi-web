@@ -394,6 +394,20 @@ function lastAssistantError(sessionManager: { getEntries?: () => unknown }): str
   return undefined;
 }
 
+/** Fields shared by the start and resume result records. Their extra fields differ. */
+function subagentResultMetadata(run: SubagentRunInfo): SubagentResultMetadata {
+  return {
+    version: 1,
+    status: run.status as SubagentResultMetadata["status"],
+    completedAt: run.completedAt!,
+    ...(run.result ? { result: run.result } : {}),
+    ...(run.contextRequest ? { contextRequest: run.contextRequest } : {}),
+    ...(run.contextFor ? { contextFor: run.contextFor } : {}),
+    ...(run.contextForResultId ? { contextForResultId: run.contextForResultId } : {}),
+    ...(run.error ? { error: run.error } : {}),
+  };
+}
+
 function getSubagentRuns(): Map<string, StoredSubagentExecution> {
   if (!globalThis.__piSubagentRuns) globalThis.__piSubagentRuns = new Map();
   return globalThis.__piSubagentRuns;
@@ -477,6 +491,31 @@ export function createSubagentController(
   const stopGenerations = new WeakMap<HostSession, number>();
   const parentMayContinue = (parent: HostSession, sessionId: string, generation: number) =>
     parent.isAlive() && !stoppedParents().has(sessionId) && (stopGenerations.get(parent) ?? 0) === generation;
+
+  function validateDependencyCompletion(
+    run: SubagentRunInfo,
+    admission: DependencyAdmission | undefined,
+    graph: SubagentOrchestration["dependencies"],
+    profile: string,
+    parent: HostSession,
+    parentSessionId: string,
+    parentGeneration: number,
+  ): SubagentRunInfo {
+    if (!admission || run.status !== "completed") return run;
+    if (!parentMayContinue(parent, parentSessionId, parentGeneration) || !dependencyInputsStillCurrent({
+      entries: parent.inner.sessionManager.getEntries() as unknown as SessionEntry[],
+      parentSessionId, admission, graph,
+    })) {
+      return { ...run, status: "failed", result: undefined,
+        error: "Dependency results changed during execution; launch this subagent again" };
+    }
+    if (profileProducesDependencyOutput(graph, profile)
+      && (!run.result?.trim() || Buffer.byteLength(run.result, "utf8") > MAX_DEPENDENCY_ARTIFACT_BYTES)) {
+      return { ...run, status: "failed", result: undefined,
+        error: `Dependency producer ${profile} must return nonempty text of at most ${MAX_DEPENDENCY_ARTIFACT_BYTES} bytes; launch it again with a shorter result` };
+    }
+    return run;
+  }
 
   function parentPolicy(parent: HostSession): PinnedOrchestration | undefined {
     const entries = parent.inner.sessionManager.getEntries() as unknown as SessionEntry[];
@@ -1124,31 +1163,13 @@ export function createSubagentController(
           request.signal?.removeEventListener("abort", handleParentAbort);
         }
 
-        if (dependencyAdmission && result.status === "completed") {
-          if (!parentMayContinue(parent, parentSessionId, parentGeneration) || !dependencyInputsStillCurrent({
-            entries: parent.inner.sessionManager.getEntries() as unknown as SessionEntry[],
-            parentSessionId, admission: dependencyAdmission, graph: dependencyGraph,
-          })) {
-            result = { ...result, status: "failed", result: undefined,
-              error: "Dependency results changed during execution; launch this subagent again" };
-          } else if (profileProducesDependencyOutput(dependencyGraph, profile.name)
-            && (!result.result?.trim() || Buffer.byteLength(result.result, "utf8") > MAX_DEPENDENCY_ARTIFACT_BYTES)) {
-            result = { ...result, status: "failed", result: undefined,
-              error: `Dependency producer ${profile.name} must return nonempty text of at most ${MAX_DEPENDENCY_ARTIFACT_BYTES} bytes; launch it again with a shorter result` };
-          }
-        }
+        result = validateDependencyCompletion(result, dependencyAdmission, dependencyGraph,
+          profile.name, parent, parentSessionId, parentGeneration);
 
         const cleanupError = await cleanupBranchWorktree();
         if (cleanupError) result = { ...result, worktreeCleanupError: cleanupError };
         const persisted: SubagentResultMetadata = {
-          version: 1,
-          status: result.status as SubagentResultMetadata["status"],
-          completedAt: result.completedAt!,
-          ...(result.result ? { result: result.result } : {}),
-          ...(result.contextRequest ? { contextRequest: result.contextRequest } : {}),
-          ...(result.contextFor ? { contextFor: result.contextFor } : {}),
-          ...(result.contextForResultId ? { contextForResultId: result.contextForResultId } : {}),
-          ...(result.error ? { error: result.error } : {}),
+          ...subagentResultMetadata(result),
           ...(result.worktreeCleanupError ? { worktreeCleanupError: result.worktreeCleanupError } : {}),
         };
         sessionManager.appendCustomEntry(SUBAGENT_RESULT_TYPE, persisted);
@@ -1519,28 +1540,10 @@ export function createSubagentController(
       } finally {
         request.signal?.removeEventListener("abort", handleParentAbort);
       }
-      if (dependencyAdmission && result.status === "completed") {
-        if (!parentMayContinue(parent, parentSessionId, parentGeneration) || !dependencyInputsStillCurrent({
-          entries: parent.inner.sessionManager.getEntries() as unknown as SessionEntry[],
-          parentSessionId, admission: dependencyAdmission, graph: dependencyGraph,
-        })) {
-          result = { ...result, status: "failed", result: undefined,
-            error: "Dependency results changed during execution; launch this subagent again" };
-        } else if (profileProducesDependencyOutput(dependencyGraph, existing.profile)
-          && (!result.result?.trim() || Buffer.byteLength(result.result, "utf8") > MAX_DEPENDENCY_ARTIFACT_BYTES)) {
-          result = { ...result, status: "failed", result: undefined,
-            error: `Dependency producer ${existing.profile} must return nonempty text of at most ${MAX_DEPENDENCY_ARTIFACT_BYTES} bytes; launch it again with a shorter result` };
-        }
-      }
+      result = validateDependencyCompletion(result, dependencyAdmission, dependencyGraph,
+        existing.profile, parent, parentSessionId, parentGeneration);
       manager.appendCustomEntry(SUBAGENT_RESULT_TYPE, {
-        version: 1,
-        status: result.status as SubagentResultMetadata["status"],
-        completedAt: result.completedAt!,
-        ...(result.result ? { result: result.result } : {}),
-        ...(result.contextRequest ? { contextRequest: result.contextRequest } : {}),
-        ...(result.contextFor ? { contextFor: result.contextFor } : {}),
-        ...(result.contextForResultId ? { contextForResultId: result.contextForResultId } : {}),
-        ...(result.error ? { error: result.error } : {}),
+        ...subagentResultMetadata(result),
         ...resumeFields,
       });
       result = await publishContextResult({ parent, parentSessionId, epoch: contextEpoch,

@@ -8,6 +8,7 @@ import { sendAgentCommand } from "@/lib/agent-client";
 import type { ModelsData } from "@/lib/models-cache";
 import type { MainAgentConfig } from "@/lib/main-agent-config";
 import { MAIN_NODE_ID, effectiveMapProfiles, mapOwnersForAgent } from "@/lib/orchestration-map";
+import { findOrchestrationLinkIssue, withAllowedChildren } from "@/lib/orchestration-policy";
 import { isSubagentProfileOverridden } from "@/lib/subagent-profile-precedence";
 import type { SubagentProfile, SubagentProfileInput, SubagentScope, SubagentWritableScope } from "@/lib/subagents";
 import {
@@ -115,65 +116,6 @@ function editableProfile(profile: SubagentProfile): EditableProfile {
       : null,
     enabled: profile.enabled,
   };
-}
-
-type DependencyIssue =
-  | { type: "unknown"; names: string[] }
-  | { type: "self"; name: string }
-  | { type: "limit"; name: string }
-  | { type: "cycle"; names: string[] };
-
-function findDependencyIssue(children: string[], dependencies: Record<string, string[]>, contextProviders: Record<string, string[]> = {}): DependencyIssue | null {
-  const known = new Map(children.map((name) => [name.toLowerCase(), name]));
-  const unknown = new Set<string>();
-  const graph = new Map<string, string[]>();
-  let self: string | undefined;
-
-  for (const relation of [dependencies, contextProviders]) {
-    for (const [consumer, producers] of Object.entries(relation)) {
-      const consumerName = known.get(consumer.toLowerCase());
-      if (!consumerName) unknown.add(consumer);
-      for (const producer of producers) {
-        const producerName = known.get(producer.toLowerCase());
-        if (!producerName) unknown.add(producer);
-        if (!consumerName || !producerName) continue;
-        if (consumerName.toLowerCase() === producerName.toLowerCase()) self = consumerName;
-        const edges = graph.get(consumerName) ?? [];
-        if (!edges.includes(producerName)) edges.push(producerName);
-        graph.set(consumerName, edges);
-      }
-    }
-  }
-  if (unknown.size > 0) return { type: "unknown", names: [...unknown] };
-  if (self) return { type: "self", name: self };
-  for (const name of children) {
-    const prerequisites = Object.entries(dependencies).find(([key]) => key.toLowerCase() === name.toLowerCase())?.[1] ?? [];
-    const providers = Object.entries(contextProviders).find(([key]) => key.toLowerCase() === name.toLowerCase())?.[1] ?? [];
-    if (prerequisites.length > 8 || providers.length > 8 || (graph.get(name)?.length ?? 0) > 8) return { type: "limit", name };
-  }
-
-  const visiting = new Set<string>();
-  const visited = new Set<string>();
-  const path: string[] = [];
-  const visit = (name: string): string[] | null => {
-    if (visiting.has(name)) return [...path.slice(path.indexOf(name)), name];
-    if (visited.has(name)) return null;
-    visiting.add(name);
-    path.push(name);
-    for (const producer of graph.get(name) ?? []) {
-      const cycle = visit(producer);
-      if (cycle) return cycle;
-    }
-    path.pop();
-    visiting.delete(name);
-    visited.add(name);
-    return null;
-  };
-  for (const name of children) {
-    const cycle = visit(name);
-    if (cycle) return { type: "cycle", names: cycle };
-  }
-  return null;
 }
 
 function profileKey(profile: Pick<SubagentProfile, "scope" | "name">): string {
@@ -291,7 +233,7 @@ export function AgentsConfig({
   const validChildNames = useMemo(() => new Set(childProfiles.map((profile) => profile.name.toLowerCase())), [childProfiles]);
   const unavailableChildren = draft.orchestration?.allowedChildren.filter((name) => !validChildNames.has(name.toLowerCase())) ?? [];
   const dependencyIssue = draft.orchestration
-    ? findDependencyIssue(draft.orchestration.allowedChildren, draft.orchestration.dependencies ?? {}, draft.orchestration.contextProviders ?? {})
+    ? findOrchestrationLinkIssue(draft.orchestration.allowedChildren, draft.orchestration.dependencies, draft.orchestration.contextProviders)
     : null;
   const visibleChildProfiles = childProfiles.filter((profile) =>
     profile.name.toLowerCase().includes(childrenQuery.trim().toLowerCase())
@@ -573,27 +515,9 @@ export function AgentsConfig({
       const allowedChildren = checked
         ? [...children, name]
         : children.filter((child) => child.toLowerCase() !== name.toLowerCase());
-      const allowed = new Set(allowedChildren.map((child) => child.toLowerCase()));
-      const dependencies = Object.fromEntries(
-        Object.entries(current.orchestration.dependencies ?? {})
-          .filter(([consumer]) => allowed.has(consumer.toLowerCase()))
-          .map(([consumer, producers]) => [consumer, producers.filter((producer) => allowed.has(producer.toLowerCase()))])
-          .filter(([, producers]) => producers.length > 0),
-      );
-      const contextProviders = Object.fromEntries(
-        Object.entries(current.orchestration.contextProviders ?? {})
-          .filter(([consumer]) => allowed.has(consumer.toLowerCase()))
-          .map(([consumer, providers]) => [consumer, providers.filter((provider) => allowed.has(provider.toLowerCase()))])
-          .filter(([, providers]) => providers.length > 0),
-      );
       return {
         ...current,
-        orchestration: {
-          ...current.orchestration,
-          allowedChildren,
-          ...(Object.keys(dependencies).length > 0 ? { dependencies } : { dependencies: undefined }),
-          ...(Object.keys(contextProviders).length > 0 ? { contextProviders } : { contextProviders: undefined }),
-        },
+        orchestration: withAllowedChildren(current.orchestration, allowedChildren),
       };
     });
   };
@@ -868,10 +792,10 @@ export function AgentsConfig({
       <div role="group" aria-label={t("common.agents")} style={{ display: "flex", gap: 4, padding: "7px 16px", borderBottom: "1px solid var(--border)" }}>
         <ConfigButton size="small" variant={view === "profiles" ? "primary" : undefined} onClick={() => setView("profiles")}>{t("agents.profiles")}</ConfigButton>
         <ConfigButton size="small" variant={view === "map" ? "primary" : undefined} onClick={() => {
-          if (view === "map" && !selectMapOwner(null)) return;
+          if (!selectMapOwner(MAIN_NODE_ID)) return;
           setMapFocusNode(null);
           setPendingMapAgent(null);
-          setMapOwner(null);
+          setMapOwner(MAIN_NODE_ID);
           setView("map");
         }}>{t("agents.openMap")}</ConfigButton>
         {view === "map" && <span style={{ marginLeft: "auto", alignSelf: "center", color: "var(--text-dim)", fontSize: 11 }}>{t("agents.mapMainScope")}</span>}

@@ -5,6 +5,7 @@ export const MAIN_NODE_ID = "\u0000main";
 export const MAP_NODE_WIDTH = 216;
 export const MAP_NODE_HEIGHT = 100;
 export const MAP_MIN_SCALE = 0.22;
+export const MAP_READABLE_SCALE = 0.75;
 
 export type OrchestrationMapLayer = "all" | "delegation" | "dependencies" | "contextProviders";
 export type OrchestrationMapEdgeKind = Exclude<OrchestrationMapLayer, "all">;
@@ -39,7 +40,12 @@ export interface OrchestrationGraph {
   matchCount: number;
 }
 
-/** Fit readable nodes in the viewport; anchor the root when the minimum zoom still overflows. */
+/** Display-only filter: keep graph layout and owner policy unchanged. */
+export function filterOrchestrationEdges(edges: readonly MapEdge[], layer: OrchestrationMapLayer): MapEdge[] {
+  return layer === "all" ? [...edges] : edges.filter((edge) => edge.kind === layer);
+}
+
+/** Explicit overview action: fit every node, even when labels become too small to read. */
 export function fitOrchestrationMap(
   nodes: readonly MapNode[], width: number, height: number, rootId: string,
 ): { x: number; y: number; scale: number } | null {
@@ -48,12 +54,37 @@ export function fitOrchestrationMap(
   const top = Math.min(...nodes.map((node) => node.y));
   const right = Math.max(...nodes.map((node) => node.x + MAP_NODE_WIDTH));
   const bottom = Math.max(...nodes.map((node) => node.y + MAP_NODE_HEIGHT));
-  const scale = Math.max(MAP_MIN_SCALE, Math.min(1, (width - 72) / (right - left), (height - 72) / (bottom - top)));
+  const scale = Math.min(1, Math.max(1, width - 72) / (right - left), Math.max(1, height - 72) / (bottom - top));
   const root = nodes.find((node) => node.id === rootId) ?? nodes[0];
   const position = (size: number, start: number, span: number, rootPosition: number) =>
     span * scale > size - 72 ? 36 - rootPosition * scale : (size - span * scale) / 2 - start * scale;
   return { x: position(width, left, right - left, root.x),
     y: position(height, top, bottom - top, root.y), scale };
+}
+
+/** Open a large branch at a legible scale. Fit all remains a separate, explicit action. */
+export function readableOrchestrationMap(
+  nodes: readonly MapNode[], width: number, height: number, rootId: string,
+): { x: number; y: number; scale: number } | null {
+  const fitted = fitOrchestrationMap(nodes, width, height, rootId);
+  if (!fitted || fitted.scale >= MAP_READABLE_SCALE) return fitted;
+  const left = Math.min(...nodes.map((node) => node.x));
+  const right = Math.max(...nodes.map((node) => node.x + MAP_NODE_WIDTH));
+  const top = Math.min(...nodes.map((node) => node.y));
+  const bottom = Math.max(...nodes.map((node) => node.y + MAP_NODE_HEIGHT));
+  const root = nodes.find((node) => node.id === rootId) ?? nodes[0];
+  const position = (size: number, start: number, span: number, rootPosition: number) =>
+    span * MAP_READABLE_SCALE > size - 72
+      ? 36 - rootPosition * MAP_READABLE_SCALE
+      : (size - span * MAP_READABLE_SCALE) / 2 - start * MAP_READABLE_SCALE;
+  return { x: position(width, left, right - left, root.x),
+    y: position(height, top, bottom - top, root.y), scale: MAP_READABLE_SCALE };
+}
+
+/** Center a selected card at a readable zoom, including after a tiny Fit all overview. */
+export function centerOrchestrationMapNode(node: MapNode, width: number, height: number, scale: number) {
+  return { x: width / 2 - (node.x + MAP_NODE_WIDTH / 2) * scale,
+    y: height / 2 - (node.y + MAP_NODE_HEIGHT / 2) * scale, scale };
 }
 
 const priority = { builtin: 0, global: 1, workspace: 2, project: 3 } as const;
@@ -346,32 +377,42 @@ export function changeChildLink(
   } };
 }
 
+function changeSiblingLink(
+  kind: "dependencies" | "contextProviders",
+  policy: SubagentOrchestration,
+  source: string,
+  consumer: string,
+  enabled: boolean,
+): LinkChangeResult {
+  const names = new Map(policy.allowedChildren.map((name) => [key(name), name]));
+  const from = names.get(key(source));
+  const to = names.get(key(consumer));
+  if (!from || !to) return { ok: false, error: "Both agents must be direct children of this orchestrator." };
+  if (key(from) === key(to)) return { ok: false, error: "An agent cannot depend on itself." };
+  const links = Object.fromEntries(Object.entries(policy[kind] ?? {}).map(([name, values]) => [name, [...values]]));
+  const oldKey = Object.keys(links).find((name) => key(name) === key(to));
+  const before = oldKey ? links[oldKey] : [];
+  if (oldKey) delete links[oldKey];
+  const after = enabled
+    ? before.some((name) => key(name) === key(from)) ? before : [...before, from]
+    : before.filter((name) => key(name) !== key(from));
+  if (after.length > 8) return { ok: false, error: "An agent may have at most 8 prerequisites." };
+  if (after.length) links[to] = after;
+  const next: SubagentOrchestration = { ...policy, allowedChildren: [...policy.allowedChildren],
+    [kind]: Object.keys(links).length ? links : undefined,
+  };
+  if (exceedsProviderLimit(next)) return { ok: false, error: "An agent may have at most 8 prerequisites." };
+  if (hasCombinedCycle(next)) return { ok: false, error: "This link creates a dependency cycle." };
+  return { ok: true, next };
+}
+
 export function changeDependencyLink(
   policy: SubagentOrchestration,
   producer: string,
   consumer: string,
   enabled: boolean,
 ): LinkChangeResult {
-  const names = new Map(policy.allowedChildren.map((name) => [key(name), name]));
-  const from = names.get(key(producer));
-  const to = names.get(key(consumer));
-  if (!from || !to) return { ok: false, error: "Both agents must be direct children of this orchestrator." };
-  if (key(from) === key(to)) return { ok: false, error: "An agent cannot depend on itself." };
-  const dependencies = Object.fromEntries(Object.entries(policy.dependencies ?? {}).map(([name, values]) => [name, [...values]]));
-  const oldKey = Object.keys(dependencies).find((name) => key(name) === key(to));
-  const before = oldKey ? dependencies[oldKey] : [];
-  if (oldKey) delete dependencies[oldKey];
-  const after = enabled
-    ? before.some((name) => key(name) === key(from)) ? before : [...before, from]
-    : before.filter((name) => key(name) !== key(from));
-  if (after.length > 8) return { ok: false, error: "An agent may have at most 8 prerequisites." };
-  if (after.length) dependencies[to] = after;
-  const next: SubagentOrchestration = { ...policy, allowedChildren: [...policy.allowedChildren],
-    ...(Object.keys(dependencies).length ? { dependencies } : { dependencies: undefined }),
-  };
-  if (exceedsProviderLimit(next)) return { ok: false, error: "An agent may have at most 8 prerequisites." };
-  if (hasCombinedCycle(next)) return { ok: false, error: "This link creates a dependency cycle." };
-  return { ok: true, next };
+  return changeSiblingLink("dependencies", policy, producer, consumer, enabled);
 }
 
 /** A coordinator may ask a sibling for extra data while a consumer is running. */
@@ -381,25 +422,5 @@ export function changeContextProviderLink(
   consumer: string,
   enabled: boolean,
 ): LinkChangeResult {
-  const names = new Map(policy.allowedChildren.map((name) => [key(name), name]));
-  const from = names.get(key(provider));
-  const to = names.get(key(consumer));
-  if (!from || !to) return { ok: false, error: "Both agents must be direct children of this orchestrator." };
-  if (key(from) === key(to)) return { ok: false, error: "An agent cannot depend on itself." };
-  const contextProviders = Object.fromEntries(Object.entries(policy.contextProviders ?? {})
-    .map(([name, values]) => [name, [...values]]));
-  const oldKey = Object.keys(contextProviders).find((name) => key(name) === key(to));
-  const before = oldKey ? contextProviders[oldKey] : [];
-  if (oldKey) delete contextProviders[oldKey];
-  const after = enabled
-    ? before.some((name) => key(name) === key(from)) ? before : [...before, from]
-    : before.filter((name) => key(name) !== key(from));
-  if (after.length > 8) return { ok: false, error: "An agent may have at most 8 prerequisites." };
-  if (after.length) contextProviders[to] = after;
-  const next: SubagentOrchestration = { ...policy, allowedChildren: [...policy.allowedChildren],
-    ...(Object.keys(contextProviders).length ? { contextProviders } : { contextProviders: undefined }),
-  };
-  if (exceedsProviderLimit(next)) return { ok: false, error: "An agent may have at most 8 prerequisites." };
-  if (hasCombinedCycle(next)) return { ok: false, error: "This link creates a dependency cycle." };
-  return { ok: true, next };
+  return changeSiblingLink("contextProviders", policy, provider, consumer, enabled);
 }
