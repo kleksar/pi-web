@@ -1,11 +1,11 @@
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { dump as stringifyYaml } from "js-yaml";
-import { existsSync, mkdirSync, readdirSync, readFileSync, unlinkSync } from "fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSync, unlinkSync } from "fs";
 import { basename, dirname, join, resolve } from "path";
 import { parseFrontmatter } from "./frontmatter";
 import { writePrivateFileAtomicSync } from "./atomic-file";
-import { isExistingPathWithinRoots } from "./path-security";
+import { isExistingPathWithinRoots, isPathWithinRoots } from "./path-security";
 import { disabledBuiltInSubagents } from "./subagent-settings";
 import { PRESET_READ_ONLY } from "./tool-presets";
 import type { SessionEntry, SubagentSessionStatus } from "./types";
@@ -14,10 +14,30 @@ export const SUBAGENT_META_TYPE = "pi-web:subagent";
 export const SUBAGENT_STATUS_TYPE = "pi-web:subagent-status";
 export const SUBAGENT_RESULT_TYPE = "pi-web:subagent-result";
 export const SUBAGENT_CONTROL_TOOL_NAMES = ["Agent", "get_subagent_result", "steer_subagent"] as const;
+/** An admitted child receives one immutable result artifact per direct prerequisite. */
+export const MAX_SUBAGENT_DEPENDENCIES = 8;
 
 export type SubagentStatus = SubagentSessionStatus;
 export type SubagentScope = "builtin" | "global" | "workspace" | "project";
 export type SubagentWritableScope = Extract<SubagentScope, "global" | "project">;
+
+export interface SubagentOrchestration {
+  allowedChildren: string[];
+  /** A child may run only after all of its listed producer children succeed. */
+  dependencies?: Record<string, string[]>;
+}
+
+export interface SubagentChildProfileFingerprint {
+  scope: SubagentScope;
+  filePath?: string;
+  sha256: string;
+}
+
+export interface SubagentSessionOrchestration extends SubagentOrchestration {
+  rootSessionId: string;
+  depth: number;
+  childProfiles: Record<string, SubagentChildProfileFingerprint>;
+}
 
 export interface SubagentProfile {
   name: string;
@@ -37,10 +57,17 @@ export interface SubagentProfile {
   color?: string;
   isolation?: "worktree" | "off";
   persistSession?: boolean;
+  orchestration?: SubagentOrchestration;
+  configurationError?: string;
   enabled: boolean;
   scope: SubagentScope;
   filePath?: string;
 }
+
+/** `null` explicitly turns off orchestration; omission preserves a stored setting. */
+export type SubagentProfileInput = Omit<SubagentProfile, "scope" | "filePath" | "orchestration" | "configurationError"> & {
+  orchestration?: SubagentOrchestration | null;
+};
 
 export interface SubagentMetadata {
   version: 1;
@@ -53,18 +80,24 @@ export interface SubagentMetadata {
   runInBackground: boolean;
   createdAt: string;
   resourceSnapshot: SubagentResourceSnapshot;
+  /** Creation epoch of a dependency-bound child, pinned to its parent run. */
+  dependencyEpoch?: string;
   worktreePath?: string;
   worktreeBranch?: string;
 }
 
-export interface SubagentResourceSnapshot {
-  version: 1;
+interface SubagentResourceSnapshotFields {
   appendSystemPrompt: string[];
   tools: string[];
   loadSkills: boolean;
   loadExtensions: boolean;
   exactSystemPrompt?: string;
 }
+
+export type SubagentResourceSnapshot = SubagentResourceSnapshotFields & (
+  | { version: 1; orchestration?: never }
+  | { version: 2; orchestration?: SubagentSessionOrchestration }
+);
 
 export interface SubagentSessionResources {
   appendSystemPrompt: string[];
@@ -72,6 +105,7 @@ export interface SubagentSessionResources {
   loadSkills: boolean;
   loadExtensions: boolean;
   exactSystemPrompt?: string;
+  orchestration?: SubagentSessionOrchestration;
 }
 
 export interface SubagentResultMetadata {
@@ -81,11 +115,19 @@ export interface SubagentResultMetadata {
   result?: string;
   error?: string;
   worktreeCleanupError?: string;
+  parentToolCallId?: string;
+  task?: string;
+  description?: string;
+  runInBackground?: boolean;
 }
 
 export interface SubagentStatusMetadata {
   version: 1;
   status: Extract<SubagentStatus, "queued" | "running">;
+  parentToolCallId?: string;
+  task?: string;
+  description?: string;
+  runInBackground?: boolean;
 }
 
 export interface SubagentRunInfo {
@@ -110,6 +152,7 @@ export interface SubagentRunInfo {
 const DEFAULT_TOOLS = ["read", "bash", "edit", "write", "grep", "find", "ls"];
 const BUILTIN_TOOLS = new Set(DEFAULT_TOOLS);
 const SUBAGENT_CONTROL_TOOLS = new Set<string>(SUBAGENT_CONTROL_TOOL_NAMES);
+const SUBAGENT_SCOPES = new Set<SubagentScope>(["builtin", "global", "workspace", "project"]);
 const THINKING_LEVELS = new Set<ThinkingLevel>(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
 
 /**
@@ -135,9 +178,11 @@ const MANAGED_FRONTMATTER_KEYS = new Set([
   "color",
   "isolation",
   "persist_session",
+  "pi_web_orchestration",
 ]);
 
 const FRONTMATTER_OPEN_RE = /^(?:\uFEFF)?---[ \t]*(?:\r\n|\n|\r)/;
+const PROFILE_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 
 /**
  * The UI exposes two booleans (`load_skills` / `load_extensions`); pi-subagents reads
@@ -213,6 +258,83 @@ function stringList(value: unknown): string[] {
   return values.map((item) => String(item).trim()).filter(Boolean);
 }
 
+function allowedChildren(value: unknown): string[] | null {
+  if (!Array.isArray(value)) return null;
+  const names: string[] = [];
+  const seen = new Set<string>();
+  for (const entry of value) {
+    if (typeof entry !== "string") return null;
+    const name = entry.trim();
+    const key = name.toLowerCase();
+    if (!PROFILE_NAME_RE.test(name) || seen.has(key)) return null;
+    seen.add(key);
+    names.push(name);
+  }
+  return names;
+}
+
+/** Validate and normalize a consumer-to-producers graph against the allowed children. */
+function dependencyGraph(value: unknown, children: readonly string[]): Record<string, string[]> | null {
+  if (!isRecord(value)) return null;
+  const canonical = new Map(children.map((child) => [child.toLowerCase(), child]));
+  const graph: Record<string, string[]> = {};
+  const seenConsumers = new Set<string>();
+  for (const [rawConsumer, rawProducers] of Object.entries(value)) {
+    const consumer = canonical.get(rawConsumer.toLowerCase());
+    if (!consumer || seenConsumers.has(consumer.toLowerCase()) || !Array.isArray(rawProducers)
+      || rawProducers.length > MAX_SUBAGENT_DEPENDENCIES) return null;
+    seenConsumers.add(consumer.toLowerCase());
+    const producers: string[] = [];
+    const seenProducers = new Set<string>();
+    for (const rawProducer of rawProducers) {
+      if (typeof rawProducer !== "string") return null;
+      const producer = canonical.get(rawProducer.toLowerCase());
+      if (!producer || producer === consumer || seenProducers.has(producer.toLowerCase())) return null;
+      seenProducers.add(producer.toLowerCase());
+      producers.push(producer);
+    }
+    graph[consumer] = producers;
+  }
+
+  // Count edges from each producer to its consumers; Kahn's algorithm also
+  // handles long configured graphs without relying on recursive stack depth.
+  const outstanding = new Map(children.map((child) => [
+    child,
+    Object.prototype.hasOwnProperty.call(graph, child) ? graph[child].length : 0,
+  ]));
+  const consumers = new Map(children.map((child) => [child, [] as string[]]));
+  for (const [consumer, producers] of Object.entries(graph)) {
+    for (const producer of producers) consumers.get(producer)?.push(consumer);
+  }
+  const ready = children.filter((child) => outstanding.get(child) === 0);
+  let visited = 0;
+  while (ready.length > 0) {
+    const producer = ready.pop()!;
+    visited += 1;
+    for (const consumer of consumers.get(producer) ?? []) {
+      const remaining = (outstanding.get(consumer) ?? 0) - 1;
+      outstanding.set(consumer, remaining);
+      if (remaining === 0) ready.push(consumer);
+    }
+  }
+  return visited === children.length ? graph : null;
+}
+
+function profileOrchestration(value: unknown, profileName: string): SubagentOrchestration | undefined {
+  if (!isRecord(value) || value.kind !== "orchestrator") return undefined;
+  const children = allowedChildren(value.allowed_children);
+  if (children === null || children.some((child) => child.toLowerCase() === profileName.toLowerCase())) return undefined;
+  const dependencies = Object.prototype.hasOwnProperty.call(value, "depends_on")
+    ? dependencyGraph(value.depends_on, children)
+    : undefined;
+  if (dependencies === null) return undefined;
+  return { allowedChildren: children, ...(dependencies !== undefined ? { dependencies } : {}) };
+}
+
+function hasOrchestrationMarker(data: Record<string, unknown>): boolean {
+  return Object.prototype.hasOwnProperty.call(data, "pi_web_orchestration");
+}
+
 function parseTools(value: unknown, fallback: string[]): string[] {
   const tools = stringList(value);
   if (tools.includes("none")) return [];
@@ -231,8 +353,13 @@ function parseExtensionToolSelectors(value: unknown): string[] {
 
 /** Read existing frontmatter without allowing malformed metadata to be overwritten. */
 function readStoredFrontmatter(filePath: string): Record<string, unknown> {
-  if (!existsSync(filePath)) return {};
-  const source = readFileSync(filePath, "utf8");
+  let source: string;
+  try {
+    source = readFileSync(filePath, "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return {};
+    throw error;
+  }
   const { data } = parseFrontmatter(source);
   if (data) return data;
   if (FRONTMATTER_OPEN_RE.test(source)) {
@@ -276,44 +403,62 @@ function syncFlagAlias(
     || (typeof storedValue === "string" && OWNED_ALIAS_VALUES.has(storedValue.trim().toLowerCase()));
   if (owned) frontmatter[alias] = flag;
 }
-function parseProfileFile(filePath: string, scope: SubagentScope): SubagentProfile | null {
-  try {
-    const source = readFileSync(filePath, "utf8");
-    const { data, rest } = parseFrontmatter(source);
-    const name = stringValue(data?.name) ?? basename(filePath, ".md");
-    if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(name)) return null;
-    const thinkingValue = stringValue(data?.thinking) as ThinkingLevel | undefined;
-    const maxTurnsValue = typeof data?.max_turns === "number" ? Math.floor(data.max_turns) : undefined;
-    const tools = parseTools(data?.tools, DEFAULT_TOOLS);
-    const disallowedTools = new Set(parseTools(data?.disallowed_tools, []));
-    const disallowedExtensionTools = new Set(parseExtensionToolSelectors(data?.disallowed_tools).map((tool) => tool.toLowerCase()));
-    const extensionTools = parseExtensionToolSelectors(data?.tools)
-      .filter((tool) => !disallowedExtensionTools.has(tool.toLowerCase()));
-    return {
-      name,
-      displayName: stringValue(data?.display_name) ?? name,
-      description: stringValue(data?.description) ?? name,
-      systemPrompt: rest.trim(),
-      tools: tools.filter((tool) => !disallowedTools.has(tool)),
-      ...(extensionTools.length > 0 ? { extensionTools } : {}),
-      loadSkills: resourceBoolean(data?.load_skills ?? data?.skills, false),
-      loadExtensions: resourceBoolean(data?.load_extensions ?? data?.extensions, extensionTools.length > 0),
-      ...(stringValue(data?.model) ? { model: stringValue(data?.model) } : {}),
-      ...(thinkingValue && THINKING_LEVELS.has(thinkingValue) ? { thinking: thinkingValue } : {}),
-      ...(maxTurnsValue && maxTurnsValue > 0 ? { maxTurns: maxTurnsValue } : {}),
-      inheritContext: booleanValue(data?.inherit_context, false),
-      runInBackground: booleanValue(data?.run_in_background, false),
-      promptMode: data?.prompt_mode === "replace" ? "replace" : "append",
-      ...(stringValue(data?.color) ? { color: stringValue(data?.color) } : {}),
-      ...(data?.isolation === "worktree" || data?.isolation === "off" ? { isolation: data.isolation } : {}),
-      ...(typeof data?.persist_session === "boolean" ? { persistSession: data.persist_session } : {}),
-      enabled: booleanValue(data?.enabled, true),
-      scope,
-      filePath,
-    };
-  } catch {
-    return null;
+function parseProfileFile(filePath: string, scope: SubagentScope): SubagentProfile {
+  const source = readFileSync(filePath, "utf8");
+  const { data, rest } = parseFrontmatter(source);
+  // A malformed fence may contain a `name` that differs from the filename;
+  // a tombstone under the filename cannot safely shadow that effective name.
+  if (data === null && FRONTMATTER_OPEN_RE.test(source)) {
+    throw new Error(`Invalid agent profile frontmatter: ${filePath}`);
   }
+  const name = stringValue(data?.name) ?? basename(filePath, ".md");
+  if (!PROFILE_NAME_RE.test(name)) throw new Error(`Invalid agent profile name in ${filePath}: ${name}`);
+  const thinkingValue = stringValue(data?.thinking) as ThinkingLevel | undefined;
+  const maxTurnsValue = typeof data?.max_turns === "number" ? Math.floor(data.max_turns) : undefined;
+  const tools = parseTools(data?.tools, DEFAULT_TOOLS);
+  const disallowedTools = new Set(parseTools(data?.disallowed_tools, []));
+  const disallowedExtensionTools = new Set(parseExtensionToolSelectors(data?.disallowed_tools).map((tool) => tool.toLowerCase()));
+  const extensionTools = parseExtensionToolSelectors(data?.tools)
+    .filter((tool) => !disallowedExtensionTools.has(tool.toLowerCase()));
+  const activeTools = tools.filter((tool) => !disallowedTools.has(tool));
+  const loadSkills = resourceBoolean(data?.load_skills ?? data?.skills, false);
+  const loadExtensions = resourceBoolean(data?.load_extensions ?? data?.extensions, extensionTools.length > 0);
+  const orchestration = activeTools.length === 0 && extensionTools.length === 0 && !loadSkills && !loadExtensions
+    ? profileOrchestration(data?.pi_web_orchestration, name)
+    : undefined;
+  const profile: SubagentProfile = {
+    name,
+    displayName: stringValue(data?.display_name) ?? name,
+    description: stringValue(data?.description) ?? name,
+    systemPrompt: rest.trim(),
+    tools: activeTools,
+    ...(extensionTools.length > 0 ? { extensionTools } : {}),
+    loadSkills,
+    loadExtensions,
+    ...(stringValue(data?.model) ? { model: stringValue(data?.model) } : {}),
+    ...(thinkingValue && THINKING_LEVELS.has(thinkingValue) ? { thinking: thinkingValue } : {}),
+    ...(maxTurnsValue && maxTurnsValue > 0 ? { maxTurns: maxTurnsValue } : {}),
+    inheritContext: booleanValue(data?.inherit_context, false),
+    runInBackground: booleanValue(data?.run_in_background, false),
+    promptMode: data?.prompt_mode === "replace" ? "replace" : "append",
+    ...(stringValue(data?.color) ? { color: stringValue(data?.color) } : {}),
+    ...(data?.isolation === "worktree" || data?.isolation === "off" ? { isolation: data.isolation } : {}),
+    ...(typeof data?.persist_session === "boolean" ? { persistSession: data.persist_session } : {}),
+    ...(orchestration ? { orchestration } : {}),
+    enabled: booleanValue(data?.enabled, true),
+    scope,
+    filePath,
+  };
+  if (!data || !hasOrchestrationMarker(data) || orchestration) return profile;
+  return {
+    ...profile,
+    enabled: false,
+    tools: [],
+    extensionTools: undefined,
+    loadSkills: false,
+    loadExtensions: false,
+    configurationError: "Invalid Pi Web orchestration configuration; this profile cannot run",
+  };
 }
 
 function isProjectProfilePathAllowed(cwd: string, target: string): boolean {
@@ -321,12 +466,18 @@ function isProjectProfilePathAllowed(cwd: string, target: string): boolean {
 }
 
 function readProfileDirectory(dir: string, scope: SubagentScope, cwd: string): SubagentProfile[] {
-  if (!existsSync(dir)) return [];
-  if (scope !== "global" && !isProjectProfilePathAllowed(cwd, dir)) return [];
+  try {
+    if (!statSync(dir).isDirectory()) throw new Error(`Agent profile path is not a directory: ${dir}`);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+    throw error;
+  }
+  // Keep an intentional symlink outside cwd excluded, but propagate failures
+  // to resolve an existing directory instead of falling back to a lower scope.
+  if (scope !== "global" && !isPathWithinRoots(realpathSync(dir), new Set([realpathSync(cwd)]))) return [];
   return readdirSync(dir, { withFileTypes: true })
     .filter((entry) => entry.isFile() && entry.name.endsWith(".md"))
-    .map((entry) => parseProfileFile(join(dir, entry.name), scope))
-    .filter((profile): profile is SubagentProfile => profile !== null);
+    .map((entry) => parseProfileFile(join(dir, entry.name), scope));
 }
 
 function profileDirectories(cwd: string): Array<[string, Exclude<SubagentScope, "builtin">]> {
@@ -376,7 +527,7 @@ export function resolveSubagentProfile(cwd: string, name: string): SubagentProfi
 
 function assertProfileName(name: string): string {
   const normalized = name.trim();
-  if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(normalized)) {
+  if (!PROFILE_NAME_RE.test(normalized)) {
     throw new Error("Agent name may contain only letters, numbers, dots, underscores, and hyphens");
   }
   return normalized;
@@ -407,7 +558,7 @@ function assertWritableProfileDirectory(cwd: string, scope: SubagentWritableScop
 export function saveSubagentProfile(
   cwd: string,
   scope: SubagentWritableScope,
-  profile: Omit<SubagentProfile, "scope" | "filePath">,
+  profile: SubagentProfileInput,
 ): SubagentProfile {
   const name = assertProfileName(profile.name);
   const tools = [...new Set(profile.tools.filter((tool) => BUILTIN_TOOLS.has(tool)))];
@@ -428,6 +579,21 @@ export function saveSubagentProfile(
   const loadSkills = profile.loadSkills === true;
   const loadExtensions = profile.loadExtensions === true;
   const promptMode = profile.promptMode === "replace" ? "replace" : "append";
+  const requestedChildren = profile.orchestration == null
+    ? undefined
+    : isRecord(profile.orchestration) ? allowedChildren(profile.orchestration.allowedChildren) : null;
+  if (requestedChildren === null) throw new Error("Orchestrator allowedChildren must be unique agent profile names");
+  if (requestedChildren?.some((child) => child.toLowerCase() === name.toLowerCase())) {
+    throw new Error("An orchestrator cannot delegate to itself");
+  }
+  const requestedDependencies = requestedChildren === undefined
+    ? undefined
+    : profile.orchestration && Object.prototype.hasOwnProperty.call(profile.orchestration, "dependencies")
+      ? dependencyGraph(profile.orchestration.dependencies, requestedChildren)
+      : undefined;
+  if (requestedDependencies === null) {
+    throw new Error(`Orchestrator dependencies must be an acyclic graph of unique allowed child profiles with at most ${MAX_SUBAGENT_DEPENDENCIES} prerequisites per child`);
+  }
   const dir = assertWritableProfileDirectory(cwd, scope);
   mkdirSync(dir, { recursive: true });
   if (scope === "project" && !isProjectProfilePathAllowed(cwd, dir)) {
@@ -435,10 +601,30 @@ export function saveSubagentProfile(
   }
   const filePath = join(dir, `${name}.md`);
   const stored = readStoredFrontmatter(filePath);
+  if (
+    profile.orchestration === undefined
+    && Object.prototype.hasOwnProperty.call(stored, "pi_web_orchestration")
+    && !profileOrchestration(stored.pi_web_orchestration, name)
+  ) {
+    throw new Error("Invalid stored Pi Web orchestration configuration; provide a valid policy or null to remove it");
+  }
+  const orchestrationField = profile.orchestration === null
+    ? undefined
+    : requestedChildren === undefined
+      ? stored.pi_web_orchestration
+      : {
+          kind: "orchestrator",
+          allowed_children: requestedChildren,
+          ...(requestedDependencies !== undefined ? { depends_on: requestedDependencies } : {}),
+        };
+  const orchestration = profileOrchestration(orchestrationField, name);
+  if (orchestration && (tools.length > 0 || extensionTools.length > 0 || loadSkills || loadExtensions)) {
+    throw new Error("Orchestrators cannot use file tools, extension tools, skills, or extensions");
+  }
   const managed: Record<string, unknown> = {
     description,
     display_name: displayName,
-    tools: composeToolsField([...tools, ...extensionTools], stored.tools),
+    tools: orchestration ? "none" : composeToolsField([...tools, ...extensionTools], stored.tools),
     load_skills: loadSkills,
     load_extensions: loadExtensions,
     enabled: profile.enabled,
@@ -454,6 +640,7 @@ export function saveSubagentProfile(
   if (profile.color?.trim()) managed.color = profile.color.trim();
   if (profile.isolation) managed.isolation = profile.isolation;
   if (profile.persistSession !== undefined) managed.persist_session = profile.persistSession;
+  if (orchestrationField !== undefined) managed.pi_web_orchestration = orchestrationField;
   // Managed keys win; keys this app does not own follow in their original order.
   const frontmatter: Record<string, unknown> = { ...managed };
   for (const [key, value] of Object.entries(unmanagedFrontmatter(stored))) {
@@ -461,8 +648,9 @@ export function saveSubagentProfile(
   }
   const yaml = stringifyYaml(frontmatter, { noRefs: true, lineWidth: 1000 }).trimEnd();
   writePrivateFileAtomicSync(filePath, `---\n${yaml}\n---\n\n${systemPrompt}\n`);
+  const normalizedProfile = { ...profile, orchestration: undefined, configurationError: undefined };
   return {
-    ...profile,
+    ...normalizedProfile,
     name,
     displayName,
     description,
@@ -477,6 +665,7 @@ export function saveSubagentProfile(
     ...(profile.color ? { color: profile.color } : {}),
     ...(profile.isolation ? { isolation: profile.isolation } : {}),
     ...(profile.persistSession !== undefined ? { persistSession: profile.persistSession } : {}),
+    ...(orchestration ? { orchestration } : {}),
     scope,
     filePath,
   };
@@ -488,7 +677,7 @@ export function deleteSubagentProfile(cwd: string, scope: SubagentWritableScope,
   if (existsSync(filePath)) unlinkSync(filePath);
 }
 
-export function saveProjectSubagentProfile(cwd: string, profile: Omit<SubagentProfile, "scope" | "filePath">): SubagentProfile {
+export function saveProjectSubagentProfile(cwd: string, profile: SubagentProfileInput): SubagentProfile {
   return saveSubagentProfile(cwd, "project", profile);
 }
 
@@ -498,6 +687,35 @@ export function deleteProjectSubagentProfile(cwd: string, name: string): void {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function childProfileFingerprints(
+  value: unknown,
+  children: readonly string[],
+): Record<string, SubagentChildProfileFingerprint> | null {
+  if (!isRecord(value)) return null;
+  const expected = new Set(children.map((child) => child.toLowerCase()));
+  const keys = Object.keys(value);
+  if (keys.length !== expected.size || keys.some((key) => !expected.has(key))) return null;
+  const pins: Record<string, SubagentChildProfileFingerprint> = {};
+  for (const key of keys) {
+    const pin = value[key];
+    if (
+      !isRecord(pin)
+      || !SUBAGENT_SCOPES.has(pin.scope as SubagentScope)
+      || typeof pin.sha256 !== "string"
+      || !/^[0-9a-f]{64}$/.test(pin.sha256)
+      || (pin.scope === "builtin"
+        ? pin.filePath !== undefined
+        : typeof pin.filePath !== "string" || !pin.filePath.trim())
+    ) return null;
+    pins[key] = {
+      scope: pin.scope as SubagentScope,
+      ...(pin.scope !== "builtin" ? { filePath: pin.filePath as string } : {}),
+      sha256: pin.sha256,
+    };
+  }
+  return pins;
 }
 
 type ValidSubagentMetadataData = Record<string, unknown> & {
@@ -518,33 +736,87 @@ function subagentMetadataData(entries: readonly SessionEntry[]): ValidSubagentMe
 export function readSubagentSessionResources(
   entries: readonly SessionEntry[],
 ): SubagentSessionResources | null {
+  const marker = entries.find((entry) => entry.type === "custom" && entry.customType === SUBAGENT_META_TYPE);
+  if (!marker) return null;
   const data = subagentMetadataData(entries);
-  if (!data) return null;
+  if (!data) throw new Error("Invalid subagent metadata");
   const snapshot = data.resourceSnapshot;
-  const loadSkills = isRecord(snapshot) && snapshot.loadSkills === true;
-  const loadExtensions = isRecord(snapshot) && snapshot.loadExtensions === true;
-  if (
-    isRecord(snapshot)
-    && snapshot.version === 1
-    && Array.isArray(snapshot.appendSystemPrompt)
-    && snapshot.appendSystemPrompt.every((item) => typeof item === "string")
-    && Array.isArray(snapshot.tools)
-    && snapshot.tools.every((item) =>
-      typeof item === "string"
-      && item.length > 0
-      && !SUBAGENT_CONTROL_TOOLS.has(item)
-      && (BUILTIN_TOOLS.has(item) || loadExtensions)
-    )
-  ) {
-    return {
-      appendSystemPrompt: [...snapshot.appendSystemPrompt],
-      tools: [...new Set(snapshot.tools)],
-      loadSkills,
-      loadExtensions,
-      ...(typeof snapshot.exactSystemPrompt === "string" ? { exactSystemPrompt: snapshot.exactSystemPrompt } : {}),
-    };
+  if (!isRecord(snapshot) || (snapshot.version !== 1 && snapshot.version !== 2)) {
+    throw new Error("Invalid or unsupported subagent resource snapshot");
   }
-  return null;
+  const loadSkills = snapshot.loadSkills === true;
+  const loadExtensions = snapshot.loadExtensions === true;
+  if (
+    !Array.isArray(snapshot.appendSystemPrompt)
+    || !snapshot.appendSystemPrompt.every((item) => typeof item === "string")
+    || !Array.isArray(snapshot.tools)
+    || (snapshot.exactSystemPrompt !== undefined && typeof snapshot.exactSystemPrompt !== "string")
+    || (snapshot.version === 2 &&
+      (typeof snapshot.loadSkills !== "boolean" || typeof snapshot.loadExtensions !== "boolean"))
+  ) {
+    throw new Error("Invalid subagent resource snapshot");
+  }
+  const orchestration = snapshot.version === 2 && snapshot.orchestration !== undefined
+    ? snapshot.orchestration
+    : undefined;
+  const children = isRecord(orchestration) ? allowedChildren(orchestration.allowedChildren) : null;
+  const pins = isRecord(orchestration) && children !== null
+    ? childProfileFingerprints(orchestration.childProfiles, children)
+    : null;
+  const dependencies = isRecord(orchestration) && children !== null
+    && Object.prototype.hasOwnProperty.call(orchestration, "dependencies")
+    ? dependencyGraph(orchestration.dependencies, children)
+    : undefined;
+  if (
+    (snapshot.version === 1 && "orchestration" in snapshot)
+    || (snapshot.version === 2 && "orchestration" in snapshot && (
+      !isRecord(orchestration)
+      || children === null
+      || pins === null
+      || dependencies === null
+      || typeof data.profile !== "string"
+      || children?.some((child) => child.toLowerCase() === (data.profile as string).toLowerCase())
+      || typeof orchestration.rootSessionId !== "string"
+      || !orchestration.rootSessionId.trim()
+      || !Number.isSafeInteger(orchestration.depth)
+      || (orchestration.depth as number) < 1
+    ))
+  ) {
+    throw new Error("Invalid subagent orchestration snapshot");
+  }
+  const tools = snapshot.tools as unknown[];
+  const controlTools = tools.filter((tool): tool is string =>
+    typeof tool === "string" && SUBAGENT_CONTROL_TOOLS.has(tool));
+  if (
+    !tools.every((tool) =>
+      typeof tool === "string"
+      && tool.length > 0
+      && (BUILTIN_TOOLS.has(tool) || (loadExtensions && !SUBAGENT_CONTROL_TOOLS.has(tool)) || SUBAGENT_CONTROL_TOOLS.has(tool)))
+    || (orchestration
+      ? loadSkills || loadExtensions
+        || tools.length !== SUBAGENT_CONTROL_TOOL_NAMES.length
+        || controlTools.length !== SUBAGENT_CONTROL_TOOL_NAMES.length
+        || SUBAGENT_CONTROL_TOOL_NAMES.some((name) => !controlTools.includes(name))
+      : controlTools.length > 0)
+  ) {
+    throw new Error("Invalid subagent resource tools");
+  }
+  return {
+    appendSystemPrompt: [...snapshot.appendSystemPrompt],
+    tools: [...new Set(tools as string[])],
+    loadSkills,
+    loadExtensions,
+    ...(typeof snapshot.exactSystemPrompt === "string" ? { exactSystemPrompt: snapshot.exactSystemPrompt } : {}),
+    ...(isRecord(orchestration) && children !== null && pins !== null
+      ? { orchestration: {
+          allowedChildren: children,
+          ...(dependencies !== undefined && dependencies !== null ? { dependencies } : {}),
+          rootSessionId: orchestration.rootSessionId as string,
+          depth: orchestration.depth as number,
+          childProfiles: pins,
+        } }
+      : {}),
+  };
 }
 
 export function withSubagentExtensionTools(
@@ -599,15 +871,26 @@ export function readSubagentRun(entries: readonly SessionEntry[], sessionId: str
     : statusData?.version === 1 && (statusData.status === "queued" || statusData.status === "running")
       ? statusData.status
       : "interrupted";
+  // The first marker identifies the session; later status/result entries identify
+  // the latest invocation when a failed or interrupted child is resumed.
+  const invocation = result ?? statusData;
   return {
     sessionId,
     sessionPath,
     parentSessionId: data.parentSessionId,
-    parentToolCallId: typeof data.parentToolCallId === "string" ? data.parentToolCallId : "",
+    parentToolCallId: typeof invocation?.parentToolCallId === "string"
+      ? invocation.parentToolCallId
+      : typeof data.parentToolCallId === "string" ? data.parentToolCallId : "",
     profile: typeof data.profile === "string" ? data.profile : "general-purpose",
-    description: typeof data.description === "string" ? data.description : "Subagent",
-    task: typeof data.task === "string" ? data.task : "",
-    runInBackground: data.runInBackground === true,
+    description: typeof invocation?.description === "string"
+      ? invocation.description
+      : typeof data.description === "string" ? data.description : "Subagent",
+    task: typeof invocation?.task === "string"
+      ? invocation.task
+      : typeof data.task === "string" ? data.task : "",
+    runInBackground: typeof invocation?.runInBackground === "boolean"
+      ? invocation.runInBackground
+      : data.runInBackground === true,
     status: persistedStatus,
     createdAt: typeof data.createdAt === "string" ? data.createdAt : "",
     ...(result && typeof result.completedAt === "string" ? { completedAt: result.completedAt } : {}),

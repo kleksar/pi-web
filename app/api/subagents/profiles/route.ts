@@ -4,8 +4,9 @@ import { getAllowedFileRoots, isExistingFilePathAllowed } from "@/lib/file-acces
 import {
   deleteSubagentProfile,
   listSubagentProfileSources,
+  listSubagentProfiles,
   saveSubagentProfile,
-  type SubagentProfile,
+  type SubagentProfileInput,
   type SubagentWritableScope,
 } from "@/lib/subagents";
 import { writeDisabledBuiltInSubagent } from "@/lib/subagent-settings";
@@ -30,6 +31,20 @@ function validateToggleScope(scope: unknown): SubagentWritableScope | "builtin" 
   return scope;
 }
 
+function validateAllowedChildren(cwd: string, profile: SubagentProfileInput): void {
+  const names = profile.orchestration?.allowedChildren;
+  if (!Array.isArray(names)) return; // saveSubagentProfile validates malformed input.
+  const effective = new Set(listSubagentProfiles(cwd)
+    .filter((candidate) => candidate.enabled)
+    .map((candidate) => candidate.name.toLowerCase()));
+  for (const name of names) {
+    if (typeof name !== "string") continue; // saveSubagentProfile validates malformed input.
+    if (!effective.has(name.toLowerCase())) {
+      throw new Error(`Allowed child agent is missing or disabled: ${name}`);
+    }
+  }
+}
+
 export async function GET(req: Request) {
   try {
     const cwd = await validateCwd(new URL(req.url).searchParams.get("cwd"));
@@ -45,13 +60,14 @@ export async function PUT(req: Request) {
     const body = await req.json() as {
       cwd?: unknown;
       scope?: unknown;
-      profile?: Omit<SubagentProfile, "scope" | "filePath">;
+      profile?: SubagentProfileInput;
     };
     const cwd = await validateCwd(body.cwd);
     const scope = validateScope(body.scope);
     if (!body.profile || typeof body.profile.name !== "string") {
       return NextResponse.json({ error: "profile required" }, { status: 400 });
     }
+    validateAllowedChildren(cwd, body.profile);
     return NextResponse.json({ profile: saveSubagentProfile(cwd, scope, body.profile) });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -75,23 +91,8 @@ export async function PATCH(req: Request) {
       writeDisabledBuiltInSubagent(source.name, !body.enabled);
       return NextResponse.json({ profile: { ...source, enabled: body.enabled } });
     }
-    const profile: Omit<SubagentProfile, "scope" | "filePath"> = {
-      name: source.name,
-      displayName: source.displayName,
-      description: source.description,
-      systemPrompt: source.systemPrompt,
-      tools: source.tools,
-      loadSkills: source.loadSkills,
-      loadExtensions: source.loadExtensions,
-      promptMode: source.promptMode,
-      model: source.model,
-      thinking: source.thinking,
-      maxTurns: source.maxTurns,
-      inheritContext: source.inheritContext,
-      runInBackground: source.runInBackground,
-      enabled: source.enabled,
-    };
-    return NextResponse.json({ profile: saveSubagentProfile(cwd, scope, { ...profile, enabled: body.enabled }) });
+    const profile: SubagentProfileInput = { ...source, enabled: body.enabled };
+    return NextResponse.json({ profile: saveSubagentProfile(cwd, scope, profile) });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     return NextResponse.json({ error: message }, { status: message === "Access denied" ? 403 : 400 });

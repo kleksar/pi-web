@@ -7,7 +7,7 @@ import type { SubagentProfilesResponse, SubagentSettingsResponse } from "@/lib/a
 import { sendAgentCommand } from "@/lib/agent-client";
 import type { ModelsData } from "@/lib/models-cache";
 import { isSubagentProfileOverridden } from "@/lib/subagent-profile-precedence";
-import type { SubagentProfile, SubagentScope, SubagentWritableScope } from "@/lib/subagents";
+import type { SubagentProfile, SubagentProfileInput, SubagentScope, SubagentWritableScope } from "@/lib/subagents";
 import {
   getLastSettingsSelection,
   setLastSettingsSelection,
@@ -38,7 +38,7 @@ import { ModelSelector } from "./ModelSelector";
 const TOOL_OPTIONS = ["read", "bash", "edit", "write", "grep", "find", "ls"];
 const THINKING_OPTIONS = ["", "off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 
-type EditableProfile = Omit<SubagentProfile, "scope" | "filePath">;
+type EditableProfile = SubagentProfileInput;
 type EditorMode = "view" | "edit" | "create";
 
 const EMPTY_PROFILE: EditableProfile = {
@@ -52,6 +52,7 @@ const EMPTY_PROFILE: EditableProfile = {
   promptMode: "append",
   inheritContext: false,
   runInBackground: false,
+  orchestration: null,
   enabled: true,
 };
 
@@ -80,17 +81,77 @@ function editableProfile(profile: SubagentProfile): EditableProfile {
     displayName: profile.displayName,
     description: profile.description,
     systemPrompt: profile.systemPrompt,
-    tools: [...profile.tools],
-    loadSkills: profile.loadSkills,
-    loadExtensions: profile.loadExtensions,
+    tools: profile.orchestration ? [] : [...profile.tools],
+    ...(profile.orchestration ? { extensionTools: [] } : {}),
+    loadSkills: profile.orchestration ? false : profile.loadSkills,
+    loadExtensions: profile.orchestration ? false : profile.loadExtensions,
     promptMode: profile.promptMode,
     ...(profile.model ? { model: profile.model } : {}),
     ...(profile.thinking ? { thinking: profile.thinking } : {}),
     ...(profile.maxTurns ? { maxTurns: profile.maxTurns } : {}),
     inheritContext: profile.inheritContext,
     runInBackground: profile.runInBackground,
+    orchestration: profile.orchestration
+      ? {
+          allowedChildren: [...profile.orchestration.allowedChildren],
+          ...(profile.orchestration.dependencies
+            ? { dependencies: Object.fromEntries(Object.entries(profile.orchestration.dependencies).map(([name, producers]) => [name, [...producers]])) }
+            : {}),
+        }
+      : null,
     enabled: profile.enabled,
   };
+}
+
+type DependencyIssue =
+  | { type: "unknown"; names: string[] }
+  | { type: "self"; name: string }
+  | { type: "cycle"; names: string[] };
+
+function findDependencyIssue(children: string[], dependencies: Record<string, string[]>): DependencyIssue | null {
+  const known = new Map(children.map((name) => [name.toLowerCase(), name]));
+  const unknown = new Set<string>();
+  const graph = new Map<string, string[]>();
+  let self: string | undefined;
+
+  for (const [consumer, producers] of Object.entries(dependencies)) {
+    const consumerName = known.get(consumer.toLowerCase());
+    if (!consumerName) unknown.add(consumer);
+    for (const producer of producers) {
+      const producerName = known.get(producer.toLowerCase());
+      if (!producerName) unknown.add(producer);
+      if (!consumerName || !producerName) continue;
+      if (consumerName.toLowerCase() === producerName.toLowerCase()) self = consumerName;
+      const edges = graph.get(consumerName) ?? [];
+      edges.push(producerName);
+      graph.set(consumerName, edges);
+    }
+  }
+  if (unknown.size > 0) return { type: "unknown", names: [...unknown] };
+  if (self) return { type: "self", name: self };
+
+  const visiting = new Set<string>();
+  const visited = new Set<string>();
+  const path: string[] = [];
+  const visit = (name: string): string[] | null => {
+    if (visiting.has(name)) return [...path.slice(path.indexOf(name)), name];
+    if (visited.has(name)) return null;
+    visiting.add(name);
+    path.push(name);
+    for (const producer of graph.get(name) ?? []) {
+      const cycle = visit(producer);
+      if (cycle) return cycle;
+    }
+    path.pop();
+    visiting.delete(name);
+    visited.add(name);
+    return null;
+  };
+  for (const name of children) {
+    const cycle = visit(name);
+    if (cycle) return { type: "cycle", names: cycle };
+  }
+  return null;
 }
 
 function profileKey(profile: Pick<SubagentProfile, "scope" | "name">): string {
@@ -180,10 +241,25 @@ export function AgentsConfig({
   const [settingsError, setSettingsError] = useState<string | null>(null);
   const [reloadNeeded, setReloadNeeded] = useState(false);
   const [reloading, setReloading] = useState(false);
+  const [childrenQuery, setChildrenQuery] = useState("");
 
   const selected = useMemo(
     () => profiles.find((profile) => profileKey(profile) === selectedKey) ?? null,
     [profiles, selectedKey],
+  );
+  const childProfiles = useMemo(() => profiles.filter((profile) =>
+    profile.enabled
+    && profile.name.toLowerCase() !== draft.name.trim().toLowerCase()
+    && !isSubagentProfileOverridden(profile, profiles)
+  ), [profiles, draft.name]);
+  const validChildNames = useMemo(() => new Set(childProfiles.map((profile) => profile.name.toLowerCase())), [childProfiles]);
+  const unavailableChildren = draft.orchestration?.allowedChildren.filter((name) => !validChildNames.has(name.toLowerCase())) ?? [];
+  const dependencyIssue = draft.orchestration
+    ? findDependencyIssue(draft.orchestration.allowedChildren, draft.orchestration.dependencies ?? {})
+    : null;
+  const visibleChildProfiles = childProfiles.filter((profile) =>
+    profile.name.toLowerCase().includes(childrenQuery.trim().toLowerCase())
+    || profile.displayName.toLowerCase().includes(childrenQuery.trim().toLowerCase())
   );
   const modelSelectorOptions = useMemo(() => modelOptions.map((model) => ({
     provider: model.provider,
@@ -280,6 +356,7 @@ export function AgentsConfig({
     setMode(isWritableScope(profile.scope) ? "edit" : "view");
     if (isWritableScope(profile.scope)) setTargetScope(profile.scope);
     setError(null);
+    setChildrenQuery("");
   };
 
   const beginCreate = () => {
@@ -291,6 +368,7 @@ export function AgentsConfig({
     setMode("create");
     setTargetScope("global");
     setError(null);
+    setChildrenQuery("");
   };
 
   const beginDuplicate = () => {
@@ -305,9 +383,22 @@ export function AgentsConfig({
     setMode("create");
     setTargetScope(isWritableScope(selected.scope) ? selected.scope : "global");
     setError(null);
+    setChildrenQuery("");
   };
 
   const save = async () => {
+    if (unavailableChildren.length > 0) {
+      setError(t("agents.unavailableChildren", { names: unavailableChildren.join(", ") }));
+      return;
+    }
+    if (dependencyIssue) {
+      setError(dependencyIssue.type === "unknown"
+        ? t("agents.unknownDependencies", { names: dependencyIssue.names.join(", ") })
+        : dependencyIssue.type === "self"
+          ? t("agents.selfDependency", { name: dependencyIssue.name })
+          : t("agents.cyclicDependencies", { names: dependencyIssue.names.join(" → ") }));
+      return;
+    }
     setSaving(true);
     setError(null);
     setSavedOk(false);
@@ -373,9 +464,73 @@ export function AgentsConfig({
   const controlStyle = disabled ? { ...inputStyle, ...disabledInputStyle } : inputStyle;
   const switchDisabled = creating
     ? disabled
-    : !selected || !isTogglableScope(selected.scope) || saving || toggling;
+    : !selected || Boolean(selected.configurationError) || !isTogglableScope(selected.scope) || saving || toggling;
   const update = <K extends keyof EditableProfile>(key: K, value: EditableProfile[K]) => {
     setDraft((current) => ({ ...current, [key]: value }));
+  };
+  const toggleAllowedChild = (name: string, checked: boolean) => {
+    setDraft((current) => {
+      if (!current.orchestration) return current;
+      const children = current.orchestration.allowedChildren;
+      const allowedChildren = checked
+        ? [...children, name]
+        : children.filter((child) => child.toLowerCase() !== name.toLowerCase());
+      const allowed = new Set(allowedChildren.map((child) => child.toLowerCase()));
+      const dependencies = Object.fromEntries(
+        Object.entries(current.orchestration.dependencies ?? {})
+          .filter(([consumer]) => allowed.has(consumer.toLowerCase()))
+          .map(([consumer, producers]) => [consumer, producers.filter((producer) => allowed.has(producer.toLowerCase()))])
+          .filter(([, producers]) => producers.length > 0),
+      );
+      return {
+        ...current,
+        orchestration: {
+          ...current.orchestration,
+          allowedChildren,
+          ...(Object.keys(dependencies).length > 0 ? { dependencies } : { dependencies: undefined }),
+        },
+      };
+    });
+  };
+  const toggleDependency = (consumer: string, producer: string, checked: boolean) => {
+    setDraft((current) => {
+      if (!current.orchestration) return current;
+      const dependencies = { ...current.orchestration.dependencies };
+      const previousKey = Object.keys(dependencies).find((key) => key.toLowerCase() === consumer.toLowerCase());
+      const previous = previousKey ? dependencies[previousKey] : [];
+      const next = checked
+        ? [...previous, producer]
+        : previous.filter((name) => name.toLowerCase() !== producer.toLowerCase());
+      if (previousKey) delete dependencies[previousKey];
+      if (next.length > 0) dependencies[consumer] = next;
+      return {
+        ...current,
+        orchestration: {
+          ...current.orchestration,
+          ...(Object.keys(dependencies).length > 0 ? { dependencies } : { dependencies: undefined }),
+        },
+      };
+    });
+  };
+  const repairInvalidDependencies = () => {
+    setDraft((current) => {
+      if (!current.orchestration) return current;
+      const allowed = new Map(current.orchestration.allowedChildren.map((name) => [name.toLowerCase(), name]));
+      const dependencies: Record<string, string[]> = {};
+      for (const [consumer, producers] of Object.entries(current.orchestration.dependencies ?? {})) {
+        const knownConsumer = allowed.get(consumer.toLowerCase());
+        if (!knownConsumer) continue;
+        const validProducers = producers
+          .map((producer) => allowed.get(producer.toLowerCase()))
+          .filter((producer): producer is string => producer !== undefined && producer.toLowerCase() !== knownConsumer.toLowerCase());
+        const unique = [...new Set(validProducers)];
+        if (unique.length > 0) dependencies[knownConsumer] = unique;
+      }
+      return { ...current, orchestration: {
+        ...current.orchestration,
+        ...(Object.keys(dependencies).length > 0 ? { dependencies } : { dependencies: undefined }),
+      } };
+    });
   };
 
   const toggleEnabled = async (enabled: boolean) => {
@@ -383,7 +538,7 @@ export function AgentsConfig({
       update("enabled", enabled);
       return;
     }
-    if (!selected || !isTogglableScope(selected.scope)) return;
+    if (!selected || selected.configurationError || !isTogglableScope(selected.scope)) return;
     setToggling(true);
     setError(null);
     try {
@@ -555,6 +710,14 @@ export function AgentsConfig({
                     </ConfigDetailActions>
                   </ConfigDetailHeader>
 
+                  {selected?.configurationError && !creating && (
+                    <div role="alert" style={{ display: "flex", flexDirection: "column", gap: 4, color: "#ef4444", fontSize: 12 }}>
+                      <strong>{t("agents.configurationErrorTitle")}</strong>
+                      <span>{selected.configurationError}</span>
+                      <span>{t("agents.configurationErrorHelp")}</span>
+                    </div>
+                  )}
+
                   {creating && (
                     <Field label={t("agents.saveScope")}>
                       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 3, padding: 3, border: "1px solid var(--border)", borderRadius: 5, background: "var(--bg-panel)" }}>
@@ -594,20 +757,137 @@ export function AgentsConfig({
                     <textarea className="agents-system-prompt" aria-label={t("agents.prompt")} value={draft.systemPrompt} disabled={disabled} onChange={(event) => update("systemPrompt", event.target.value)} style={{ ...controlStyle, height: 195, minHeight: 195, maxHeight: "60vh", padding: 9, overflow: "auto", resize: disabled ? "none" : "vertical", lineHeight: 1.5 }} />
                   </Field>
 
-                  <Field label={t("agents.tools")}>
-                    <div style={{ display: "flex", flexWrap: "wrap", gap: "8px 16px" }}>
-                      {TOOL_OPTIONS.map((tool) => (
-                        <Toggle key={tool} label={tool} disabled={disabled} checked={draft.tools.includes(tool)} onChange={(checked) => update("tools", checked ? [...draft.tools, tool] : draft.tools.filter((item) => item !== tool))} />
-                      ))}
-                    </div>
-                  </Field>
+                  {!draft.orchestration && (
+                    <Field label={t("agents.tools")}>
+                      <div style={{ display: "flex", flexWrap: "wrap", gap: "8px 16px" }}>
+                        {TOOL_OPTIONS.map((tool) => (
+                          <Toggle key={tool} label={tool} disabled={disabled} checked={draft.tools.includes(tool)} onChange={(checked) => update("tools", checked ? [...draft.tools, tool] : draft.tools.filter((item) => item !== tool))} />
+                        ))}
+                      </div>
+                    </Field>
+                  )}
 
-                  <Field label={t("agents.resources")}>
-                    <div style={{ display: "flex", flexWrap: "wrap", gap: "8px 20px" }}>
-                      <Toggle label={t("agents.loadSkills")} disabled={disabled} checked={draft.loadSkills} onChange={(checked) => update("loadSkills", checked)} />
-                      <Toggle label={t("agents.loadExtensions")} disabled={disabled} checked={draft.loadExtensions} onChange={(checked) => update("loadExtensions", checked)} />
-                    </div>
+                  <Field label={t("agents.orchestration")}>
+                    <Toggle
+                      label={t("agents.orchestrator")}
+                      disabled={disabled}
+                      checked={draft.orchestration !== null && draft.orchestration !== undefined}
+                      onChange={(checked) => setDraft((current) => checked
+                        ? { ...current, orchestration: { allowedChildren: [] }, tools: [], extensionTools: [], loadSkills: false, loadExtensions: false }
+                        : { ...current, orchestration: null })}
+                    />
+                    {draft.orchestration && (
+                      <span style={{ color: "var(--text-dim)", fontSize: 11 }}>
+                        {t("agents.orchestratorDescription")}
+                      </span>
+                    )}
                   </Field>
+                  {draft.orchestration && (
+                    <Field label={t("agents.allowedChildren")}>
+                      <input
+                        aria-label={t("agents.searchChildren")}
+                        placeholder={t("agents.searchChildren")}
+                        value={childrenQuery}
+                        disabled={disabled}
+                        onChange={(event) => setChildrenQuery(event.target.value)}
+                        style={controlStyle}
+                      />
+                      <div role="group" aria-label={t("agents.allowedChildren")} style={{ maxHeight: 180, overflowY: "auto", display: "flex", flexDirection: "column", gap: 8, marginTop: 8 }}>
+                        {visibleChildProfiles.length === 0 && (
+                          <span style={{ color: "var(--text-dim)", fontSize: 12 }}>
+                            {t(childProfiles.length > 0 ? "agents.noMatchingChildren" : "agents.noAvailableChildren")}
+                          </span>
+                        )}
+                        {visibleChildProfiles.map((profile) => (
+                          <Toggle
+                            key={profileKey(profile)}
+                            label={`${profile.displayName} (${profile.name})`}
+                            disabled={disabled}
+                            checked={draft.orchestration?.allowedChildren.some((name) => name.toLowerCase() === profile.name.toLowerCase()) ?? false}
+                            onChange={(checked) => toggleAllowedChild(profile.name, checked)}
+                          />
+                        ))}
+                        {unavailableChildren.map((name) => (
+                          <Toggle
+                            key={`unavailable:${name}`}
+                            label={t("agents.unavailableChild", { name })}
+                            disabled={disabled}
+                            checked
+                            onChange={() => toggleAllowedChild(name, false)}
+                          />
+                        ))}
+                      </div>
+                      {unavailableChildren.length > 0 && (
+                        <span role="alert" style={{ color: "#ef4444", fontSize: 11 }}>
+                          {t("agents.unavailableChildren", { names: unavailableChildren.join(", ") })}
+                        </span>
+                      )}
+                    </Field>
+                  )}
+
+                  {draft.orchestration && (
+                    <Field label={t("agents.dependencies")}>
+                      <span style={{ color: "var(--text-muted)", fontSize: 12 }}>{t("agents.dependenciesDescription")}</span>
+                      <div role="group" aria-label={t("agents.dependencies")} style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 8 }}>
+                        {draft.orchestration.allowedChildren.length < 2 && (
+                          <span style={{ color: "var(--text-dim)", fontSize: 12 }}>{t("agents.dependenciesNeedChildren")}</span>
+                        )}
+                        {draft.orchestration.allowedChildren.map((consumer) => {
+                          const profile = childProfiles.find((child) => child.name.toLowerCase() === consumer.toLowerCase());
+                          const producers = Object.entries(draft.orchestration?.dependencies ?? {})
+                            .find(([name]) => name.toLowerCase() === consumer.toLowerCase())?.[1] ?? [];
+                          const otherChildren = draft.orchestration?.allowedChildren.filter((child) => child.toLowerCase() !== consumer.toLowerCase()) ?? [];
+                          if (otherChildren.length === 0) return null;
+                          return (
+                            <details key={consumer} style={{ border: "1px solid var(--border)", borderRadius: 5, padding: "7px 9px", background: "var(--bg-panel)" }}>
+                              <summary style={{ cursor: "pointer", color: "var(--text)", fontSize: 12 }}>
+                                {profile?.displayName ?? consumer} ({consumer}) · {producers.length > 0
+                                  ? t("agents.dependsOnCount", { count: producers.length })
+                                  : t("agents.noDependencies")}
+                              </summary>
+                              <div role="group" aria-label={t("agents.dependsOnAgent", { name: consumer })} style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 9, paddingLeft: 5 }}>
+                                {otherChildren.map((producer) => {
+                                  const producerProfile = childProfiles.find((child) => child.name.toLowerCase() === producer.toLowerCase());
+                                  return (
+                                    <Toggle
+                                      key={producer}
+                                      label={`${producerProfile?.displayName ?? producer} (${producer})`}
+                                      disabled={disabled}
+                                      checked={producers.some((name) => name.toLowerCase() === producer.toLowerCase())}
+                                      onChange={(checked) => toggleDependency(consumer, producer, checked)}
+                                    />
+                                  );
+                                })}
+                              </div>
+                            </details>
+                          );
+                        })}
+                      </div>
+                      {dependencyIssue && (
+                        <div role="alert" style={{ display: "flex", alignItems: "center", gap: 8, color: "#ef4444", fontSize: 11, marginTop: 8 }}>
+                          <span>{dependencyIssue.type === "unknown"
+                            ? t("agents.unknownDependencies", { names: dependencyIssue.names.join(", ") })
+                            : dependencyIssue.type === "self"
+                              ? t("agents.selfDependency", { name: dependencyIssue.name })
+                              : t("agents.cyclicDependencies", { names: dependencyIssue.names.join(" → ") })}</span>
+                          {dependencyIssue.type !== "cycle" && !disabled && (
+                            <button type="button" onClick={repairInvalidDependencies} style={{ color: "var(--text)", background: "var(--bg)", border: "1px solid var(--border)", borderRadius: 4, padding: "3px 6px", cursor: "pointer" }}>
+                              {t("agents.removeInvalidDependencies")}
+                            </button>
+                          )}
+                        </div>
+                      )}
+                    </Field>
+                  )}
+
+                  {!draft.orchestration && (
+                    <Field label={t("agents.resources")}>
+                      <div style={{ display: "flex", flexWrap: "wrap", gap: "8px 20px" }}>
+                        <Toggle label={t("agents.loadSkills")} disabled={disabled} checked={draft.loadSkills} onChange={(checked) => update("loadSkills", checked)} />
+                        <Toggle label={t("agents.loadExtensions")} disabled={disabled} checked={draft.loadExtensions} onChange={(checked) => update("loadExtensions", checked)} />
+                      </div>
+                    </Field>
+                  )}
 
                   <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr" : "minmax(0, 1.5fr) minmax(120px, 0.75fr) minmax(100px, 0.5fr)", gap: 12 }}>
                     <Field label={t("agents.model")}>
@@ -651,7 +931,7 @@ export function AgentsConfig({
           <ConfigButton
             variant="primary"
             onClick={() => void save()}
-            disabled={saving || savedOk || toggling || !draft.name.trim()}
+            disabled={saving || savedOk || toggling || !draft.name.trim() || unavailableChildren.length > 0 || Boolean(dependencyIssue)}
             className={savedOk ? "is-success" : undefined}
           >
             {savedOk && (

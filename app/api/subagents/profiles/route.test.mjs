@@ -138,6 +138,49 @@ test("profiles route keeps same-name global and project profiles independently e
   assert.equal(response.status, 200);
 });
 
+test("orchestrator allow-list survives profile toggles and rejects unavailable children", async (t) => {
+  const cwd = await mkdtemp(join(tmpdir(), "pi-web-subagent-route-orchestrator-"));
+  allowFileRoot(cwd);
+  t.after(() => rm(cwd, { recursive: true, force: true }));
+
+  let response = await PUT(jsonRequest("PUT", {
+    cwd,
+    scope: "project",
+    profile: profile({ name: "reader", tools: [], loadSkills: false, loadExtensions: false }),
+  }));
+  assert.equal(response.status, 200);
+
+  const coordinator = profile({
+    name: "coordinator",
+    tools: [],
+    loadSkills: false,
+    loadExtensions: false,
+    orchestration: { allowedChildren: ["reader"] },
+  });
+  response = await PUT(jsonRequest("PUT", { cwd, scope: "project", profile: coordinator }));
+  assert.equal(response.status, 200);
+  assert.deepEqual((await response.json()).profile.orchestration, { allowedChildren: ["reader"] });
+
+  response = await PATCH(jsonRequest("PATCH", { cwd, scope: "project", name: "coordinator", enabled: false }));
+  assert.equal(response.status, 200);
+  assert.deepEqual((await response.json()).profile.orchestration, { allowedChildren: ["reader"] });
+  response = await GET(new Request(`http://localhost/api/subagents/profiles?cwd=${encodeURIComponent(cwd)}`));
+  assert.deepEqual((await response.json()).profiles.find((item) => item.name === "coordinator").orchestration, { allowedChildren: ["reader"] });
+
+  response = await PATCH(jsonRequest("PATCH", { cwd, scope: "project", name: "reader", enabled: false }));
+  assert.equal(response.status, 200);
+  response = await PUT(jsonRequest("PUT", { cwd, scope: "project", profile: coordinator }));
+  assert.equal(response.status, 400);
+  assert.match((await response.json()).error, /Allowed child agent is missing or disabled: reader/);
+  response = await GET(new Request(`http://localhost/api/subagents/profiles?cwd=${encodeURIComponent(cwd)}`));
+  assert.equal((await response.json()).profiles.find((item) => item.name === "coordinator").enabled, false);
+
+  response = await PUT(jsonRequest("PUT", { cwd, scope: "project", profile: { ...coordinator, orchestration: null } }));
+  assert.equal(response.status, 200);
+  assert.equal((await response.json()).profile.orchestration, undefined);
+  assert.doesNotMatch(await readFile(join(cwd, ".pi", "agents", "coordinator.md"), "utf8"), /pi_web_orchestration/);
+});
+
 test("profiles route toggles a built-in through settings.json without writing a profile file", async (t) => {
   const cwd = await mkdtemp(join(tmpdir(), "pi-web-subagent-route-"));
   allowFileRoot(cwd);

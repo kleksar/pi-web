@@ -30,6 +30,7 @@ import type {
 import { createHeadlessCustomUiTui, DEFAULT_CUSTOM_UI_COLUMNS, type HeadlessCustomUiTui } from "./custom-ui-terminal";
 import {
   createSubagentExtension,
+  HOST_SUBAGENT_EXTENSION_NAME,
   preferPiWebSubagentExtension,
 } from "./subagent-extension";
 import {
@@ -117,6 +118,7 @@ type AgentSessionWrapperOptions = {
   chatOnly?: boolean;
   onAgentRunComplete?: AgentRunCompleteListener;
   suppressCompletionNotifications?: boolean;
+  abortSubagent?: (sessionId: string) => Promise<void>;
 };
 
 const IDLE_RESET_EVENT_TYPES = new Set([
@@ -211,6 +213,26 @@ function withExtensionTools(session: AgentSessionLike, toolNames: string[]): str
   return [...new Set([...selectedToolNames, ...extensionToolNames])];
 }
 
+/** A resumed orchestrator may only run with Pi Web's exact three control tools. */
+export function assertPiWebOrchestrationHostTools(
+  extensions: readonly { path: string; tools: ReadonlyMap<string, unknown> }[],
+): void {
+  const hostPath = `<inline:${HOST_SUBAGENT_EXTENSION_NAME}>`;
+  const hosts = extensions.filter((extension) => extension.path === hostPath);
+  const host = hosts[0];
+  const controls = new Set<string>(SUBAGENT_CONTROL_TOOL_NAMES);
+  if (
+    hosts.length !== 1
+    || host.tools.size !== controls.size
+    || [...host.tools.keys()].some((name) => !controls.has(name))
+    || extensions.some((extension) =>
+      extension !== host && [...controls].some((name) => extension.tools.has(name))
+    )
+  ) {
+    throw new Error("Subagent orchestration tools could not be loaded exclusively by Pi Web");
+  }
+}
+
 // ============================================================================
 // AgentSessionWrapper
 // Wraps AgentSession with the same interface the rest of the app expects
@@ -235,6 +257,7 @@ export class AgentSessionWrapper {
   private activeMutatingCommands = 0;
   private sessionReplacement: "fork" | "clone" | null = null;
   private agentRunNeedsCompletion = false;
+  private stopGeneration = 0;
   private promptAdmissionTail: Promise<void> = Promise.resolve();
   private extensionsBound = false;
   private extensionBindingPromise: Promise<void> | null = null;
@@ -243,6 +266,7 @@ export class AgentSessionWrapper {
   private readonly chatOnly: boolean;
   private readonly onAgentRunComplete?: AgentRunCompleteListener;
   private readonly suppressCompletionNotifications: boolean;
+  private readonly abortSubagent: (sessionId: string) => Promise<void>;
   private unsubscribe: (() => void) | null = null;
   private idleTimer: ReturnType<typeof setTimeout> | null = null;
   private onDestroyCallback: (() => void) | null = null;
@@ -259,6 +283,7 @@ export class AgentSessionWrapper {
     this.chatOnly = options.chatOnly ?? false;
     this.onAgentRunComplete = options.onAgentRunComplete;
     this.suppressCompletionNotifications = options.suppressCompletionNotifications ?? false;
+    this.abortSubagent = options.abortSubagent ?? ((sessionId) => SUBAGENT_CONTROLLER.abort(sessionId));
   }
 
   get sessionId(): string {
@@ -430,7 +455,16 @@ export class AgentSessionWrapper {
     }
   }
 
+  private subagentSessionResources() {
+    // Test doubles may omit getEntries; real Pi sessions always expose it.
+    const entries = this.inner.sessionManager.getEntries?.();
+    return entries ? readSubagentSessionResources(entries as unknown as SessionEntry[]) : null;
+  }
+
   setActiveToolSelection(toolNames: string[]): void {
+    if (this.subagentSessionResources()) {
+      throw new Error("Subagent tool selection is fixed by its profile");
+    }
     this.inner.setActiveToolsByName(withExtensionTools(this.inner, toolNames));
   }
 
@@ -543,6 +577,15 @@ export class AgentSessionWrapper {
 
   async send(command: Record<string, unknown>): Promise<unknown> {
     const type = command.type as string;
+    // A subagent invocation belongs to its parent Agent tool call. A direct UI/API
+    // prompt would bypass the host's invocation epoch, dependency gate and Stop tree.
+    if ([
+      "prompt", "steer", "follow_up", "bash", "set_model", "set_thinking_level",
+      "navigate_tree", "fork", "fork_branch", "clone", "compact", "clear_queue",
+      "set_auto_compaction", "set_auto_retry",
+    ].includes(type) && this.subagentSessionResources()) {
+      throw new Error("Subagent sessions can only be continued through the parent Agent tool");
+    }
     const allowedDuringReplacement = COMMANDS_ALLOWED_DURING_SESSION_REPLACEMENT.has(type);
     if (this.sessionReplacement && !allowedDuringReplacement) {
       throw new Error("Session is being copied to a new session");
@@ -582,6 +625,7 @@ export class AgentSessionWrapper {
           }
           const promptImages = command.images as Array<{ type: "image"; data: string; mimeType: string }> | undefined;
           const streamingBehavior = command.streamingBehavior as "steer" | "followUp" | undefined;
+          const stopGeneration = this.stopGeneration;
           let preflightAccepted = false;
           let preflightSettled = false;
           let promptSettled = false;
@@ -619,7 +663,15 @@ export class AgentSessionWrapper {
               // Match pi's RPC contract: acknowledge only after synchronous prompt
               // validation and extension preflight have accepted the submission.
               preflightResult: (success) => {
-                if (success) acceptPreflight();
+                if (success) {
+                  // Only an accepted new turn reopens a branch blocked by Stop.
+                  // The completion fallback below also calls acceptPreflight,
+                  // including after an aborted turn, so it must not unblock it.
+                  if (stopGeneration === this.stopGeneration) {
+                    SUBAGENT_CONTROLLER.allowDescendantStarts(this.sessionId);
+                  }
+                  acceptPreflight();
+                }
               },
             });
           } catch (error) {
@@ -661,11 +713,32 @@ export class AgentSessionWrapper {
       }
 
       case "abort":
+        this.stopGeneration += 1;
         this.forceShutdownOnIdle = true;
         // Stop must unwind extension commands that have not started the agent yet.
         this.extensionUiAbortController.abort(new DOMException("Extension UI cancelled by Stop", "AbortError"));
+        if (this.subagentSessionResources()) {
+          // The controller marks the invocation as aborted before stopping the
+          // session. Calling inner.abort() here could persist partial output as
+          // a successful dependency artifact when an SDK prompt resolves.
+          try {
+            await this.withFinalIdleReset(() => this.abortSubagent(this.sessionId));
+            return null;
+          } finally {
+            if (!this.isRunning()) this.forceShutdownOnIdle = false;
+          }
+        }
+        // Block new children synchronously, then stop the parent and all running
+        // descendants. Background children do not inherit the parent's signal.
+        const descendantsAbort = SUBAGENT_CONTROLLER.abortDescendants(this.sessionId);
         try {
-          await this.withFinalIdleReset(() => this.inner.abort());
+          await this.withFinalIdleReset(async () => {
+            try {
+              await this.inner.abort();
+            } finally {
+              await descendantsAbort;
+            }
+          });
           return null;
         } finally {
           if (!this.isRunning()) this.forceShutdownOnIdle = false;
@@ -934,6 +1007,7 @@ export class AgentSessionWrapper {
       }
 
       case "reload": {
+        const subagentResources = this.subagentSessionResources();
         if (this.extensionUiAbortController.signal.aborted) {
           this.extensionUiAbortController = new AbortController();
         }
@@ -943,7 +1017,8 @@ export class AgentSessionWrapper {
         this.resetExtensionWidgetsForReload();
         this.syncProjectTrust();
         await this.inner.reload();
-        this.setActiveToolSelection(activeToolNames);
+        if (subagentResources) this.inner.setActiveToolsByName(subagentResources.tools);
+        else this.setActiveToolSelection(activeToolNames);
         if (typeof this.inner.bindExtensions !== "function") {
           this.inner.extensionRunner.setUIContext?.(this.createExtensionUiContext(), "rpc");
         }
@@ -1011,6 +1086,7 @@ export class AgentSessionWrapper {
 
   destroy(): void {
     if (!this._alive) return;
+    const sessionId = this.sessionId;
     this._alive = false;
     // Tell attached SSE listeners to drop this instance so the browser
     // EventSource errors and reconnects instead of staying OPEN on a dead wrapper.
@@ -1029,7 +1105,13 @@ export class AgentSessionWrapper {
       try {
         this.inner.dispose();
       } finally {
-        this.onDestroyCallback?.();
+        try {
+          this.onDestroyCallback?.();
+        } finally {
+          // Notification suppression is keyed by invocation in the controller;
+          // the per-session Stop marker is no longer needed after disposal.
+          SUBAGENT_CONTROLLER.forgetSession(sessionId);
+        }
       }
     };
 
@@ -1629,6 +1711,7 @@ export class AgentSessionWrapper {
       },
       switchSession: async () => ({ cancelled: true }),
       reload: async () => {
+        const subagentResources = this.subagentSessionResources();
         this.extensionStatuses.clear();
         this.resetExtensionWidgetsForReload();
         this.syncProjectTrust();
@@ -1637,6 +1720,7 @@ export class AgentSessionWrapper {
             this.inner.extensionRunner.setUIContext?.(this.createExtensionUiContext(), "rpc");
           },
         });
+        if (subagentResources) this.inner.setActiveToolsByName(subagentResources.tools);
       },
     };
   }
@@ -2029,6 +2113,17 @@ export async function startRpcSession(
     const exactSystemPromptRef: { current?: () => string } = {};
     const exactSystemPromptExtension = createExactSystemPromptExtension(() => exactSystemPromptRef.current?.());
     const usesExactSystemPrompt = chatOnly || subagentResources?.exactSystemPrompt !== undefined;
+    const childOrchestratorExtension = subagentResources?.orchestration
+      ? createSubagentExtension(
+          SUBAGENT_CONTROLLER.extensionRuntime,
+          () => listSubagentProfiles(sessionCwd),
+          isBuiltInSubagentsEnabled,
+          {
+            allowedChildren: subagentResources.orchestration.allowedChildren,
+            dependencies: subagentResources.orchestration.dependencies,
+          },
+        )
+      : undefined;
     const services = await createAgentSessionServices({
       cwd: sessionCwd,
       agentDir,
@@ -2047,7 +2142,15 @@ export async function startRpcSession(
                 }
               : {}),
             appendSystemPrompt: subagentResources.appendSystemPrompt,
-            ...(usesExactSystemPrompt ? { extensionFactories: [exactSystemPromptExtension] } : {}),
+            ...(usesExactSystemPrompt || childOrchestratorExtension
+              ? { extensionFactories: [
+                  ...(usesExactSystemPrompt ? [exactSystemPromptExtension] : []),
+                  ...(childOrchestratorExtension ? [childOrchestratorExtension] : []),
+                ] }
+              : {}),
+            ...(childOrchestratorExtension
+              ? { extensionsOverride: preferPiWebSubagentExtension }
+              : {}),
           }
         : chatOnly
           ? { ...CHAT_ONLY_RESOURCE_LOADER_OPTIONS, extensionFactories: [exactSystemPromptExtension] }
@@ -2067,6 +2170,9 @@ export async function startRpcSession(
           },
       ...(trustReloadOptions ? { resourceLoaderReloadOptions: trustReloadOptions } : {}),
     });
+    if (childOrchestratorExtension) {
+      assertPiWebOrchestrationHostTools(services.resourceLoader.getExtensions().extensions);
+    }
     const scope = await resolveVisibleModels(
       services.modelRuntime,
       services.settingsManager.getEnabledModels(),
@@ -2105,7 +2211,9 @@ export async function startRpcSession(
       ...(initial?.thinkingLevel ? { thinkingLevel: initial.thinkingLevel } : {}),
       ...(scope.scopedModels.length > 0 ? { scopedModels: [...scope.scopedModels] } : {}),
       ...(toolsOption !== undefined ? { tools: toolsOption } : {}),
-      ...(subagentResources ? { excludeTools: [...SUBAGENT_CONTROL_TOOL_NAMES] } : {}),
+      ...(subagentResources && !subagentResources.orchestration
+        ? { excludeTools: [...SUBAGENT_CONTROL_TOOL_NAMES] }
+        : {}),
     });
 
     const persistedPreferences = await persistExplicitStartupPreferences(

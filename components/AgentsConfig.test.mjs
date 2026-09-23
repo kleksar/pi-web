@@ -70,10 +70,14 @@ test("shows a Skills-style path row with the same switch in editable and readonl
 
 test("keeps the enabled switch live for built-ins whose fields stay read-only", () => {
   assert.match(source, /function isTogglableScope\(scope: SubagentScope\): boolean \{\s*return isWritableScope\(scope\) \|\| scope === "builtin";/);
-  assert.match(source, /const switchDisabled = creating\s*\? disabled\s*: !selected \|\| !isTogglableScope\(selected\.scope\) \|\| saving \|\| toggling;/);
-  assert.match(source, /if \(!selected \|\| !isTogglableScope\(selected\.scope\)\) return;/);
+  assert.match(source, /const switchDisabled = creating\s*\? disabled\s*: !selected \|\| Boolean\(selected\.configurationError\) \|\| !isTogglableScope\(selected\.scope\) \|\| saving \|\| toggling;/);
+  assert.match(source, /if \(!selected \|\| selected\.configurationError \|\| !isTogglableScope\(selected\.scope\)\) return;/);
   // Everything else on a built-in stays read-only: only the switch has somewhere to write.
   assert.match(source, /setMode\(isWritableScope\(profile\.scope\) \? "edit" : "view"\)/);
+});
+
+test("shows invalid profile policy with repair instructions", () => {
+  assert.match(source, /selected\?\.configurationError && !creating && \([\s\S]*?<div role="alert"[\s\S]*?selected\.configurationError[\s\S]*?agents\.configurationErrorHelp/);
 });
 
 test("persists existing profile toggles immediately without submitting unsaved fields", () => {

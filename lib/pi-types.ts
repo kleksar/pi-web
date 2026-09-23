@@ -158,6 +158,7 @@ export interface AgentSessionLike {
     streamingBehavior?: "steer" | "followUp";
     source?: "interactive" | "rpc";
     preflightResult?: (success: boolean) => void;
+    expandPromptTemplates?: boolean;
   }): Promise<void>;
   sendCustomMessage<T = unknown>(message: {
     customType: string;
