@@ -312,7 +312,7 @@ function GeneralSettings({ sessionId, onSessionReloaded, quoteSelectionEnabled, 
         )}
       </section>
 
-      <section className="settings-general-section">
+      {supportedLocales.length > 1 && <section className="settings-general-section">
         <h3 className="settings-general-heading">{t("common.language")}</h3>
         <div role="radiogroup" aria-label={t("common.language")} className="settings-language-options">
           {supportedLocales.map((plugin) => {
@@ -335,7 +335,7 @@ function GeneralSettings({ sessionId, onSessionReloaded, quoteSelectionEnabled, 
             );
           })}
         </div>
-      </section>
+      </section>}
 
       {webAuthEnabled && (
         <section className="settings-general-section">

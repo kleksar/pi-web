@@ -1,12 +1,11 @@
 import type { LocalePlugin } from "../types";
 
-/** Pi Web 内置英语语言包。 */
+/** English UI messages. */
 export const enLocale: LocalePlugin = {
   id: "en",
   label: "English",
   messages: {
     "common.ok": "OK",
-    "common.language": "Language",
     "common.models": "Models",
     "common.skills": "Skills",
     "common.agents": "Sub-agents",
@@ -14,7 +13,7 @@ export const enLocale: LocalePlugin = {
     "common.settings": "Settings",
     "settings.title": "Settings",
     "settings.general": "General",
-    "settings.generalDescription": "Choose how Pi Web looks and which language it uses.",
+    "settings.generalDescription": "Choose how Pi Web looks and behaves.",
     "settings.appearance": "Appearance",
     "settings.appearanceDescription": "Select a theme or follow your system preference.",
     "settings.chatContentWidth": "Chat content width",
@@ -33,7 +32,6 @@ export const enLocale: LocalePlugin = {
     "settings.thinkingExpandedDefault": "Expand thinking blocks by default",
     "settings.chat": "Chat",
     "settings.quoteSelection": "Show actions for selected text",
-    "settings.languageDescription": "Choose the language used throughout the interface.",
     "settings.shellTool": "Shell tool",
     "settings.shellToolDescription": "Choose which shell the model uses for commands. Direct ! and !! commands still use Bash.",
     "settings.pushPermission": "Background push (iOS home-screen app)",

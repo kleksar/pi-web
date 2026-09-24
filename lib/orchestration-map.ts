@@ -38,6 +38,8 @@ export interface OrchestrationGraph {
   edges: MapEdge[];
   /** Matching agents before paths and adjacent nodes are added for context. */
   matchCount: number;
+  /** Profiles outside Main's delegation tree in a connected overview. */
+  unreachableAgentIds: string[];
 }
 
 /** Display-only filter: keep graph layout and owner policy unchanged. */
@@ -202,13 +204,15 @@ function buildEdges(
 }
 
 /** A flat overview or one owner's direct children. No source file is modified. */
-export function buildOrchestrationGraph({ profiles: sources, main, ownerId, draft, layer, query = "" }: {
+export function buildOrchestrationGraph({ profiles: sources, main, ownerId, draft, layer, query = "", connectedOnly = false }: {
   profiles: readonly MapProfile[];
   main: SubagentOrchestration | null;
   ownerId: OrchestrationMapOwner | null;
   draft?: SubagentOrchestration | null;
   layer: OrchestrationMapLayer;
   query?: string;
+  /** Hide profiles outside Main's delegation tree in an unsearched overview. */
+  connectedOnly?: boolean;
 }): OrchestrationGraph {
   const profiles = effectiveMapProfiles(sources);
   const selectedPolicy = ownerId === null ? null : orchestrationForOwner(ownerId, profiles, main, ownerId, draft);
@@ -219,10 +223,31 @@ export function buildOrchestrationGraph({ profiles: sources, main, ownerId, draf
     layer,
     profiles,
   ));
-  const wanted = new Set<string>(ownerId === null
-    ? [MAIN_NODE_ID, ...profiles.map((profile) => profile.name)]
-    : [ownerId, ...(selectedPolicy?.allowedChildren ?? [])]);
   const byName = new Map(profiles.map((profile) => [key(profile.name), profile]));
+  const needle = query.trim().toLowerCase();
+  const connectedOverview = ownerId === null && connectedOnly;
+  const reachable = new Set<string>([MAIN_NODE_ID]);
+  if (connectedOverview) {
+    const queue = [MAIN_NODE_ID];
+    for (let index = 0; index < queue.length; index++) {
+      const current = queue[index];
+      const policy = current === MAIN_NODE_ID ? mainPolicyForMap(profiles, main)
+        : byName.get(key(current))?.orchestration;
+      for (const target of policy?.allowedChildren ?? []) {
+        if (reachable.has(key(target))) continue;
+        reachable.add(key(target));
+        queue.push(target);
+      }
+    }
+  }
+  const unreachableAgentIds = connectedOverview
+    ? profiles.filter((profile) => !reachable.has(key(profile.name))).map((profile) => profile.name)
+    : [];
+  const restrictToReachable = connectedOverview && !needle;
+  const wanted = new Set<string>(ownerId === null
+    ? [MAIN_NODE_ID, ...profiles.filter((profile) => !restrictToReachable || reachable.has(key(profile.name)))
+      .map((profile) => profile.name)]
+    : [ownerId, ...(selectedPolicy?.allowedChildren ?? [])]);
   const nodes: MapNode[] = [...wanted].map((id) => {
     if (id === MAIN_NODE_ID) return { id, label: "Main", kind: "main", enabled: true, x: 0, y: 0 };
     const profile = byName.get(key(id));
@@ -236,7 +261,6 @@ export function buildOrchestrationGraph({ profiles: sources, main, ownerId, draf
       y: 0,
     } : { id, label: id, kind: "missing", enabled: false, x: 0, y: 0 };
   });
-  const needle = query.trim().toLowerCase();
   const matches = needle ? nodes.filter((node) =>
     node.id.toLowerCase().includes(needle) || node.label.toLowerCase().includes(needle)
   ) : nodes;
@@ -282,8 +306,10 @@ export function buildOrchestrationGraph({ profiles: sources, main, ownerId, draf
     }
   }
   const visible = nodes.filter((node) => visibleIds.has(node.id));
-  const shownEdges = edges.filter((edge) => visibleIds.has(edge.source) && visibleIds.has(edge.target));
-  return { nodes: autoLayoutGraph(visible, shownEdges, ownerId), edges: shownEdges, matchCount: matches.length };
+  const shownEdges = edges.filter((edge) => visibleIds.has(edge.source) && visibleIds.has(edge.target)
+    && (!restrictToReachable || visibleIds.has(edge.ownerId)));
+  return { nodes: autoLayoutGraph(visible, shownEdges, ownerId), edges: shownEdges,
+    matchCount: matches.length, unreachableAgentIds };
 }
 
 /** Cycle tolerant: an overview may contain reciprocal delegations even though runtime has a depth limit. */
@@ -327,6 +353,44 @@ export function autoLayoutGraph(nodes: readonly MapNode[], edges: readonly MapEd
     }
   }
   for (const node of nodes) if (!depth.has(node.id)) depth.set(node.id, 1);
+  if (ownerId === null) {
+    // Keep children near their parents instead of interleaving unrelated
+    // branches by profile label. Shared children take the average position of
+    // their parents in the previous column; stable input order breaks ties.
+    const incoming = new Map<string, string[]>();
+    for (const edge of layoutEdges) {
+      if ((depth.get(edge.source) ?? -1) !== (depth.get(edge.target) ?? 0) - 1) continue;
+      const parents = incoming.get(edge.target) ?? [];
+      parents.push(edge.source);
+      incoming.set(edge.target, parents);
+    }
+    const columns = new Map<number, MapNode[]>();
+    for (const node of nodes) {
+      const column = depth.get(node.id) ?? 1;
+      const members = columns.get(column) ?? [];
+      members.push(node);
+      columns.set(column, members);
+    }
+    const ranks = new Map<string, number>();
+    const positions = new Map<string, number>();
+    for (const column of [...columns.keys()].sort((left, right) => left - right)) {
+      const members = columns.get(column)!;
+      const position = (node: MapNode) => {
+        const parents = (incoming.get(node.id) ?? []).filter((id) => ranks.has(id));
+        return parents.length ? parents.reduce((sum, id) => sum + ranks.get(id)!, 0) / parents.length : Infinity;
+      };
+      const ordered = members.map((node, index) => ({ node, index, parentPosition: position(node) }))
+        .sort((left, right) => left.parentPosition - right.parentPosition || left.index - right.index);
+      ordered.forEach(({ node }, row) => {
+        ranks.set(node.id, row);
+        positions.set(node.id, row);
+      });
+    }
+    return nodes.map((node) => {
+      const column = depth.get(node.id) ?? 1;
+      return { ...node, x: 44 + column * 290, y: 40 + (positions.get(node.id) ?? 0) * 136 };
+    });
+  }
   const rows = new Map<number, number>();
   return nodes.map((node) => {
     const column = depth.get(node.id) ?? 1;

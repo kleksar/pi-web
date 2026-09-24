@@ -3,7 +3,6 @@
  * with realistic ids, timestamps, token usage and cost.
  */
 import type { AgentUsage, SessionEntry, SessionMessage } from "@/lib/types";
-import { pick, type DemoLocale } from "../locale";
 import { originalText, readProjectText } from "../files";
 import { editToolDetails } from "../diff";
 import { PROJECT_FILE_EDITS, PROJECT_FILE_OVERRIDES } from "../data/project-files";
@@ -50,11 +49,9 @@ function hashPrefix(id: string): string {
 
 export async function buildSession(
   script: SessionScript,
-  locale: DemoLocale,
   now: number,
   projectRootFor: (cwd: string) => string,
 ): Promise<BuiltSession> {
-  const t = (text: Text) => pick(text, locale);
   const prefix = hashPrefix(script.id);
   let counter = 0;
   const nextId = () => `${prefix}${(++counter).toString(16).padStart(4, "0")}`;
@@ -107,13 +104,13 @@ export async function buildSession(
     if (typeof result === "object" && "writePath" in result) {
       return { args: { path: result.writePath, content: PROJECT_FILE_OVERRIDES[result.writePath] ?? "" }, text: `Successfully wrote to ${result.writePath}` };
     }
-    return { args: tool.args, text: t(result as Text) };
+    return { args: tool.args, text: result as Text };
   };
 
   const assistantRound = async (round: Round) => {
     const blocks: Record<string, unknown>[] = [];
-    if (round.thinking) blocks.push({ type: "thinking", thinking: t(round.thinking) });
-    if (round.text) blocks.push({ type: "text", text: t(round.text) });
+    if (round.thinking) blocks.push({ type: "thinking", thinking: round.thinking });
+    if (round.text) blocks.push({ type: "text", text: round.text });
     const calls: { tool: ToolUse; id: string; resolved: Awaited<ReturnType<typeof resolveTool>> }[] = [];
     for (const tool of round.tools ?? []) {
       calls.push({ tool, id: `call_${prefix}${(++toolCallCounter).toString().padStart(3, "0")}`, resolved: await resolveTool(tool) });
@@ -171,7 +168,7 @@ export async function buildSession(
         break;
       case "user": {
         clock += (step.gapMinutes ?? 0.6) * 60_000;
-        const text = t(step.text);
+        const text = step.text;
         contextTokens += estimateTokens(text);
         message({ role: "user", content: [{ type: "text", text }], timestamp: clock });
         break;
@@ -199,13 +196,13 @@ export async function buildSession(
       case "compaction": {
         clock += 20_000;
         const firstKept = parentId ?? "";
-        push({ type: "compaction", summary: t(step.summary), firstKeptEntryId: firstKept, tokensBefore: step.tokensBefore } as never);
-        contextTokens = 9_400 + estimateTokens(t(step.summary));
+        push({ type: "compaction", summary: step.summary, firstKeptEntryId: firstKept, tokensBefore: step.tokensBefore } as never);
+        contextTokens = 9_400 + estimateTokens(step.summary);
         break;
       }
       case "custom":
         clock += 1000;
-        push({ type: "custom_message", customType: step.customType, content: t(step.content), display: true, ...(step.details !== undefined ? { details: step.details } : {}) } as never);
+        push({ type: "custom_message", customType: step.customType, content: step.content, display: true, ...(step.details !== undefined ? { details: step.details } : {}) } as never);
         break;
       case "mark":
         if (parentId) marks.set(step.name, parentId);

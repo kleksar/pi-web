@@ -80,33 +80,11 @@ git log --format='%h%x09%s%n%b' v<previous>..v<version>
 git diff --stat v<previous>..v<version>
 ```
 
-Write the release notes from those commits, not from memory. Include both Chinese and English sections. Keep commit hashes next to each item when useful.
+Write the release notes in English from those commits, not from memory. Keep commit hashes next to each item when useful.
 
 Suggested structure:
 
 ```markdown
-## 中文
-
-基于 `v<previous>..v<version>` 的提交整理。
-
-### 新增
-
-- ...
-
-### 修复
-
-- ...
-
-### 改进
-
-- ...
-
-### 内部调整
-
-- 发布 npm 包 `@agegr/pi-web@<version>`。
-
-## English
-
 Prepared from commits in `v<previous>..v<version>`.
 
 ### Added
@@ -150,11 +128,11 @@ You can avoid a temporary file by passing notes through stdin:
 
 ```bash
 gh release edit v<version> --repo agegr/pi-web --notes-file - <<'EOF'
-## 中文
+## Added
 
 ...
 
-## English
+## Fixed
 
 ...
 EOF

@@ -10,7 +10,6 @@ const sidebarSource = await readFile(new URL("./SessionSidebar.tsx", import.meta
 const themeSource = await readFile(new URL("../hooks/useTheme.ts", import.meta.url), "utf8");
 const themeOptionsSource = await readFile(new URL("../lib/theme.ts", import.meta.url), "utf8");
 const enSource = await readFile(new URL("../lib/i18n/messages/en.ts", import.meta.url), "utf8");
-const zhSource = await readFile(new URL("../lib/i18n/messages/zh-CN.ts", import.meta.url), "utf8");
 const loginSource = await readFile(new URL("../app/login/page.tsx", import.meta.url), "utf8");
 
 test("opens one settings panel from direct sidebar shortcuts", () => {
@@ -98,8 +97,9 @@ test("offers five palettes and system theme selection with native radios", () =>
   assert.match(themeSource, /const setThemePreference = useCallback/);
 });
 
-test("keeps language selection in General settings", () => {
+test("shows language selection only when multiple locales are registered", () => {
   assert.match(panelSource, /t\("common\.language"\)/);
+  assert.match(panelSource, /supportedLocales\.length > 1/);
   assert.match(panelSource, /className="settings-language-options"/);
   assert.match(panelSource, /setLocale\(plugin\.id/);
 });
@@ -156,8 +156,6 @@ test("uses top navigation on desktop and one compact section picker on mobile", 
 test("labels agent profiles as sub-agents", () => {
   assert.match(enSource, /"common\.agents": "Sub-agents"/);
   assert.match(enSource, /"agents\.new": "New sub-agent"/);
-  assert.match(zhSource, /"common\.agents": "子代理"/);
-  assert.match(zhSource, /"agents\.new": "新建子代理"/);
 });
 
 test("uses the child-session robot glyph for the sub-agents tab", () => {

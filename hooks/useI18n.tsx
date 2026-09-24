@@ -1,7 +1,7 @@
 "use client";
 
 import { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
-import { getLocalePlugin, getSupportedLocales, resolveBrowserLocale } from "@/lib/i18n/registry";
+import { getLocalePlugin, getSupportedLocales } from "@/lib/i18n/registry";
 import { translateMessage } from "@/lib/i18n/format";
 import type { Locale, LocalePlugin, TranslationParams } from "@/lib/i18n/types";
 
@@ -27,18 +27,16 @@ function getMessages(): Record<string, Record<string, string>> {
 function readInitialLocale(): Locale {
   try {
     const stored = window.localStorage.getItem(LOCALE_STORAGE_KEY);
-    if (stored === "en" || stored === "zh-CN" || stored === "zh-TW") return stored;
+    if (stored === "en") return stored;
+    // Normalize a previously saved locale that is no longer bundled.
+    if (stored !== null) window.localStorage.setItem(LOCALE_STORAGE_KEY, "en");
   } catch {
-    // 隐私模式或存储不可用时继续使用浏览器语言。
+    // Storage can be unavailable in private browsing.
   }
-  return resolveBrowserLocale(window.navigator.languages.length ? window.navigator.languages : [window.navigator.language]);
+  return "en";
 }
 
-/**
- * 提供 Pi Web 的界面语言状态和翻译能力。
- * @param props React 子节点
- * @returns 包含语言上下文的 React 节点
- */
+/** Provide the English UI messages and a stable locale for formatting. */
 export function I18nProvider({ children }: { children: React.ReactNode }) {
   const [locale, setLocaleState] = useState<Locale>(defaultLocale);
   const [hydrated, setHydrated] = useState(false);
@@ -62,7 +60,7 @@ export function I18nProvider({ children }: { children: React.ReactNode }) {
     try {
       window.localStorage.setItem(LOCALE_STORAGE_KEY, next);
     } catch {
-      // 存储失败不影响当前页面内的语言切换。
+      // Storage failure does not prevent the current page from rendering.
     }
   }, []);
 
@@ -72,11 +70,7 @@ export function I18nProvider({ children }: { children: React.ReactNode }) {
   return <I18nContext.Provider value={value}>{children}</I18nContext.Provider>;
 }
 
-/**
- * 获取当前组件树中的国际化能力。
- * @returns 当前 locale、翻译函数、语言切换函数和支持的语言列表
- * @throws 当组件不在 I18nProvider 内时抛出异常
- */
+/** Read the messages and locale from the current provider. */
 export function useI18n(): I18nContextValue {
   const context = useContext(I18nContext);
   if (!context) throw new Error("useI18n must be used inside I18nProvider");

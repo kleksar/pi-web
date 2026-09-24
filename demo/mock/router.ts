@@ -17,7 +17,6 @@ import {
   deleteSession,
   ensureSessions,
   getSession,
-  markTouched,
   sessionDetail,
   sessionInfo,
   sessionListVersion,
@@ -60,7 +59,6 @@ async function sessionsRoute(request: MockRequest): Promise<Response> {
       const body = await request.json<{ name?: string }>();
       if (typeof body.name !== "string") return error("name is required", 400);
       session.name = body.name.trim() || undefined;
-      markTouched();
       bumpSessionListVersion();
       return json({ ok: true });
     }
@@ -89,7 +87,6 @@ async function sessionsRoute(request: MockRequest): Promise<Response> {
     await delay(900);
     const title = autoTitle(session);
     session.name = title;
-    markTouched();
     bumpSessionListVersion();
     return json({ title, usage: null });
   }
