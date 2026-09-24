@@ -10,7 +10,8 @@ load_extensions: false
 inherit_context: false
 run_in_background: false
 pi_web_fast_mode: false
-thinking: medium
+model: openai-codex/gpt-6-luna
+thinking: high
 pi_web_orchestration:
   kind: orchestrator
   allowed_children:

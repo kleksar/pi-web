@@ -81,8 +81,9 @@ less reliable route cannot win by finishing early. Change one setting at a
 time and repeat the same scenario set; do not infer a model's quality from one
 successful example.
 
-Start with a small set of real tasks before fixing model/effort defaults. Test
-the supported combinations of model, thinking and Fast mode on the same cases;
+The pinned GPT-6 models and effort levels in the roster are unmeasured starting
+defaults. Start with a small set of real tasks to validate or revise them. Test
+supported combinations of model, thinking and Fast mode on the same cases;
 the price and quality of a model can change independently of this repo. Keep
 the number of *invoked* agents proportional to missing evidence and risk,
 regardless of how many profiles are available in the catalog. The existing

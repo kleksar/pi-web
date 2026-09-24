@@ -54,6 +54,45 @@ Even a small code change can have a large blast radius. The reusable skills
 `assess-architecture`, `implement-change-order`, `plan-verification`,
 `verify-change`) contain role instructions; a skill does not grant a tool.
 
+## Model and effort defaults
+
+All 16 repository profiles pin an `openai-codex` model and a reasoning level.
+The Main coordinator uses the model selected for its own session; this table
+configures its **children**. These are initial allocations by role, not a
+measured quality or latency ranking for this roster. Nested orchestrators
+cannot change a child's pinned model or effort through `Agent`.
+
+| Profile | Model | Effort | Reason for the default |
+| --- | --- | --- | --- |
+| `small-task-coordinator` | Luna | low | Route a bounded, reversible task. |
+| `task-coordinator` | Luna | medium | Manage missing evidence and handoffs. |
+| `complex-task-coordinator` | Luna | high | Track multi-stage dependencies and decisions. |
+| `evidence-coordinator` | Luna | high | Reconcile cited code and documentation findings. |
+| `implementation-coordinator` | Luna | medium | Assign bounded, nonoverlapping edits. |
+| `verification-coordinator` | Luna | medium | Coordinate independent checks and report gaps. |
+| `project-policy-reader` | Luna | medium | Extract applicable constraints and approval rules. |
+| `project-requirements-reader` | Luna | medium | Preserve exact acceptance criteria and source limits. |
+| `project-docs-reader` | Luna | low | Retrieve named documentation without broad analysis. |
+| `project-code-reader` | Luna | medium | Find specific symbols and cite observed behavior. |
+| `technical-analyst` | Astra | medium | Analyze options and consequences from supplied evidence. |
+| `architecture-reviewer` | Astra | high | Review consequential architecture and contract decisions. |
+| `bounded-writer` | Sol | medium | Implement a change order with codebase-specific judgment. |
+| `documentation-writer` | Luna | medium | Update assigned docs against implemented behavior. |
+| `test-planner` | Sol | medium | Choose checks that expose failures and regressions. |
+| `change-verifier` | Sol | medium | Independently inspect a diff and targeted checks. |
+
+Here Luna, Sol, and Astra mean `gpt-6-luna`, `gpt-6-sol`, and `gpt-6-astra`.
+The installed Pi SDK 0.87.1 recognizes each under `openai-codex/` and maps
+these levels to supported efforts. Ensure all three models are enabled and
+the Codex provider is authenticated before starting a child; an unavailable
+pinned model fails explicitly. Compare results on identical task scenarios
+before raising effort or enabling Fast mode. API token prices are not a proxy
+for a ChatGPT subscription allowance.
+
+The family positioning follows [OpenAI's model guidance](https://developers.openai.com/api/docs/models)
+and [GPT-6 Sol/Luna announcement](https://openai.com/index/introducing-gpt-6-sol-and-luna/);
+the per-role choices above are our own hypotheses to verify.
+
 ```mermaid
 flowchart TD
   Main --> Small["Small coordinator"]
@@ -82,10 +121,10 @@ passes a compact change order to the writer. A remotely hosted issue, pull
 request, or Figma design is not accessible to these file-only readers unless
 an artifact or verified excerpt is supplied. Architecture review flags choices
 for the user; prompts alone are **not** a technical approval gate. The runtime
-tool list limits model-visible tools, not operating-system permissions. No
-model or Fast setting is hard-coded: test an authenticated model/effort/fast
-combination for each role against [evaluation scenarios](../docs/orchestration-evaluation.md)
-before committing defaults.
+tool list limits model-visible tools, not operating-system permissions. Model
+and effort assignments above need validation against
+[evaluation scenarios](../docs/orchestration-evaluation.md) on the operator's
+projects; a profile default does not establish measured performance.
 Use the [local release smoke guide](../docs/orchestration-release-smoke.md)
 to check new-session behavior, persistence, and cost on the target machine.
 

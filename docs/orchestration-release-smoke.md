@@ -26,6 +26,10 @@ credentials are separate local data.
    value instead of appearing saved.
 4. Create a new session in a chosen project. Check the provider is authenticated
    separately; deleting `~/.pi` can remove local session/model configuration.
+   In Models, enable `openai-codex/gpt-6-luna`, `openai-codex/gpt-6-sol`, and
+   `openai-codex/gpt-6-astra`; check that the 16 repository profiles display
+   their assigned model and effort. A profile with an unavailable model will
+   fail to launch rather than silently select the Main model.
    In Main → Resources, confirm built-in tools and extension tools both show
    no assignments in the repository scope. A session created before this
    policy change keeps its original tools and must not be reused for the check.
