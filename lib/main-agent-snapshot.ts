@@ -14,6 +14,7 @@ export interface MainSessionResources {
   version: 1;
   selectedSkills?: PinnedSkill[];
   selectedExtensionTools?: PinnedExtensionTool[];
+  allowedBuiltInTools?: string[];
   orchestration?: {
     allowedChildren: string[];
     dependencies?: Record<string, string[]>;
@@ -34,6 +35,8 @@ export function readMainSessionResources(entries: readonly SessionEntry[]): Main
   const selectedSkills = data.selectedSkills === undefined ? undefined : validatePinnedSkills(data.selectedSkills);
   const selectedExtensionTools = data.selectedExtensionTools === undefined
     ? undefined : validatePinnedExtensionTools(data.selectedExtensionTools);
+  const allowedBuiltInTools = data.allowedBuiltInTools === undefined
+    ? undefined : validateMainAgentConfig({ allowedBuiltInTools: data.allowedBuiltInTools }).allowedBuiltInTools;
   let orchestration: MainSessionResources["orchestration"];
   if (data.orchestration !== undefined) {
     if (!data.orchestration || typeof data.orchestration !== "object" || Array.isArray(data.orchestration)) {
@@ -74,6 +77,7 @@ export function readMainSessionResources(entries: readonly SessionEntry[]): Main
     version: 1,
     ...(selectedSkills !== undefined ? { selectedSkills } : {}),
     ...(selectedExtensionTools !== undefined ? { selectedExtensionTools } : {}),
+    ...(allowedBuiltInTools !== undefined ? { allowedBuiltInTools } : {}),
     ...(orchestration !== undefined ? { orchestration } : {}),
   };
 }

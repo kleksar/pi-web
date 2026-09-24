@@ -6,6 +6,7 @@ import type { MainAgentConfig } from "@/lib/main-agent-config";
 import { findOrchestrationLinkIssue, withAllowedChildren } from "@/lib/orchestration-policy";
 import { isSubagentProfileOverridden } from "@/lib/subagent-profile-precedence";
 import type { SubagentProfile, SubagentOrchestration } from "@/lib/subagents";
+import { PRESET_FULL } from "@/lib/tool-presets";
 import { useI18n } from "@/hooks/useI18n";
 import { AgentResourceSelector } from "./AgentResourceSelector";
 import { MainPromptEditor } from "./MainPromptEditor";
@@ -22,6 +23,7 @@ interface Props {
 }
 
 type Tab = "instructions" | "resources" | "delegation";
+const BUILT_IN_TOOL_CHOICES = [...PRESET_FULL, "powershell"];
 type ConfigResponse = {
   config?: MainAgentConfig; revision?: string; error?: string;
   globalConfig?: MainAgentConfig; overrides?: MainAgentConfig; trusted?: boolean; projectPath?: string;
@@ -182,6 +184,10 @@ export function MainAgentConfig({ cwd, projectSelected = true, sessionId = null,
 
   const changeSkills = (selectedSkills: string[]) => { setSavedOk(false); setDraft((current) => ({ ...current, selectedSkills })); };
   const changeTools = (selectedExtensionTools: SelectedExtensionTool[]) => { setSavedOk(false); setDraft((current) => ({ ...current, selectedExtensionTools })); };
+  const changeBuiltInTools = (allowedBuiltInTools: string[] | undefined) => {
+    setSavedOk(false);
+    setDraft((current) => ({ ...current, allowedBuiltInTools }));
+  };
   const restrictChildren = () => setDraft((current) => ({ ...current, orchestration: { allowedChildren: [] } }));
   const unrestrictedChildren = () => setDraft((current) => ({ ...current, orchestration: null }));
   const toggleChild = (name: string, checked: boolean) => setDraft((current) => {
@@ -299,6 +305,33 @@ export function MainAgentConfig({ cwd, projectSelected = true, sessionId = null,
         <div className="main-agent-config-scroll">
           <div hidden={tab !== "resources"} className="main-agent-config-section">
             <p className="main-agent-config-note">{t("main.resourcesDescription")}</p>
+            <section className="main-agent-config-dependencies">
+              <strong>{t("main.builtInTools")}</strong>
+              <p>{t("main.builtInToolsDescription")}</p>
+              {scope === "project" && overrides.allowedBuiltInTools !== undefined && <ConfigButton size="small" disabled={saving} onClick={() => changeBuiltInTools(globalConfig.allowedBuiltInTools)}>{t("main.inheritBuiltInTools")}</ConfigButton>}
+              {draft.allowedBuiltInTools === undefined ? (
+                <div className="main-agent-config-warning">
+                  <span>{t("main.configuredBuiltInTools")}</span>
+                  <ConfigButton size="small" disabled={saving} onClick={() => changeBuiltInTools([])}>{t("main.limitBuiltInTools")}</ConfigButton>
+                </div>
+              ) : (
+                <>
+                  <ConfigButton size="small" disabled={saving} onClick={() => changeBuiltInTools(undefined)}>{t("main.useConfiguredBuiltInTools")}</ConfigButton>
+                  <div role="group" aria-label={t("main.builtInTools")} className="main-agent-config-list">
+                    {BUILT_IN_TOOL_CHOICES.map((name) => (
+                      <label key={name} className="main-agent-config-choice">
+                        <input type="checkbox" checked={draft.allowedBuiltInTools?.includes(name) ?? false} disabled={saving}
+                          onChange={(event) => changeBuiltInTools(event.target.checked
+                            ? [...(draft.allowedBuiltInTools ?? []), name]
+                            : (draft.allowedBuiltInTools ?? []).filter((tool) => tool !== name))} />
+                        <span>{name}</span>
+                      </label>
+                    ))}
+                  </div>
+                  {draft.allowedBuiltInTools.length === 0 && <p>{t("main.noBuiltInTools")}</p>}
+                </>
+              )}
+            </section>
             {scope === "project" && <p className="main-agent-config-note">{t("main.projectSkillsHint")}</p>}
             {scope === "project" && overrides.selectedSkills !== undefined && <ConfigButton size="small" onClick={() => setDraft((current) => ({ ...current, selectedSkills: globalConfig.selectedSkills }))}>{t("main.inheritSkills")}</ConfigButton>}
             {scope === "project" && overrides.selectedExtensionTools !== undefined && <ConfigButton size="small" onClick={() => setDraft((current) => ({ ...current, selectedExtensionTools: globalConfig.selectedExtensionTools }))}>{t("main.inheritTools")}</ConfigButton>}

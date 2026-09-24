@@ -26,6 +26,9 @@ credentials are separate local data.
    value instead of appearing saved.
 4. Create a new session in a chosen project. Check the provider is authenticated
    separately; deleting `~/.pi` can remove local session/model configuration.
+   In Main → Resources, confirm built-in tools and extension tools both show
+   no assignments in the repository scope. A session created before this
+   policy change keeps its original tools and must not be reused for the check.
 
 ## Exercise actual work
 
@@ -37,6 +40,14 @@ large blast radius. Verify the Writer receives a bounded change order and the
 independent Verifier checks the diff. Reopen a Main and child session to check
 that pinned profiles and skills still resolve; try a child `max_turns` limit
 across start and resume. Use Fast mode only on a supported model/provider.
+
+First ask a **new** Main session, “Расскажи об этом проекте”. Main must call
+`evidence-coordinator`, not `read`, `bash`, or another file tool; evidence
+should ask the docs and code readers for a concise, cited overview. Change
+the session tool preset and reopen the session; neither action may restore
+Main's file or shell tools. A subagent toggle or a local Main override can
+change this result, so inspect Settings → Main and Sub-agents if the delegation
+tool is missing.
 
 For any material architecture, contract, or design choice, the operator must
 review the alternatives **before** asking agents to implement one. A completed

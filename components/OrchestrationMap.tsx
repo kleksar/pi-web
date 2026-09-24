@@ -31,6 +31,7 @@ interface MainMapNode {
   /** null/undefined is the older unrestricted Main policy. */
   orchestration?: SubagentOrchestration | null;
   selectedSkills?: readonly string[];
+  allowedBuiltInTools?: readonly string[];
   selectedExtensionTools?: readonly { extensionPath: string; toolName: string }[];
   loadSkills?: boolean;
   loadExtensions?: boolean;
@@ -156,6 +157,7 @@ export function OrchestrationMap({
     : [];
   const mainNeedsRestriction = ownerId === MAIN_NODE_ID && main.orchestration == null && draftOrchestration == null;
   const visibleSkills = selectedNode === MAIN_NODE_ID ? main.selectedSkills : selected?.selectedSkills;
+  const visibleBuiltInTools = selectedNode === MAIN_NODE_ID ? main.allowedBuiltInTools : selected?.tools;
   const visibleTools = selectedNode === MAIN_NODE_ID ? main.selectedExtensionTools : selected?.selectedExtensionTools;
   const legacySkills = selectedNode === MAIN_NODE_ID ? main.loadSkills ?? true : selected?.loadSkills;
   const legacyExtensions = selectedNode === MAIN_NODE_ID ? main.loadExtensions ?? true : selected?.loadExtensions;
@@ -575,8 +577,10 @@ export function OrchestrationMap({
             {canEdit && !policy && <p className="orchestration-map-hint">{t("map.enableOrchestration")}</p>}
           </>}
           <details className="orchestration-map-resource-details">
-            <summary>{t("map.skills")} · {t("map.extensionTools")}</summary>
+            <summary>{t("main.builtInTools")} · {t("map.skills")} · {t("map.extensionTools")}</summary>
             <div className="orchestration-map-inspector-resources">
+              <strong>{t("main.builtInTools")}</strong><span>{visibleBuiltInTools === undefined ? t("map.allAvailableLegacy")
+                : visibleBuiltInTools.join(", ") || t("map.noneAssigned")}</span>
               <strong>{t("map.skills")}</strong><span>{visibleSkills === undefined ? t(legacySkills ? "map.allAvailableLegacy" : "map.noneAssigned") : visibleSkills.join(", ") || t("map.noneAssigned")}</span>
               <strong>{t("map.extensionTools")}</strong><span>{visibleTools === undefined ? t(legacyExtensions ? "map.allAvailableLegacy" : "map.noneAssigned")
                 : visibleTools.map((tool) => `${tool.toolName} · ${tool.extensionPath}`).join(", ") || t("map.noneAssigned")}</span>

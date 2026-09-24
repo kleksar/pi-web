@@ -31,6 +31,7 @@ source. Trusted project-specific policies can override shared settings.
 
 | Role | Profiles | When they run |
 | --- | --- | --- |
+| Project questions | `evidence-coordinator` | Main asks for a cited overview or another bounded answer; evidence delegates reading to docs and code readers. |
 | Task coordination | `small-task-coordinator`, `task-coordinator`, `complex-task-coordinator` | Main selects one by impact, uncertainty, and reversibility, never by line count alone. |
 | Complex subteams | `evidence-coordinator`, `implementation-coordinator`, `verification-coordinator` | The complex coordinator requests targeted findings, a bounded implementation, then an independent check. |
 | Source retrieval | `project-policy-reader`, `project-requirements-reader`, `project-docs-reader`, `project-code-reader` | Read only the project files or supplied issue/design artifacts needed for a concrete question. |
@@ -42,6 +43,12 @@ All 16 profiles are **available**, not automatically launched. For a narrow
 reversible fix the small coordinator can use just a policy reader, one code
 reader, a writer, and a verifier. If requirements, design sources, or
 architecture are uncertain, Main can use the medium or complex coordinator.
+Main's shared configuration assigns no built-in or third-party extension
+tools; its model sees only the three Pi Web delegation controls. Session tool
+presets cannot add file or shell tools beyond the Main profile. A project
+overview goes to the evidence coordinator, which asks the necessary readers
+and returns cited findings to Main. Start a **new** Main session to pick up
+this policy: existing sessions retain their pinned tool permissions.
 Even a small code change can have a large blast radius. The reusable skills
 (`coordinate-task`, `extract-project-policy`, `trace-project-context`,
 `assess-architecture`, `implement-change-order`, `plan-verification`,

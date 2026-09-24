@@ -231,6 +231,25 @@ function withExtensionTools(session: AgentSessionLike, toolNames: string[]): str
   return [...new Set([...selectedToolNames, ...extensionToolNames])];
 }
 
+/** Main's roster policy caps session presets; Agent control tools stay available. */
+function filterMainActiveTools(
+  activeTools: readonly string[],
+  defaultTools: readonly string[] | undefined,
+  policy: Pick<MainSessionResources, "allowedBuiltInTools" | "selectedExtensionTools"> | null,
+): string[] {
+  const allowedBuiltIns = policy?.allowedBuiltInTools === undefined ? undefined
+    : new Set(resolveShellTools(policy.allowedBuiltInTools, defaultTools));
+  const selectedExtensions = policy?.selectedExtensionTools;
+  const selectedExtensionNames = selectedExtensions === undefined ? undefined
+    : new Set(selectedExtensions.map((tool) => tool.toolName));
+  const controlsEnabled = selectedExtensions !== undefined && isBuiltInSubagentsEnabled();
+  return activeTools.filter((name) => CODING_TOOL_NAMES.includes(name)
+    ? allowedBuiltIns === undefined || allowedBuiltIns.has(name)
+    : selectedExtensionNames === undefined
+      || (controlsEnabled && SUBAGENT_CONTROL_TOOL_NAMES.some((control) => control === name))
+      || selectedExtensionNames.has(name));
+}
+
 /** A resumed orchestrator may only run with Pi Web's exact three control tools. */
 export function assertPiWebOrchestrationHostTools(
   extensions: readonly { path: string; tools: ReadonlyMap<string, unknown> }[],
@@ -492,13 +511,9 @@ export class AgentSessionWrapper {
     const mainResources = readMainSessionResources(
       this.inner.sessionManager.getEntries?.() as unknown as SessionEntry[] ?? [],
     );
-    const selected = mainResources?.selectedExtensionTools;
-    this.inner.setActiveToolsByName(selected === undefined
-      ? allTools
-      : allTools.filter((name) => CODING_TOOL_NAMES.includes(name as (typeof CODING_TOOL_NAMES)[number])
-        || (isBuiltInSubagentsEnabled()
-          && SUBAGENT_CONTROL_TOOL_NAMES.includes(name as (typeof SUBAGENT_CONTROL_TOOL_NAMES)[number]))
-        || selected.some((tool) => tool.toolName === name)));
+    this.inner.setActiveToolsByName(filterMainActiveTools(
+      allTools, this.inner.settingsManager.getDefaultTools(), mainResources,
+    ));
   }
 
   private emit(event: AgentEvent): void {
@@ -2133,6 +2148,7 @@ export async function startRpcSession(
   const selectedToolRefs = restoredMainResources?.selectedExtensionTools?.map(({ extensionPath, toolName }) => ({
     extensionPath, toolName,
   })) ?? mainConfig?.selectedExtensionTools;
+  const mainAllowedBuiltInTools = restoredMainResources?.allowedBuiltInTools ?? mainConfig?.allowedBuiltInTools;
   if (restoredMainResources?.selectedSkills) assertSelectedSkillsUnchanged(restoredMainResources.selectedSkills);
   if (restoredMainResources?.selectedExtensionTools) {
     assertSelectedExtensionToolsUnchanged(restoredMainResources.selectedExtensionTools);
@@ -2235,8 +2251,10 @@ export async function startRpcSession(
             dependencies: mainOrchestration.dependencies,
             contextProviders: mainOrchestration.contextProviders } : undefined,
         ) : undefined;
-    const mainHasReadTool = resolveShellTools(
-      selectedToolNames ?? settingsManager.getDefaultTools() ?? [], settingsManager.getDefaultTools(),
+    const mainHasReadTool = filterMainActiveTools(
+      resolveShellTools(selectedToolNames ?? settingsManager.getDefaultTools() ?? [], settingsManager.getDefaultTools()),
+      settingsManager.getDefaultTools(),
+      { allowedBuiltInTools: mainAllowedBuiltInTools },
     ).some((name) => name === "read" || name === "bash");
     const mainNeedsSkillInjection = Boolean(effectiveSelectedSkillPaths?.length) && !mainHasReadTool;
     const mainAppendSystemPromptOverride = (base: string[]): string[] => [
@@ -2348,6 +2366,7 @@ export async function startRpcSession(
         version: 1,
         ...(effectiveSelectedSkillPaths !== undefined ? { selectedSkills: pinnedMainSkills ?? [] } : {}),
         ...(effectiveSelectedToolRefs !== undefined ? { selectedExtensionTools: pinnedMainTools ?? [] } : {}),
+        ...(mainAllowedBuiltInTools !== undefined ? { allowedBuiltInTools: mainAllowedBuiltInTools } : {}),
         ...(mainOrchestration !== undefined ? { orchestration: mainOrchestration } : {}),
       };
       sessionManager.appendCustomEntry(MAIN_RESOURCE_META_TYPE, snapshot);
@@ -2417,12 +2436,10 @@ export async function startRpcSession(
     // extensions stay usable in Pi Web just like in the `pi` CLI.
     if (!subagentResources && !chatOnly) {
       const active = withExtensionTools(inner, selectedToolNames ?? inner.getActiveToolNames());
-      inner.setActiveToolsByName(effectiveSelectedToolRefs === undefined
-        ? active
-        : active.filter((name) => CODING_TOOL_NAMES.includes(name as (typeof CODING_TOOL_NAMES)[number])
-          || (isBuiltInSubagentsEnabled()
-            && SUBAGENT_CONTROL_TOOL_NAMES.includes(name as (typeof SUBAGENT_CONTROL_TOOL_NAMES)[number]))
-          || pinnedMainTools?.some((tool) => tool.toolName === name)));
+      inner.setActiveToolsByName(filterMainActiveTools(active, inner.settingsManager.getDefaultTools(), {
+        allowedBuiltInTools: mainAllowedBuiltInTools,
+        ...(effectiveSelectedToolRefs !== undefined ? { selectedExtensionTools: pinnedMainTools ?? [] } : {}),
+      }));
     }
 
     const exactSystemPrompt = subagentResources?.exactSystemPrompt !== undefined

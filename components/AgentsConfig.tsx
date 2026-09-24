@@ -921,6 +921,7 @@ export function AgentsConfig({
           cwd={cwd}
           profiles={mapProfiles}
           main={{ orchestration: mainDraft.orchestration ?? null,
+            allowedBuiltInTools: mainDraft.allowedBuiltInTools,
             selectedSkills: mainDraft.selectedSkills,
             selectedExtensionTools: mainDraft.selectedExtensionTools }}
           ownerId={mapOwner}

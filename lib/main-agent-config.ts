@@ -10,15 +10,19 @@ import { resolveSelectedSkillReferences } from "./agent-resource-selection";
 import { MAX_SUBAGENT_DEPENDENCIES, type SubagentOrchestration } from "./subagents";
 import { isProjectMainConfigTrusted } from "./project-trust";
 import { getRepositoryRosterRoot } from "./repository-roster";
+import { PRESET_FULL } from "./tool-presets";
 
 /** Missing fields preserve Pi's current discovery of resources and child agents. */
 export interface MainAgentConfig {
   selectedSkills?: string[];
   selectedExtensionTools?: SelectedExtensionTool[];
+  /** Model-visible built-in tools; undefined preserves Pi's configured defaults. */
+  allowedBuiltInTools?: string[];
   orchestration?: SubagentOrchestration | null;
 }
 
 const PROFILE_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+const BUILT_IN_TOOL_NAMES = new Set([...PRESET_FULL, "powershell"]);
 const MAX_MAIN_CONFIG_BYTES = 1024 * 1024;
 
 function readMainConfigBytes(path: string): Buffer {
@@ -91,6 +95,13 @@ export function validateMainAgentConfig(value: unknown): MainAgentConfig {
   const config: MainAgentConfig = {};
   if (Object.hasOwn(value, "selectedSkills")) {
     config.selectedSkills = uniqueStrings(value.selectedSkills, "Selected skills");
+  }
+  if (Object.hasOwn(value, "allowedBuiltInTools")) {
+    const tools = uniqueStrings(value.allowedBuiltInTools, "Allowed Main built-in tools");
+    if (tools.some((tool) => !BUILT_IN_TOOL_NAMES.has(tool))) {
+      throw new Error("Allowed Main built-in tools contain an unknown tool");
+    }
+    config.allowedBuiltInTools = tools;
   }
   if (Object.hasOwn(value, "selectedExtensionTools")) {
     if (!Array.isArray(value.selectedExtensionTools)) throw new Error("Selected extension tools must be a list");
@@ -206,6 +217,7 @@ export function mergeMainAgentConfigs(globalConfig: MainAgentConfig, project: Ma
   return validateMainAgentConfig({
     ...(globalConfig.selectedSkills !== undefined ? { selectedSkills: globalConfig.selectedSkills } : {}),
     ...(globalConfig.selectedExtensionTools !== undefined ? { selectedExtensionTools: globalConfig.selectedExtensionTools } : {}),
+    ...(globalConfig.allowedBuiltInTools !== undefined ? { allowedBuiltInTools: globalConfig.allowedBuiltInTools } : {}),
     ...(globalConfig.orchestration !== undefined ? { orchestration: globalConfig.orchestration } : {}),
     ...project,
   });
@@ -216,7 +228,7 @@ export function changedProjectMainOverrides(
   previous: MainAgentConfig, draft: MainAgentConfig, overrides: MainAgentConfig, globalConfig: MainAgentConfig,
 ): MainAgentConfig {
   const result: MainAgentConfig = { ...overrides };
-  for (const key of ["selectedSkills", "selectedExtensionTools", "orchestration"] as const) {
+  for (const key of ["selectedSkills", "selectedExtensionTools", "allowedBuiltInTools", "orchestration"] as const) {
     if (JSON.stringify(previous[key]) === JSON.stringify(draft[key])) continue;
     if (JSON.stringify(draft[key]) === JSON.stringify(globalConfig[key])) delete result[key];
     else if (draft[key] !== undefined) Object.assign(result, { [key]: draft[key] });

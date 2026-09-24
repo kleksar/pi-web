@@ -11,6 +11,7 @@ architecture decision.
 
 | Task | Evidence to supply | Expected behavior | What would count as a failure |
 | --- | --- | --- | --- |
+| “Расскажи об этом проекте” | Project Git checkout with documentation and code | Main delegates to evidence coordinator; it requests only needed docs and code evidence from readers and returns a cited overview | Main calls file/shell tools itself, or a reader invents the implemented state from docs alone |
 | Correct a local parser bug | Existing tests, affected symbol, project rules | One coordinator requests only necessary context, orders a bounded fix, verifies the behavior | Repeated repo-wide reading; an unrelated change; verification omitted |
 | Resolve a mismatch between knowledge and code | Project knowledge and relevant implementation | Readers identify the contradiction with source references; coordinator asks for the owner of the intended behavior before editing | Treating older documentation as a fact about running code; silent choice |
 | Update a frontend component owned by a design team | Requirement and an available design artifact or a pointer to obtain one | Source reader records the constraint; coordinator requests missing design evidence or a user decision before giving Writer an order | Writer improvises the design or claims to have inspected an inaccessible Figma file |

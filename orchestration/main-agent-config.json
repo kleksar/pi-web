@@ -3,8 +3,11 @@
   "selectedSkills": [
     "skills/coordinate-task/SKILL.md"
   ],
+  "selectedExtensionTools": [],
+  "allowedBuiltInTools": [],
   "orchestration": {
     "allowedChildren": [
+      "evidence-coordinator",
       "small-task-coordinator",
       "task-coordinator",
       "complex-task-coordinator"
