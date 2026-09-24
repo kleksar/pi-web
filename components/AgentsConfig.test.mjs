@@ -51,15 +51,25 @@ test("uses the shared enabled status treatment", () => {
 
 const sidebarRow = source.slice(source.indexOf('<ConfigSidebarItem\n                          key={profileKey(profile)}'), source.indexOf('</ConfigSidebarItem>', source.indexOf('<ConfigSidebarItem\n                          key={profileKey(profile)}')));
 
-test("shows configured model and thinking on independent compact lines beneath the sidebar name", () => {
-  assert.match(sidebarRow, /\{profile\.displayName\}<\/ConfigSidebarText>[\s\S]*?<span className=\{`agents-profile-metadata[^>]*>\s*\{t\("agents\.model"\)\}: \{profile\.model \|\| "Inherited"\}\s*<\/span>\s*<span className=\{`agents-profile-metadata[^>]*>\s*\{t\("agents\.thinking"\)\}: \{profile\.thinking \|\| "Inherited"\}\s*<\/span>/);
+test("resolves roster models by exact provider and id with name/id/raw fallbacks", () => {
+  assert.match(source, /const provider = value\.slice\(0, separator\)/);
+  assert.match(source, /const id = value\.slice\(separator \+ 1\)/);
+  assert.match(source, /models\.find\(\(model\) => model\.provider === provider && model\.id === id\)/);
+  assert.match(source, /return match \? match\.name \|\| match\.id : value/);
+  assert.match(sidebarRow, /title=\{profile\.model \|\| undefined\}/);
+  assert.match(sidebarRow, /rosterModelName\(profile\.model, modelOptions, t\("agents\.inherited"\)\)/);
+  assert.doesNotMatch(sidebarRow, /\{t\("agents\.model"\)\}:/);
+});
+
+test("shows compact model and effort on independent truncated lines beneath the sidebar name", () => {
+  assert.match(sidebarRow, /\{profile\.displayName\}<\/ConfigSidebarText>[\s\S]*?rosterModelName\(profile\.model[\s\S]*?<\/span>\s*<span className=\{`agents-profile-metadata[^>]*>\s*\{t\("agents\.thinking"\)\} · \{profile\.thinking \|\| t\("agents\.inherited"\)\}\s*<\/span>/);
   assert.match(cssSource, /\.agents-profile-summary \{[\s\S]*?min-width: 0;/);
   assert.match(cssSource, /\.agents-profile-metadata \{[\s\S]*?display: block;[\s\S]*?overflow: hidden;[\s\S]*?text-overflow: ellipsis;[\s\S]*?white-space: nowrap;/);
 });
 
 test("labels each unset sidebar field Inherited without resolving session values", () => {
-  assert.match(sidebarRow, /profile\.model \|\| "Inherited"/);
-  assert.match(sidebarRow, /profile\.thinking \|\| "Inherited"/);
+  assert.match(source, /if \(!value\) return inherited/);
+  assert.match(sidebarRow, /profile\.thinking \|\| t\("agents\.inherited"\)/);
   assert.doesNotMatch(sidebarRow, /t\("agents\.inherit"\)|Parent default/);
   assert.equal((sidebarRow.match(/className=\{`agents-profile-metadata\$\{profile\.enabled \? "" : " is-muted"\}`\}/g) ?? []).length, 2);
   assert.match(cssSource, /\.agents-profile-metadata\.is-muted \{[\s\S]*?opacity: 0\.7;/);
