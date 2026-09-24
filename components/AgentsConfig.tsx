@@ -980,10 +980,7 @@ export function AgentsConfig({
                           <span className="agents-profile-summary">
                             <ConfigSidebarText className={`is-grow${profile.enabled ? "" : " is-muted"}`}>{profile.displayName}</ConfigSidebarText>
                             <span className={`agents-profile-metadata${profile.enabled ? "" : " is-muted"}`} title={profile.model || undefined}>
-                              {rosterModelName(profile.model, modelOptions, t("agents.inherited"))}
-                            </span>
-                            <span className={`agents-profile-metadata${profile.enabled ? "" : " is-muted"}`}>
-                              {t("agents.thinking")} · {profile.thinking || t("agents.inherited")}
+                              {rosterModelName(profile.model, modelOptions, t("agents.inherited"))} {profile.thinking || t("agents.inherited")}
                             </span>
                           </span>
                           {overridden && <span className="agents-overridden-label">{t("agents.overridden")}</span>}
