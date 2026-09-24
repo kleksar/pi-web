@@ -4,7 +4,9 @@
 skills, the Main prompt, and sub-agent settings. A local file is an experiment
 until its reviewed replacement is committed and published on `origin/develop`.
 The sample profiles in this checkout do **not** contain the operator's previous
-local files. Pi Web cannot inspect your Mac from a different machine.
+local files. Pi Web cannot inspect your Mac from a different machine. Pi Web
+started from this checkout discovers the roster automatically; an independently
+installed Pi Web package still needs `PI_WEB_ROSTER_ROOT` set by its operator.
 
 ## Inventory before replacing anything
 
@@ -90,8 +92,9 @@ printf 'Private backup: %s\n' "$roster_backup"
 Write down the printed backup path. If the check fails, stop Pi Web and
 restore the moved paths one at a time, for example
 `mv "$roster_backup/agents" "$HOME/.pi/agent/agents"` (only after checking
-that the destination is absent). Restart the Pi Web server with `PI_WEB_ROSTER_ROOT` set to
-the absolute path of the checked out `orchestration` directory. Run a new
+that the destination is absent). Restart the Pi Web server from this checkout,
+or set `PI_WEB_ROSTER_ROOT` to the absolute path of the checkout's
+`orchestration` directory when using another installed package. Run a new
 session in a trusted project and check:
 
 1. Settings → Main reports the repository prompt and selected skills as the

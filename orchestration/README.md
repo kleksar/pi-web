@@ -1,16 +1,24 @@
 # Versioned orchestration catalog
 
 This directory is the shared, Git-tracked default for Pi Web's Main prompt,
-delegation settings, agent profiles, and individually assigned skills. Start Pi
-Web with `PI_WEB_ROSTER_ROOT` set by the **server operator** to the absolute path
-of this checkout's `orchestration` directory:
+delegation settings, agent profiles, and individually assigned skills. When
+running Pi Web **from this checkout**, `npm run dev` (or `npm run start` with a
+prepared build) finds this directory automatically. Restart the server and
+open a new Main session after pulling roster changes. Check Settings →
+Sub-agents for the **Repository** profiles and Settings → Main for the
+**Repository** prompt and skills.
+
+For a separately installed Pi Web package, point `PI_WEB_ROSTER_ROOT` at the
+absolute directory in a trusted Git checkout. The published package does not
+contain `orchestration/`:
 
 ```bash
-PI_WEB_ROSTER_ROOT="$(pwd)/orchestration" npm run dev
+PI_WEB_ROSTER_ROOT="/absolute/path/to/pi-web/orchestration" pi-web
 ```
 
-For an installed server, point the same variable at the checkout, independent
-of the task project's working directory. From Settings → Main, edit the shared
+The explicit operator variable also overrides the automatically detected
+checkout directory. The task project's working directory never selects a
+roster. From Settings → Main, edit the shared
 Main policy and `APPEND_SYSTEM.md` in the **Repository** scope. From Settings →
 Sub-agents, edit **Repository** profiles and shared delegation settings. UI
 changes to those sources modify tracked files and still need review, commit,

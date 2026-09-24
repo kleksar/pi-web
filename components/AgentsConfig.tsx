@@ -841,6 +841,17 @@ export function AgentsConfig({
           />
         </div>
       </div>
+      {!loading && !error && (
+        <div className={`agents-roster-info ${rosterAvailable ? "is-connected" : "is-disconnected"}`} role="status">
+          <strong>{t(rosterAvailable ? "agents.rosterConnected" : "agents.rosterUnavailable")}</strong>
+          <span>{rosterAvailable
+            ? t("agents.rosterConnectedDescription", {
+                count: String(profiles.filter((profile) => profile.scope === "roster").length),
+                path: shortenPath(rosterRoot),
+              })
+            : t("agents.rosterUnavailableDescription")}</span>
+        </div>
+      )}
       <div role="group" aria-label={t("common.agents")} style={{ display: "flex", gap: 4, padding: "7px 16px", borderBottom: "1px solid var(--border)" }}>
         <ConfigButton size="small" variant={view === "profiles" ? "primary" : undefined} onClick={() => setView("profiles")}>{t("agents.profiles")}</ConfigButton>
         <ConfigButton size="small" variant={view === "map" ? "primary" : undefined} onClick={() => {

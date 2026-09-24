@@ -410,6 +410,27 @@
   color: #d97706;
 }
 
+.agents-roster-info {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  padding: 8px 18px;
+  border-bottom: 1px solid var(--border);
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.agents-roster-info strong {
+  color: var(--text);
+}
+
+.agents-roster-info.is-disconnected {
+  border-left: 3px solid #d97706;
+  padding-left: 15px;
+}
+
 .agents-feature-actions {
   display: flex;
   flex-shrink: 0;

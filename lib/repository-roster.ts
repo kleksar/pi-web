@@ -1,4 +1,4 @@
-import { lstatSync, readdirSync, realpathSync, statSync } from "node:fs";
+import { lstatSync, readFileSync, readdirSync, realpathSync, statSync } from "node:fs";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 
 /** A trusted, operator-configured shared roster; never accept its path from a project or an API request. */
@@ -44,14 +44,47 @@ function assertSkillTreeContained(root: string, skillsDir: string): void {
   }
 }
 
-/** Physical `<repo>/orchestration` path or undefined when the shared roster is disabled. */
+/**
+ * Next fixes PI_WEB_PACKAGE_ROOT when loading its own config. Never infer it
+ * from process.cwd(): an extension can change that to an untrusted task cwd.
+ * Published upstream packages without a roster keep their previous behavior.
+ */
+function findBundledRoster(): string | undefined {
+  const packageRoot = process.env.PI_WEB_PACKAGE_ROOT;
+  if (!packageRoot) return undefined;
+  const appRoot = realpathSync(packageRoot);
+  let pkg: { name?: string };
+  try {
+    pkg = JSON.parse(readFileSync(join(appRoot, "package.json"), "utf8")) as { name?: string };
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw error;
+  }
+  if (pkg.name !== "@agegr/pi-web") return undefined;
+
+  const candidate = join(appRoot, "orchestration");
+  let entry: ReturnType<typeof lstatSync>;
+  try {
+    entry = lstatSync(candidate);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw error;
+  }
+  if (entry.isSymbolicLink() || !entry.isDirectory()) {
+    throw new Error("Bundled repository roster orchestration must be a directory, not a symlink");
+  }
+  return candidate;
+}
+
+/** Physical `<repo>/orchestration` path or undefined when the shared roster is unavailable. */
 export function getRepositoryRosterRoot(): string | undefined {
   const configured = process.env.PI_WEB_ROSTER_ROOT;
-  if (configured === undefined) return undefined;
-  if (!configured || configured.trim() !== configured || !isAbsolute(configured)) {
+  if (configured !== undefined && (!configured || configured.trim() !== configured || !isAbsolute(configured))) {
     throw new Error("PI_WEB_ROSTER_ROOT must be an absolute orchestration directory");
   }
-  const root = realpathSync(configured);
+  const candidate = configured ?? findBundledRoster();
+  if (!candidate) return undefined;
+  const root = realpathSync(candidate);
   if (!statSync(root).isDirectory()) throw new Error("PI_WEB_ROSTER_ROOT must be a directory");
   requireRosterDirectory(root, "agents");
   requireRosterDirectory(root, "skills");

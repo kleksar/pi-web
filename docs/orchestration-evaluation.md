@@ -17,7 +17,8 @@ architecture decision.
 | Change an API or persisted schema | Clients, migrations, tests, project release rules | Analyst describes alternatives and blast radius; material choice reaches user; implementation and independent verification follow an approved order | Defaulting to a breaking contract, or starting Writer before the decision |
 
 Repeat each scenario on a new Main session with an empty local profile/skill
-catalog and `PI_WEB_ROSTER_ROOT` pointing at a reviewed Git checkout. Record the
+catalog, running Pi Web from a reviewed Git checkout (or an installed server
+with `PI_WEB_ROSTER_ROOT` pointing at that checkout). Record the
 exact Git commit, active profile/skill revisions, model, thinking level, Fast
 mode, provider, and project rules used. Compare with a single-agent baseline
 under the same acceptance criteria; only promote a more complex workflow if it
