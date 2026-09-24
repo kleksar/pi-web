@@ -114,7 +114,7 @@ function duplicateProfileName(name: string, profiles: readonly SubagentProfile[]
 }
 
 function isWritableScope(scope: SubagentScope): scope is SubagentWritableScope {
-  return scope === "global" || scope === "project";
+  return scope === "roster" || scope === "global" || scope === "project";
 }
 
 /**
@@ -175,7 +175,11 @@ export function AgentsConfig({
   const [selectedKey, setSelectedKey] = useState<string | null>(() => getLastSettingsSelection("agents", cwd));
   const [draft, setDraft] = useState<EditableProfile>(EMPTY_PROFILE);
   const [mode, setMode] = useState<EditorMode>("view");
-  const [targetScope, setTargetScope] = useState<SubagentWritableScope>("global");
+  const [targetScope, setTargetScope] = useState<SubagentWritableScope>("roster");
+  const [rosterAvailable, setRosterAvailable] = useState(false);
+  const [rosterRoot, setRosterRoot] = useState("");
+  const [settingsEditScope, setSettingsEditScope] = useState<"roster" | "local">("roster");
+  const [settingsSources, setSettingsSources] = useState<SubagentSettingsResponse["sources"]>();
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [savedOk, setSavedOk] = useState(false);
@@ -209,9 +213,12 @@ export function AgentsConfig({
       if (!response.ok || data.error) throw new Error(data.error ?? `HTTP ${response.status}`);
       const next = data.profiles ?? [];
       setProfiles(next);
+      setRosterAvailable(Boolean(data.rosterAvailable));
+      setRosterRoot(data.rosterRoot ?? "");
       setOrchestrationProfileNames(new Set((data.orchestrationProfileNames ?? []).map((name) => name.toLowerCase())));
       const rememberedKey = preferredKey ?? getLastSettingsSelection("agents", cwd);
       const chosen = next.find((profile) => profileKey(profile) === rememberedKey)
+        ?? next.find((profile) => profile.scope === "roster")
         ?? next.find((profile) => profile.scope === "project")
         ?? next.find((profile) => profile.scope === "global")
         ?? next[0]
@@ -221,6 +228,8 @@ export function AgentsConfig({
         setDraft(editableProfile(chosen));
         setMode(isWritableScope(chosen.scope) ? "edit" : "view");
         if (isWritableScope(chosen.scope)) setTargetScope(chosen.scope);
+      } else {
+        setTargetScope(data.rosterAvailable ? "roster" : "global");
       }
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
@@ -249,6 +258,8 @@ export function AgentsConfig({
         }
         setBuiltInEnabled(data.enabled);
         if (typeof data.maxConcurrent === "number") setMaxConcurrent(data.maxConcurrent);
+        setSettingsSources(data.sources);
+        setSettingsEditScope(data.defaultEditScope === "roster" ? "roster" : "local");
       } catch (cause) {
         if (controller.signal.aborted) return;
         setSettingsError(cause instanceof Error ? cause.message : String(cause));
@@ -299,7 +310,7 @@ export function AgentsConfig({
     setSelectedKey(null);
     setDraft({ ...EMPTY_PROFILE, name, displayName: name });
     setMode("create");
-    setTargetScope("global");
+    setTargetScope(rosterAvailable ? "roster" : "global");
     setError(null);
   };
 
@@ -313,7 +324,7 @@ export function AgentsConfig({
       displayName: t("agents.copyName", { name: selected.displayName }),
     });
     setMode("create");
-    setTargetScope(isWritableScope(selected.scope) ? selected.scope : "global");
+    setTargetScope(isWritableScope(selected.scope) ? selected.scope : rosterAvailable ? "roster" : "global");
     setError(null);
   };
 
@@ -367,6 +378,8 @@ export function AgentsConfig({
   const displayedPath = creating
     ? targetScope === "global"
       ? `~/.pi/agent/agents/${draft.name || "..."}.md`
+      : targetScope === "roster"
+        ? `${rosterRoot}/agents/${draft.name || "..."}.md`
       : `./.pi/agents/${draft.name || "..."}.md`
     : selected
       ? displayProfilePath(selected, cwd) ?? t("agents.builtinPath")
@@ -383,7 +396,8 @@ export function AgentsConfig({
   const controlStyle = disabled ? { ...inputStyle, ...disabledInputStyle } : inputStyle;
   const switchDisabled = creating
     ? disabled
-    : !selected || !isTogglableScope(selected.scope) || saving || toggling;
+    : !selected || !isTogglableScope(selected.scope) || saving || toggling
+      || (selected.scope === "builtin" && settingsLoading);
   const update = <K extends keyof EditableProfile>(key: K, value: EditableProfile[K]) => {
     setDraft((current) => ({ ...current, [key]: value }));
   };
@@ -396,17 +410,26 @@ export function AgentsConfig({
     if (!selected || !isTogglableScope(selected.scope)) return;
     setToggling(true);
     setError(null);
+    setSettingsError(null);
     try {
       const response = await fetch("/api/subagents/profiles", {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ cwd, scope: selected.scope, name: selected.name, enabled, ...(showOrchestrationProfiles ? { orchestration: true } : {}) }),
+        body: JSON.stringify({ cwd, scope: selected.scope, name: selected.name, enabled,
+          ...(selected.scope === "builtin" ? { settingsScope: settingsEditScope } : {}),
+          ...(showOrchestrationProfiles ? { orchestration: true } : {}) }),
       });
-      const data = await response.json() as { profile?: SubagentProfile; error?: string };
+      const data = await response.json() as { profile?: SubagentProfile; source?: string; savedScope?: string; error?: string };
       if (!response.ok || data.error || !data.profile) throw new Error(data.error ?? `HTTP ${response.status}`);
       const saved = data.profile;
       setProfiles((current) => current.map((profile) => profileKey(profile) === profileKey(saved) ? saved : profile));
       setDraft((current) => ({ ...current, enabled: saved.enabled }));
+      if (selected.scope === "builtin" && (data.source === "local" || data.source === "roster" || data.source === "default")) {
+        setSettingsSources((current) => current ? { ...current, disabledBuiltIns: data.source as "local" | "roster" | "default" } : current);
+      }
+      if (selected.scope === "builtin" && data.source === "local" && data.savedScope === "roster") {
+        setSettingsError(t("agents.localOverrides"));
+      }
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
@@ -421,13 +444,17 @@ export function AgentsConfig({
       const response = await fetch("/api/subagents/settings", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ enabled }),
+        body: JSON.stringify({ enabled, scope: settingsEditScope }),
       });
       const data = await response.json() as Partial<SubagentSettingsResponse> & { error?: string };
       if (!response.ok || data.error || typeof data.enabled !== "boolean") {
         throw new Error(data.error ?? `HTTP ${response.status}`);
       }
       setBuiltInEnabled(data.enabled);
+      setSettingsSources(data.sources);
+      if (data.sources?.builtInEnabled === "local" && data.savedScope === "roster") {
+        setSettingsError(t("agents.localOverrides"));
+      }
       setReloadNeeded(Boolean(sessionId));
     } catch (cause) {
       setSettingsError(cause instanceof Error ? cause.message : String(cause));
@@ -443,11 +470,15 @@ export function AgentsConfig({
       const response = await fetch("/api/subagents/settings", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ maxConcurrent: value }),
+        body: JSON.stringify({ maxConcurrent: value, scope: settingsEditScope }),
       });
       const data = await response.json() as Partial<SubagentSettingsResponse> & { error?: string };
       if (!response.ok || data.error || typeof data.maxConcurrent !== "number") throw new Error(data.error ?? `HTTP ${response.status}`);
       setMaxConcurrent(data.maxConcurrent);
+      setSettingsSources(data.sources);
+      if (data.sources?.maxConcurrent === "local" && data.savedScope === "roster") {
+        setSettingsError(t("agents.localOverrides"));
+      }
     } catch (cause) {
       setSettingsError(cause instanceof Error ? cause.message : String(cause));
     }
@@ -474,6 +505,18 @@ export function AgentsConfig({
         <div className="agents-feature-copy">
           <strong>{t("agents.builtInTitle")}</strong>
           <span>{t("agents.builtInDescription")}</span>
+          {rosterAvailable && <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 11 }}>
+            {t("agents.settingsEditScope")}
+            <select aria-label={t("agents.settingsEditScope")} value={settingsEditScope}
+              onChange={(event) => setSettingsEditScope(event.target.value as "roster" | "local")}
+              disabled={settingsSaving}>
+              <option value="roster">{t("agents.scope.roster")}</option>
+              <option value="local">{t("agents.scope.global")}</option>
+            </select>
+          </label>}
+          {settingsEditScope === "roster" && settingsSources
+            && Object.values(settingsSources).includes("local")
+            && <span role="status" style={{ color: "var(--text-muted)", fontSize: 11 }}>{t("agents.localOverrides")}</span>}
           {reloadNeeded && <span role="status" className="agents-feature-reload-notice">{t("agents.reloadRequired")}</span>}
         </div>
         <div className="agents-feature-actions">
@@ -517,7 +560,7 @@ export function AgentsConfig({
           <ConfigSidebarList>
               {loading ? (
                 <div style={{ padding: 10, color: "var(--text-dim)", fontSize: 12 }}>{t("agents.loading")}</div>
-              ) : (["project", "global", "workspace", "builtin"] as const).map((scope) => {
+              ) : (["roster", "project", "global", "workspace", "builtin"] as const).map((scope) => {
                 const scopedProfiles = profiles.filter((profile) => profile.scope === scope);
                 if (scopedProfiles.length === 0) return null;
                 return (
@@ -547,6 +590,7 @@ export function AgentsConfig({
           <ConfigListAction
                 active={creating}
                 onClick={beginCreate}
+                disabled={loading}
               >
                 {t("agents.new")}
           </ConfigListAction>
@@ -579,7 +623,7 @@ export function AgentsConfig({
                   {creating && (
                     <Field label={t("agents.saveScope")}>
                       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 3, padding: 3, border: "1px solid var(--border)", borderRadius: 5, background: "var(--bg-panel)" }}>
-                        {(["global", "project"] as const).map((scope) => (
+                        {([...(rosterAvailable ? ["roster" as const] : []), "project", "global"] as const).map((scope) => (
                           <button
                             key={scope}
                             type="button"

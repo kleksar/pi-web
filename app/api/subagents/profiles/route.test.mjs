@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { after } from "node:test";
@@ -43,7 +44,7 @@ function profile(overrides = {}) {
 function jsonRequest(method, body) {
   return new Request("http://localhost/api/subagents/profiles", {
     method,
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", Host: "localhost" },
     body: JSON.stringify(body),
   });
 }
@@ -232,19 +233,19 @@ test("profiles route rejects missing paths, malformed profiles, and unsafe names
 
   response = await PUT(jsonRequest("PUT", { cwd, scope: "workspace", profile: profile() }));
   assert.equal(response.status, 400);
-  assert.deepEqual(await response.json(), { error: "scope must be global or project" });
+  assert.deepEqual(await response.json(), { error: "scope must be roster, global, or project" });
 
   response = await PUT(jsonRequest("PUT", { cwd, scope: "builtin", profile: profile() }));
   assert.equal(response.status, 400);
-  assert.deepEqual(await response.json(), { error: "scope must be global or project" });
+  assert.deepEqual(await response.json(), { error: "scope must be roster, global, or project" });
 
   response = await PATCH(jsonRequest("PATCH", { cwd, scope: "workspace", name: "explore", enabled: false }));
   assert.equal(response.status, 400);
-  assert.deepEqual(await response.json(), { error: "scope must be global, project, or builtin" });
+  assert.deepEqual(await response.json(), { error: "scope must be roster, global, project, or builtin" });
 
   response = await DELETE(jsonRequest("DELETE", { cwd, scope: "builtin", name: "Explore" }));
   assert.equal(response.status, 400);
-  assert.deepEqual(await response.json(), { error: "scope must be global or project" });
+  assert.deepEqual(await response.json(), { error: "scope must be roster, global, or project" });
 
   response = await PATCH(jsonRequest("PATCH", { cwd, scope: "project", name: "missing", enabled: false }));
   assert.equal(response.status, 404);
@@ -253,4 +254,68 @@ test("profiles route rejects missing paths, malformed profiles, and unsafe names
   response = await PATCH(jsonRequest("PATCH", { cwd, scope: "project", name: "api-test-agent" }));
   assert.equal(response.status, 400);
   assert.deepEqual(await response.json(), { error: "enabled required" });
+});
+
+test("profile API saves tracked repository agents and reports local settings that mask a Git toggle", async (t) => {
+  const checkout = await mkdtemp(join(tmpdir(), "pi-web-profile-api-git-"));
+  const project = await mkdtemp(join(tmpdir(), "pi-web-profile-api-project-"));
+  const previousRoster = process.env.PI_WEB_ROSTER_ROOT;
+  const localSettings = join(testAgentDir, "agents", "settings.json");
+  let previousLocal;
+  try { previousLocal = await readFile(localSettings, "utf8"); } catch { previousLocal = undefined; }
+  t.after(async () => {
+    if (previousRoster === undefined) delete process.env.PI_WEB_ROSTER_ROOT;
+    else process.env.PI_WEB_ROSTER_ROOT = previousRoster;
+    if (previousLocal === undefined) await rm(localSettings, { force: true });
+    else await writeFile(localSettings, previousLocal);
+    await Promise.all([checkout, project].map((path) => rm(path, { recursive: true, force: true })));
+  });
+  allowFileRoot(project);
+  const roster = join(checkout, "orchestration");
+  await mkdir(join(roster, "agents"), { recursive: true });
+  await mkdir(join(testAgentDir, "agents"), { recursive: true });
+  await writeFile(join(roster, "subagent-settings.json"),
+    JSON.stringify({ version: 1, builtInEnabled: true, disabledBuiltIns: [] }));
+  await writeFile(localSettings, JSON.stringify({ version: 1, disabledBuiltIns: [] }));
+  execFileSync("git", ["init", "-q", checkout]);
+  execFileSync("git", ["-C", checkout, "add", "orchestration/subagent-settings.json"]);
+  execFileSync("git", ["-C", checkout, "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "initial"]);
+  process.env.PI_WEB_ROSTER_ROOT = roster;
+
+  let response = await GET(new Request(`http://localhost/api/subagents/profiles?cwd=${encodeURIComponent(project)}`));
+  let body = await response.json();
+  assert.equal(body.rosterAvailable, true);
+  assert.equal(body.rosterRoot, roster);
+
+  response = await PUT(jsonRequest("PUT", { cwd: project, scope: "roster", profile: profile({ name: "git-agent" }) }));
+  assert.equal(response.status, 200);
+  assert.equal((await response.json()).profile.scope, "roster");
+  assert.match(execFileSync("git", ["-C", checkout, "status", "--short", "--untracked-files=all"], { encoding: "utf8" }),
+    /\?\? orchestration\/agents\/git-agent\.md/);
+
+  response = await PATCH(jsonRequest("PATCH", { cwd: project, scope: "builtin", name: "explore", enabled: false }));
+  assert.equal(response.status, 200);
+  body = await response.json();
+  assert.equal(body.savedScope, "roster");
+  assert.equal(body.source, "local");
+  assert.equal(body.profile.enabled, true); // local explicit list masks the repository switch
+  assert.deepEqual(JSON.parse(await readFile(join(roster, "subagent-settings.json"), "utf8")).disabledBuiltIns, ["explore"]);
+  assert.match(execFileSync("git", ["-C", checkout, "status", "--short"], { encoding: "utf8" }),
+    / M orchestration\/subagent-settings\.json/);
+
+  response = await DELETE(jsonRequest("DELETE", { cwd: project, scope: "roster", name: "git-agent" }));
+  assert.equal(response.status, 200);
+});
+
+test("profile mutations refuse cross-origin and non-JSON requests", async () => {
+  const hostile = new Request("http://localhost/api/subagents/profiles", {
+    method: "PUT", headers: { "Content-Type": "application/json", Host: "localhost", Origin: "https://other.invalid" },
+    body: JSON.stringify({ cwd: testAgentDir, scope: "global", profile: profile({ name: "hostile" }) }),
+  });
+  assert.equal((await PUT(hostile)).status, 403);
+  const text = new Request("http://localhost/api/subagents/profiles", {
+    method: "DELETE", headers: { "Content-Type": "text/plain", Host: "localhost" },
+    body: JSON.stringify({ cwd: testAgentDir, scope: "global", name: "hostile" }),
+  });
+  assert.equal((await DELETE(text)).status, 415);
 });

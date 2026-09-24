@@ -7,9 +7,9 @@ const cssSource = await readFile(new URL("../app/settings.css", import.meta.url)
 const chatInputSource = await readFile(new URL("./ChatInput.tsx", import.meta.url), "utf8");
 const modelSelectorSource = await readFile(new URL("./ModelSelector.tsx", import.meta.url), "utf8");
 
-test("keeps same-name profiles selectable by scope and groups writable sources first", () => {
+test("keeps same-name profiles selectable by scope and exposes versioned repository profiles", () => {
   assert.match(source, /return `\$\{profile\.scope\}:\$\{profile\.name\}`/);
-  assert.match(source, /\["project", "global", "workspace", "builtin"\] as const/);
+  assert.match(source, /\["roster", "project", "global", "workspace", "builtin"\] as const/);
   assert.match(source, /profile\.scope === scope/);
 });
 
@@ -21,7 +21,8 @@ test("uses the shared enabled status treatment", () => {
 
 test("offers a persisted built-in sub-agent switch with explicit session reload", () => {
   assert.match(source, /fetch\("\/api\/subagents\/settings"/);
-  assert.match(source, /JSON\.stringify\(\{ enabled \}\)/);
+  assert.match(source, /JSON\.stringify\(\{ enabled, scope: settingsEditScope \}\)/);
+  assert.match(source, /data\.sources\?\.builtInEnabled === "local" && data\.savedScope === "roster"/);
   assert.match(source, /<ConfigSwitch[\s\S]*?checked=\{builtInEnabled\}[\s\S]*?t\("agents\.builtInTitle"\)/);
   assert.match(source, /sendAgentCommand\(sessionId, \{ type: "reload" \}\)/);
   assert.match(source, /reloadNeeded && sessionId/);
@@ -37,15 +38,16 @@ test("marks profiles shadowed by a higher-precedence source", () => {
   assert.match(cssSource, /\.agents-overridden-label \{[\s\S]*?white-space: nowrap;/);
 });
 
-test("treats global and project profiles as directly editable", () => {
-  assert.match(source, /scope === "global" \|\| scope === "project"/);
+test("treats repository, global and project profiles as directly editable", () => {
+  assert.match(source, /scope === "roster" \|\| scope === "global" \|\| scope === "project"/);
   assert.match(source, /setMode\(isWritableScope\(profile\.scope\) \? "edit" : "view"\)/);
   assert.match(source, /selected && isWritableScope\(selected\.scope\) && mode === "edit"/);
 });
 
-test("offers both writable scopes when creating a profile", () => {
+test("defaults new profiles to Git repository when available", () => {
   assert.match(source, /\{creating && \(/);
-  assert.match(source, /\["global", "project"\] as const/);
+  assert.match(source, /setTargetScope\(rosterAvailable \? "roster" : "global"\)/);
+  assert.match(source, /rosterAvailable \? \["roster" as const\] : \[\]/);
   assert.doesNotMatch(source, /beginOverride|mode === "override"|agents\.readOnly|agents\.override/);
 });
 
@@ -70,7 +72,7 @@ test("shows a Skills-style path row with the same switch in editable and readonl
 
 test("keeps the enabled switch live for built-ins whose fields stay read-only", () => {
   assert.match(source, /function isTogglableScope\(scope: SubagentScope\): boolean \{\s*return isWritableScope\(scope\) \|\| scope === "builtin";/);
-  assert.match(source, /const switchDisabled = creating\s*\? disabled\s*: !selected \|\| !isTogglableScope\(selected\.scope\) \|\| saving \|\| toggling;/);
+  assert.match(source, /const switchDisabled = creating\s*\? disabled\s*: !selected \|\| !isTogglableScope\(selected\.scope\) \|\| saving \|\| toggling\s*\|\| \(selected\.scope === "builtin" && settingsLoading\);/);
   assert.match(source, /if \(!selected \|\| !isTogglableScope\(selected\.scope\)\) return;/);
   // Everything else on a built-in stays read-only: only the switch has somewhere to write.
   assert.match(source, /setMode\(isWritableScope\(profile\.scope\) \? "edit" : "view"\)/);
@@ -79,7 +81,7 @@ test("keeps the enabled switch live for built-ins whose fields stay read-only", 
 test("persists existing profile toggles immediately without submitting unsaved fields", () => {
   assert.match(source, /const toggleEnabled = async \(enabled: boolean\)/);
   assert.match(source, /method: "PATCH"/);
-  assert.match(source, /JSON\.stringify\(\{ cwd, scope: selected\.scope, name: selected\.name, enabled, .*showOrchestrationProfiles/);
+  assert.match(source, /JSON\.stringify\(\{ cwd, scope: selected\.scope, name: selected\.name, enabled,[\s\S]*?settingsScope: settingsEditScope/);
   assert.match(source, /setDraft\(\(current\) => \(\{ \.\.\.current, enabled: saved\.enabled \}\)\)/);
   assert.doesNotMatch(source, /method: "PATCH"[\s\S]*?profile: draft/);
 });
@@ -140,7 +142,7 @@ test("duplicates any selected profile through the existing create flow", () => {
   assert.match(source, /const beginDuplicate = \(\) =>/);
   assert.match(source, /\.\.\.editableProfile\(selected\),[\s\S]*?name,[\s\S]*?displayName: t\("agents\.copyName"/);
   assert.match(source, /setMode\("create"\)/);
-  assert.match(source, /setTargetScope\(isWritableScope\(selected\.scope\) \? selected\.scope : "global"\)/);
+  assert.match(source, /setTargetScope\(isWritableScope\(selected\.scope\) \? selected\.scope : rosterAvailable \? "roster" : "global"\)/);
   assert.match(source, /onClick=\{beginDuplicate\}[^>]*>[\s\S]*?t\("agents\.duplicate"\)/);
 });
 

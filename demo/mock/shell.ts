@@ -3,7 +3,6 @@
  * terminal panel. It understands a handful of read-only commands against the
  * virtual project files and explains the demo for everything else.
  */
-import { currentDemoLocale } from "./locale";
 import { listDirectory, lookup, readFileText } from "./files";
 import { changedFiles } from "./git";
 import { HOME, PROJECT_BRANCH, PROJECT_ROOT } from "./paths";
@@ -39,11 +38,8 @@ function resolvePath(cwd: string, target: string | undefined): string {
 }
 
 function notAvailable(command: string): ShellResult {
-  const zh = currentDemoLocale() === "zh";
   return {
-    output: zh
-      ? `${command}: 这是 Pi Web 的静态演示，没有真实的 shell。\n可以试试：ls、pwd、cat <文件>、git status、git log、git branch、node -v、date、echo、help\n运行真实版本：npx @agegr/pi-web@latest`
-      : `${command}: this is a static Pi Web demo, so there is no real shell.\nTry: ls, pwd, cat <file>, git status, git log, git branch, node -v, date, echo, help\nRun the real thing: npx @agegr/pi-web@latest`,
+    output: `${command}: this is a static Pi Web demo, so there is no real shell.\nTry: ls, pwd, cat <file>, git status, git log, git branch, node -v, date, echo, help\nRun the real thing: npx @agegr/pi-web@latest`,
     exitCode: 127,
   };
 }

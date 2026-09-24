@@ -8,9 +8,17 @@ import {
   type SubagentProfile,
   type SubagentWritableScope,
 } from "@/lib/subagents";
-import { writeDisabledBuiltInSubagent } from "@/lib/subagent-settings";
+import { disabledBuiltInSubagents, getRepositorySubagentSettingsPath, getSubagentSettingsPath, readSubagentSettingsSources, writeDisabledBuiltInSubagent } from "@/lib/subagent-settings";
+import { getRepositoryRosterRoot } from "@/lib/repository-roster";
+import { hasJsonContentType, isApiRequestAllowed } from "@/lib/request-security";
 
 export const dynamic = "force-dynamic";
+
+function rejectedMutation(req: Request): NextResponse | null {
+  if (!isApiRequestAllowed(req)) return NextResponse.json({ error: "Untrusted API request" }, { status: 403 });
+  if (!hasJsonContentType(req)) return NextResponse.json({ error: "Content-Type must be application/json" }, { status: 415 });
+  return null;
+}
 
 async function validateCwd(cwd: unknown): Promise<string> {
   if (typeof cwd !== "string" || !cwd || !existsSync(cwd)) throw new Error("Valid cwd required");
@@ -19,14 +27,14 @@ async function validateCwd(cwd: unknown): Promise<string> {
 }
 
 function validateScope(scope: unknown): SubagentWritableScope {
-  if (scope !== "global" && scope !== "project") throw new Error("scope must be global or project");
+  if (scope !== "roster" && scope !== "global" && scope !== "project") throw new Error("scope must be roster, global, or project");
   return scope;
 }
 
 /** A built-in has no file to save or delete, but its switch is persisted all the same. */
 function validateToggleScope(scope: unknown): SubagentWritableScope | "builtin" {
   if (scope === "builtin") return scope;
-  if (scope !== "global" && scope !== "project") throw new Error("scope must be global, project, or builtin");
+  if (scope !== "roster" && scope !== "global" && scope !== "project") throw new Error("scope must be roster, global, project, or builtin");
   return scope;
 }
 
@@ -37,11 +45,13 @@ export async function GET(req: Request) {
     const orchestration = params.get("orchestration");
     if (orchestration !== null && orchestration !== "1") throw new Error("orchestration must be 1");
     const profiles = listSubagentProfileSources(cwd, { orchestrationEnabled: orchestration === "1" });
-    if (orchestration !== "1") return NextResponse.json({ profiles });
+    const rosterRoot = getRepositoryRosterRoot();
+    if (orchestration !== "1") return NextResponse.json({ profiles, rosterAvailable: Boolean(rosterRoot), ...(rosterRoot ? { rosterRoot } : {}) });
     const regularBuiltins = new Set(listSubagentProfileSources(cwd)
       .filter((item) => item.scope === "builtin").map((item) => item.name));
     return NextResponse.json({ profiles,
       orchestrationProfileNames: profiles.filter((item) => item.scope === "builtin" && !regularBuiltins.has(item.name)).map((item) => item.name),
+      rosterAvailable: Boolean(rosterRoot), ...(rosterRoot ? { rosterRoot } : {}),
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -50,6 +60,8 @@ export async function GET(req: Request) {
 }
 
 export async function PUT(req: Request) {
+  const rejected = rejectedMutation(req);
+  if (rejected) return rejected;
   try {
     const body = await req.json() as {
       cwd?: unknown;
@@ -69,9 +81,14 @@ export async function PUT(req: Request) {
 }
 
 export async function PATCH(req: Request) {
+  const rejected = rejectedMutation(req);
+  if (rejected) return rejected;
   try {
-    const body = await req.json() as { cwd?: unknown; scope?: unknown; name?: unknown; enabled?: unknown; orchestration?: unknown };
+    const body = await req.json() as { cwd?: unknown; scope?: unknown; name?: unknown; enabled?: unknown; orchestration?: unknown; settingsScope?: unknown };
     if (body.orchestration !== undefined && typeof body.orchestration !== "boolean") throw new Error("orchestration must be a boolean");
+    if (body.settingsScope !== undefined && body.settingsScope !== "roster" && body.settingsScope !== "local") {
+      throw new Error("settingsScope must be roster or local");
+    }
     const cwd = await validateCwd(body.cwd);
     const scope = validateToggleScope(body.scope);
     if (typeof body.name !== "string") return NextResponse.json({ error: "name required" }, { status: 400 });
@@ -82,8 +99,16 @@ export async function PATCH(req: Request) {
     );
     if (!source) return NextResponse.json({ error: "Agent profile not found" }, { status: 404 });
     if (scope === "builtin") {
-      writeDisabledBuiltInSubagent(source.name, !body.enabled);
-      return NextResponse.json({ profile: { ...source, enabled: body.enabled } });
+      const repoPath = getRepositorySubagentSettingsPath();
+      const settingsScope = body.settingsScope ?? (repoPath ? "roster" : "local");
+      if (settingsScope === "roster" && !repoPath) throw new Error("Repository roster is unavailable");
+      writeDisabledBuiltInSubagent(source.name, !body.enabled,
+        settingsScope === "roster" ? repoPath! : getSubagentSettingsPath());
+      return NextResponse.json({
+        profile: { ...source, enabled: !disabledBuiltInSubagents().has(source.name.toLowerCase()) },
+        source: readSubagentSettingsSources().disabledBuiltIns,
+        savedScope: settingsScope,
+      });
     }
     const profile: Omit<SubagentProfile, "scope" | "filePath"> = {
       name: source.name,
@@ -115,6 +140,8 @@ export async function PATCH(req: Request) {
 }
 
 export async function DELETE(req: Request) {
+  const rejected = rejectedMutation(req);
+  if (rejected) return rejected;
   try {
     const body = await req.json() as { cwd?: unknown; scope?: unknown; name?: unknown };
     const cwd = await validateCwd(body.cwd);

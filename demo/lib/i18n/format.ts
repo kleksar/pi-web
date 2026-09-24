@@ -2,12 +2,7 @@ import type { Locale, TranslationParams } from "./types";
 
 type MessagesByLocale = Record<string, Record<string, string>>;
 
-/**
- * 替换翻译消息中的简单插值占位符。
- * @param message 原始翻译消息
- * @param params 插值参数
- * @returns 完成参数替换后的消息
- */
+/** Replace named interpolation placeholders in a UI message. */
 export function interpolateMessage(message: string, params: TranslationParams = {}): string {
   return message.replace(/\{([\w.-]+)\}/g, (token, name: string) => {
     const value = params[name];
@@ -15,14 +10,7 @@ export function interpolateMessage(message: string, params: TranslationParams = 
   });
 }
 
-/**
- * 从当前语言和英语语言包中解析消息。
- * @param locale 当前语言
- * @param key 翻译 key
- * @param messages 各语言的消息字典
- * @param params 可选的插值参数
- * @returns 翻译结果，缺失时返回 key
- */
+/** Resolve a message key with an English fallback and optional parameters. */
 export function translateMessage(
   locale: Locale,
   key: string,
@@ -37,13 +25,7 @@ export function translateMessage(
   return interpolateMessage(message, params);
 }
 
-/**
- * 按当前语言格式化相对时间。
- * @param date 要格式化的时间
- * @param locale 当前语言
- * @param now 用于测试或特殊场景的当前时间
- * @returns locale-aware 的相对时间文本
- */
+/** Format a relative timestamp using the current locale. */
 export function formatRelativeTime(date: Date | string, locale: Locale, now = new Date()): string {
   const target = date instanceof Date ? date : new Date(date);
   const diffMs = target.getTime() - now.getTime();
@@ -59,13 +41,7 @@ export function formatRelativeTime(date: Date | string, locale: Locale, now = ne
   return new Intl.RelativeTimeFormat(locale, { numeric: "always" }).format(value, unit as Intl.RelativeTimeFormatUnit);
 }
 
-/**
- * 今天只显示时刻；更早的时间和会话列表一样用相对时间。
- * @param timestamp 毫秒时间戳
- * @param locale 当前语言
- * @param now 用于测试或特殊场景的当前时间
- * @returns 今天的时刻，或更早时间的相对时间文本
- */
+/** Show the clock time today or the relative age for earlier updates. */
 export function formatUpdatedTime(timestamp: number, locale: Locale, now = new Date()): string {
   const target = new Date(timestamp);
   if (Number.isNaN(target.getTime())) return "";

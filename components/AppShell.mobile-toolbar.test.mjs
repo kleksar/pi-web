@@ -77,7 +77,7 @@ test("keeps the mobile action layer open after using an expanded action", () => 
   assert.match(source, /onClick=\{\(\) => toggleTopPanel\("session"\)\}/);
 });
 
-test("keeps theme and language in settings instead of the chat toolbar", () => {
+test("keeps theme in settings instead of the chat toolbar", () => {
   assert.doesNotMatch(source, /renderThemeButton/);
   assert.doesNotMatch(source, /renderLanguageButton/);
   assert.doesNotMatch(source, /toggleTopPanel\("language"/);

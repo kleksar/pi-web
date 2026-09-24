@@ -5,7 +5,6 @@
 import type { MockEventSource } from "./event-source";
 import type { MockRequest } from "./http";
 import { error, json } from "./http";
-import { currentDemoLocale } from "./locale";
 import { HOME } from "./paths";
 import { runShellCommand } from "./shell";
 
@@ -31,9 +30,7 @@ function write(terminal: FakeTerminal, data: string): void {
 }
 
 function banner(): string {
-  return currentDemoLocale() === "zh"
-    ? "\x1b[2m这是演示用的模拟终端：可以试试 ls、cat README.md、git status、git log。\x1b[0m\r\n"
-    : "\x1b[2mThis is a simulated terminal for the demo. Try ls, cat README.md, git status or git log.\x1b[0m\r\n";
+  return "\x1b[2mThis is a simulated terminal for the demo. Try ls, cat README.md, git status or git log.\x1b[0m\r\n";
 }
 
 async function handleInput(terminal: FakeTerminal, data: string): Promise<void> {

@@ -7,8 +7,7 @@ settings without installing anything.
 
 ## What visitors see
 
-- **Sessions**: a set of tutorial conversations (English or Simplified Chinese,
-  following the UI language) that explain the layout, files and `@` mentions,
+- **Sessions**: a set of English tutorial conversations that explain the layout, files and `@` mentions,
   models and reasoning levels, branching, tool calls, skills/plugins/subagents
   and composer shortcuts. A second project shows project switching and a
   *Chat only* session.

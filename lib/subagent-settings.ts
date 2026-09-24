@@ -1,13 +1,22 @@
-import { existsSync, mkdirSync, readFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { writePrivateFileAtomicSync } from "./atomic-file";
+import { readBoundedRegularFile } from "./bounded-file";
+import { getRepositoryRosterRoot } from "./repository-roster";
 
 export interface SubagentSettings {
   builtInEnabled: boolean;
   /** Built-in profiles switched off, in the spelling the file uses. */
   disabledBuiltIns: string[];
   maxConcurrent: number;
+}
+
+export type SubagentSettingsSource = "local" | "roster" | "default";
+export interface SubagentSettingsSources {
+  builtInEnabled: SubagentSettingsSource;
+  disabledBuiltIns: SubagentSettingsSource;
+  maxConcurrent: SubagentSettingsSource;
 }
 
 type StoredSubagentSettings = Record<string, unknown> & {
@@ -19,6 +28,7 @@ type StoredSubagentSettings = Record<string, unknown> & {
 
 export const DEFAULT_SUBAGENT_MAX_CONCURRENT = 10;
 export const MAX_SUBAGENT_MAX_CONCURRENT = 32;
+const MAX_SUBAGENT_SETTINGS_BYTES = 64 * 1024;
 
 function readMaxConcurrent(value: unknown): number {
   return typeof value === "number" && Number.isInteger(value) && value >= 1 && value <= MAX_SUBAGENT_MAX_CONCURRENT
@@ -63,19 +73,72 @@ export function getSubagentSettingsPath(agentDir = getAgentDir()): string {
   return join(agentDir, "agents", "settings.json");
 }
 
+export function getRepositorySubagentSettingsPath(): string | undefined {
+  const root = getRepositoryRosterRoot();
+  return root ? join(root, "subagent-settings.json") : undefined;
+}
+
 function readStoredSettings(settingsPath: string): StoredSubagentSettings {
+  if (settingsPath === getRepositorySubagentSettingsPath()) assertRepositorySettingsFile(settingsPath);
   if (!existsSync(settingsPath)) return {};
-  const parsed: unknown = JSON.parse(readFileSync(settingsPath, "utf8"));
+  const parsed: unknown = JSON.parse(readBoundedRegularFile(settingsPath, MAX_SUBAGENT_SETTINGS_BYTES,
+    "Subagent settings").toString("utf8"));
   if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
     throw new Error("Invalid subagent settings: expected an object");
   }
   return parsed as StoredSubagentSettings;
 }
 
+function assertRepositorySettingsFile(path: string): void {
+  try {
+    const stat = lstatSync(path);
+    if (!stat.isFile() || stat.size > MAX_SUBAGENT_SETTINGS_BYTES) {
+      throw new Error("Repository subagent-settings.json must be a regular file smaller than 64 KiB");
+    }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+}
+
+function readRepositorySettings(settingsPath: string): StoredSubagentSettings {
+  // Explicit settings paths in tests and other clients have no implicit overrides.
+  if (settingsPath !== getSubagentSettingsPath()) return {};
+  const path = getRepositorySubagentSettingsPath();
+  if (!path) return {};
+  const stored = readStoredSettings(path);
+  if (stored.version !== undefined && stored.version !== 1) throw new Error("Repository settings version must be 1");
+  if (stored.builtInEnabled !== undefined && typeof stored.builtInEnabled !== "boolean") {
+    throw new Error("Repository builtInEnabled must be a boolean");
+  }
+  if (stored.maxConcurrent !== undefined && readMaxConcurrent(stored.maxConcurrent) !== stored.maxConcurrent) {
+    throw new Error(`Repository maxConcurrent must be between 1 and ${MAX_SUBAGENT_MAX_CONCURRENT}`);
+  }
+  if (stored.disabledBuiltIns !== undefined && (
+    !Array.isArray(stored.disabledBuiltIns)
+    || stored.disabledBuiltIns.some((name) => typeof name !== "string" || !name.trim() || name !== name.trim())
+    || readDisabledBuiltIns(stored.disabledBuiltIns).length !== stored.disabledBuiltIns.length
+  )) throw new Error("Repository disabledBuiltIns must be unique nonempty names");
+  return stored;
+}
+
+function settingSource(local: StoredSubagentSettings, roster: StoredSubagentSettings, key: keyof StoredSubagentSettings): SubagentSettingsSource {
+  return Object.hasOwn(local, key) ? "local" : Object.hasOwn(roster, key) ? "roster" : "default";
+}
+
+export function readSubagentSettingsSources(settingsPath = getSubagentSettingsPath()): SubagentSettingsSources {
+  const local = readStoredSettings(settingsPath);
+  const roster = readRepositorySettings(settingsPath);
+  return {
+    builtInEnabled: settingSource(local, roster, "builtInEnabled"),
+    disabledBuiltIns: settingSource(local, roster, "disabledBuiltIns"),
+    maxConcurrent: settingSource(local, roster, "maxConcurrent"),
+  };
+}
+
 export function readSubagentSettings(
   settingsPath = getSubagentSettingsPath(),
 ): SubagentSettings {
-  const stored = readStoredSettings(settingsPath);
+  const stored = { ...readRepositorySettings(settingsPath), ...readStoredSettings(settingsPath) };
   return settingsValue(
     stored.builtInEnabled === true,
     readMaxConcurrent(stored.maxConcurrent),
@@ -114,6 +177,7 @@ export function writeBuiltInSubagentsEnabled(
   enabled: boolean,
   settingsPath = getSubagentSettingsPath(),
 ): SubagentSettings {
+  if (settingsPath === getRepositorySubagentSettingsPath()) readRepositorySettings(getSubagentSettingsPath());
   const stored = readStoredSettings(settingsPath);
   mkdirSync(dirname(settingsPath), { recursive: true });
   writePrivateFileAtomicSync(settingsPath, JSON.stringify({
@@ -132,8 +196,10 @@ export function writeDisabledBuiltInSubagent(
 ): SubagentSettings {
   const trimmed = name.trim();
   if (!trimmed) throw new Error("Sub-agent name is required");
+  if (settingsPath === getRepositorySubagentSettingsPath()) readRepositorySettings(getSubagentSettingsPath());
   const stored = readStoredSettings(settingsPath);
-  const current = readDisabledBuiltIns(stored.disabledBuiltIns);
+  const current = settingsPath === getSubagentSettingsPath()
+    ? readSubagentSettings(settingsPath).disabledBuiltIns : readDisabledBuiltIns(stored.disabledBuiltIns);
   const key = trimmed.toLowerCase();
   const alreadyDisabled = current.some((entry) => entry.toLowerCase() === key);
   // Nothing to record: leave the file exactly as it is, unnormalized keys included.
@@ -157,6 +223,7 @@ export function writeSubagentMaxConcurrent(
   if (!Number.isInteger(maxConcurrent) || maxConcurrent < 1 || maxConcurrent > MAX_SUBAGENT_MAX_CONCURRENT) {
     throw new Error(`maxConcurrent must be an integer between 1 and ${MAX_SUBAGENT_MAX_CONCURRENT}`);
   }
+  if (settingsPath === getRepositorySubagentSettingsPath()) readRepositorySettings(getSubagentSettingsPath());
   const stored = readStoredSettings(settingsPath);
   mkdirSync(dirname(settingsPath), { recursive: true });
   writePrivateFileAtomicSync(settingsPath, JSON.stringify({

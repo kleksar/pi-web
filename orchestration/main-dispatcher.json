@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "config": {
+    "model": "openai-codex/gpt-6-luna",
+    "thinking": "high",
+    "fastMode": true,
+    "additionalInstructions": ""
+  }
+}

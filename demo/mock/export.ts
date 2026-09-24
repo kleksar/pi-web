@@ -3,7 +3,6 @@
  * renders a simple standalone transcript of the active branch instead.
  */
 import type { AgentMessage } from "@/lib/types";
-import { currentDemoLocale } from "./locale";
 import { buildContext, ensureSessions, getSession } from "./sessions/store";
 
 function escapeHtml(text: string): string {
@@ -25,16 +24,15 @@ function blockText(message: AgentMessage): string {
 export async function renderHistoryHtml(sessionId: string): Promise<string> {
   await ensureSessions();
   const session = getSession(sessionId);
-  const zh = currentDemoLocale() === "zh";
   if (!session) return "<p>Session not found</p>";
   const context = buildContext(session, session.leafId, { tail: 0 });
-  const title = session.name ?? (zh ? "会话" : "Session");
+  const title = session.name ?? "Session";
   const rows = context.messages.map((message) => {
-    const role = message.role === "custom" ? (zh ? "摘要" : "summary") : message.role;
+    const role = message.role === "custom" ? "summary" : message.role;
     const model = message.role === "assistant" ? ` · ${escapeHtml(message.model)}` : "";
     return `<section class="msg ${escapeHtml(message.role)}"><header>${escapeHtml(role)}${model}</header><pre>${escapeHtml(blockText(message))}</pre></section>`;
   }).join("\n");
-  return `<!doctype html><html lang="${zh ? "zh-CN" : "en"}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapeHtml(title)}</title>
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapeHtml(title)}</title>
 <style>
 :root{color-scheme:light dark;--bg:#fff;--fg:#1a1a1a;--muted:#5e6673;--line:#e0e0e0;--user:#eff6ff;--tool:#f9fafb}
 @media (prefers-color-scheme:dark){:root{--bg:#1a1a1a;--fg:#e8e8e8;--muted:#a4a4a4;--line:#454545;--user:#292929;--tool:#222}}
@@ -46,7 +44,7 @@ h1{font-size:20px;margin:0 0 4px}.meta{color:var(--muted);font-size:12px;margin-
 .msg.user{background:var(--user)}.msg.toolResult,.msg.bashExecution{background:var(--tool)}
 pre{margin:0;padding:10px 12px;white-space:pre-wrap;word-break:break-word;font:13px/1.55 ui-monospace,SFMono-Regular,Menlo,monospace}
 </style></head><body><main><h1>${escapeHtml(title)}</h1>
-<div class="meta">${escapeHtml(session.cwd)} · ${context.messages.length} ${zh ? "条消息 · Pi Web 演示导出" : "messages · Pi Web demo export"}</div>
+<div class="meta">${escapeHtml(session.cwd)} · ${context.messages.length} messages · Pi Web demo export</div>
 ${rows}</main></body></html>`;
 }
 
