@@ -962,11 +962,20 @@ export function AgentsConfig({
                       return (
                         <ConfigSidebarItem
                           key={profileKey(profile)}
+                          className="agents-profile-item"
                           active={selectedKey === profileKey(profile) && !creating}
                           onClick={() => selectProfile(profile)}
                         >
                           <ConfigStatusDot active={profile.enabled} />
-                          <ConfigSidebarText className={`is-grow${profile.enabled ? "" : " is-muted"}`}>{profile.displayName}</ConfigSidebarText>
+                          <span className="agents-profile-summary">
+                            <ConfigSidebarText className={`is-grow${profile.enabled ? "" : " is-muted"}`}>{profile.displayName}</ConfigSidebarText>
+                            <span className={`agents-profile-metadata${profile.enabled ? "" : " is-muted"}`}>
+                              {t("agents.model")}: {profile.model || "Inherited"}
+                            </span>
+                            <span className={`agents-profile-metadata${profile.enabled ? "" : " is-muted"}`}>
+                              {t("agents.thinking")}: {profile.thinking || "Inherited"}
+                            </span>
+                          </span>
                           {overridden && <span className="agents-overridden-label">{t("agents.overridden")}</span>}
                         </ConfigSidebarItem>
                       );
