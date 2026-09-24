@@ -122,6 +122,16 @@ function profileKey(profile: Pick<SubagentProfile, "scope" | "name">): string {
   return `${profile.scope}:${profile.name}`;
 }
 
+function rosterModelName(value: string | undefined, models: ModelsData["modelList"], inherited: string): string {
+  if (!value) return inherited;
+  const separator = value.indexOf("/");
+  if (separator < 0) return value;
+  const provider = value.slice(0, separator);
+  const id = value.slice(separator + 1);
+  const match = models.find((model) => model.provider === provider && model.id === id);
+  return match ? match.name || match.id : value;
+}
+
 function duplicateProfileName(name: string, profiles: readonly SubagentProfile[]): string {
   const existing = new Set(profiles.map((profile) => profile.name.toLowerCase()));
   const base = `${name}-copy`;
@@ -969,11 +979,11 @@ export function AgentsConfig({
                           <ConfigStatusDot active={profile.enabled} />
                           <span className="agents-profile-summary">
                             <ConfigSidebarText className={`is-grow${profile.enabled ? "" : " is-muted"}`}>{profile.displayName}</ConfigSidebarText>
-                            <span className={`agents-profile-metadata${profile.enabled ? "" : " is-muted"}`}>
-                              {t("agents.model")}: {profile.model || "Inherited"}
+                            <span className={`agents-profile-metadata${profile.enabled ? "" : " is-muted"}`} title={profile.model || undefined}>
+                              {rosterModelName(profile.model, modelOptions, t("agents.inherited"))}
                             </span>
                             <span className={`agents-profile-metadata${profile.enabled ? "" : " is-muted"}`}>
-                              {t("agents.thinking")}: {profile.thinking || "Inherited"}
+                              {t("agents.thinking")} · {profile.thinking || t("agents.inherited")}
                             </span>
                           </span>
                           {overridden && <span className="agents-overridden-label">{t("agents.overridden")}</span>}

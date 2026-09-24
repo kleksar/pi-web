@@ -361,6 +361,7 @@ export const enLocale: LocalePlugin = {
     "agents.thinking": "Thinking",
     "agents.maxTurns": "Max turns",
     "agents.inherit": "Parent default",
+    "agents.inherited": "Inherited",
     "agents.enable": "Enable sub-agent",
     "agents.disable": "Disable sub-agent",
     "agents.builtinPath": "Built-in profile",
