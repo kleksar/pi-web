@@ -19,6 +19,7 @@ import { abortSubagent, getRpcSession, getRpcSessionInfos } from "@/lib/rpc-mana
 import { projectTreeForResponse, toSummaryTree } from "@/lib/project-tree";
 import { computeSessionTotalActiveMs } from "@/lib/session-timing";
 import { computeSessionStats } from "@/lib/session-stats";
+import { ownSessionCost } from "@/lib/fork-cost";
 import { startServerPerf } from "@/lib/perf";
 import { computeSessionRevision } from "@/lib/session-revision";
 import type { SessionEntry } from "@/lib/types";
@@ -81,6 +82,10 @@ export async function GET(
     // the same aggregation the SDK's getSessionStats() uses. Lets the client
     // keep monotonic token/cost counters across compaction and page reloads.
     const stats = computeSessionStats(entries as unknown as SessionEntry[]);
+    const header = sm.getHeader();
+    const ownCost = ownSessionCost(entries as SessionEntry[], stats.cost, header?.parentSession, header?.id);
+    if (ownCost === null) stats.costKnown = false;
+    else stats.cost = ownCost;
     perf?.span("stats");
     // Opaque freshness token for the session view cache. Derived from the
     // disk fingerprint and the actual read source; null tells the client the
@@ -97,16 +102,15 @@ export async function GET(
     const firstUserEntry = entries.find((entry) => entry.type === "message" && entry.message.role === "user");
     const firstUserMessage = firstUserEntry?.type === "message" ? firstUserEntry.message : undefined;
 
-    const header = sm.getHeader();
     let modified = header?.timestamp ?? new Date().toISOString();
     try { modified = statSync(filePath).mtime.toISOString(); } catch { /* use header timestamp */ }
     const parentSessionId = header?.parentSession
       ? await resolveSessionIdByPath(header.parentSession)
       : undefined;
     const subagent = header
-      ? readSubagentRun(entries as never, header.id, filePath)
+      ? readSubagentRun(entries as never, header.id, filePath, header.parentSession)
       : null;
-    const toolNames = readSubagentSessionResources(entries as never)?.tools
+    const toolNames = readSubagentSessionResources(entries as never, header?.parentSession)?.tools
       ?? readSessionToolSelection(entries as never);
     const info = header ? (await attachSessionProjectInfo([{
       path: filePath,
@@ -248,12 +252,12 @@ export async function DELETE(
         if (sessionPathKey(childPath) === targetPathKey) continue;
         try {
           const lines = readFileSync(childPath, "utf8").split("\n");
-          const header = JSON.parse(lines[0]) as { type?: string; id?: string };
+          const header = JSON.parse(lines[0]) as { type?: string; id?: string; parentSession?: string };
           if (header.type !== "session" || typeof header.id !== "string") continue;
           const entries = lines.slice(1).flatMap((line) => {
             try { return [JSON.parse(line) as SessionEntry]; } catch { return []; }
           });
-          const subagent = readSubagentRun(entries, header.id, childPath);
+          const subagent = readSubagentRun(entries, header.id, childPath, header.parentSession);
           if (!subagent) continue;
           const children = childrenByParent.get(subagent.parentSessionId) ?? [];
           children.push(header.id);
@@ -306,32 +310,36 @@ export async function DELETE(
             header.parentSession &&
             sessionPathKey(header.parentSession) === targetPathKey
           ) {
-            // Rewrite header with new parentSession
+            // Only a genuine subagent changes parent. Forks copy their source's
+            // marker; reparenting that copy could turn an independent fork into
+            // a subagent when its new header happens to match the old marker.
+            let ownMetadataIndex = -1;
+            for (let index = 1; index < lines.length; index += 1) {
+              let entry: { type?: string; customType?: string; data?: unknown };
+              try {
+                entry = JSON.parse(lines[index]);
+              } catch {
+                continue;
+              }
+              if (
+                entry.type !== "custom"
+                || entry.customType !== SUBAGENT_META_TYPE
+                || typeof entry.data !== "object"
+                || entry.data === null
+                || Array.isArray(entry.data)
+                || typeof (entry.data as { parentSessionPath?: unknown }).parentSessionPath !== "string"
+                || sessionPathKey((entry.data as { parentSessionPath: string }).parentSessionPath) !== targetPathKey
+              ) continue;
+              ownMetadataIndex = index;
+              break;
+            }
+            if (ownMetadataIndex < 0) continue;
             header.parentSession = parentSessionPath;
             lines[0] = JSON.stringify(header);
             if (parentSessionPath && parentSessionId) {
-              for (let index = 1; index < lines.length; index += 1) {
-                let entry: { type?: string; customType?: string; data?: unknown };
-                try {
-                  entry = JSON.parse(lines[index]);
-                } catch {
-                  continue;
-                }
-                if (
-                  entry.type !== "custom"
-                  || entry.customType !== SUBAGENT_META_TYPE
-                  || typeof entry.data !== "object"
-                  || entry.data === null
-                  || Array.isArray(entry.data)
-                ) continue;
-                entry.data = {
-                  ...entry.data,
-                  parentSessionId,
-                  parentSessionPath,
-                };
-                lines[index] = JSON.stringify(entry);
-                break;
-              }
+              const marker = JSON.parse(lines[ownMetadataIndex]) as { data: Record<string, unknown> };
+              marker.data = { ...marker.data, parentSessionId, parentSessionPath };
+              lines[ownMetadataIndex] = JSON.stringify(marker);
             }
             writeFileSync(childPath, lines.join("\n"));
           }

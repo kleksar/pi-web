@@ -1,8 +1,9 @@
 import { statSync } from "node:fs";
 import type { SessionEntry, SessionInfo } from "./types";
 import { getSessionFamily } from "./session-family";
-import { openSessionManager } from "./session-reader";
+import { openSessionManager, readSessionHeader } from "./session-reader";
 import { computeSessionStats } from "./session-stats";
+import { sessionCostWithProvenance } from "./fork-cost";
 
 export interface SessionFamilyCost {
   rootSessionId: string;
@@ -43,16 +44,21 @@ export class SessionFileCostCache {
         return cached.cost;
       }
 
-      const cost = computeSessionStats(this.readEntries(path)).cost;
+      const entries = this.readEntries(path);
+      const header = readSessionHeader(path);
+      const { cost, sourceDependent } = sessionCostWithProvenance(
+        entries, computeSessionStats(entries).cost, header?.parentSession, header?.id,
+      );
       const after = statSync(path);
       const stillCurrent = after.isFile()
         && fingerprint === `${after.dev}:${after.ino}:${after.size}:${after.mtimeMs}:${after.ctimeMs}`;
       // An append during a read may yield an incomplete total; retry next poll.
-      if (!stillCurrent || !Number.isFinite(cost) || cost < 0) {
+      if (!stillCurrent || cost === null || !Number.isFinite(cost) || cost < 0) {
         this.cache.delete(path);
         return null;
       }
       this.cache.delete(path);
+      if (sourceDependent) return cost;
       this.cache.set(path, { fingerprint, cost });
       while (this.cache.size > MAX_CACHED_SESSION_COSTS) {
         const oldest = this.cache.keys().next().value;

@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { computeSessionFamilyCost, sessionFileCostCache } from "@/lib/session-family-cost";
+import { ownSessionCost } from "@/lib/fork-cost";
 import { listAllSessions, mergeSessionLists } from "@/lib/session-reader";
 import { getRpcSession, getRpcSessionInfos } from "@/lib/rpc-manager";
 import type { SessionInfo } from "@/lib/types";
@@ -12,7 +13,10 @@ function readSessionCost(session: SessionInfo): number | null {
   // JSONL exists. Its SDK stats include historical entries and pending writes.
   if (live?.isAlive() && (live.isRunning() || session.transient)) {
     try {
-      return live.inner.getSessionStats().cost;
+      const stats = live.inner.getSessionStats();
+      const manager = live.inner.sessionManager;
+      const header = manager.getHeader();
+      return ownSessionCost(manager.getEntries() as unknown as import("@/lib/types").SessionEntry[], stats.cost, header?.parentSession, header?.id ?? session.id);
     } catch {
       return null;
     }

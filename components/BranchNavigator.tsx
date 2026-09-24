@@ -24,6 +24,16 @@ interface Props {
   hideInlineButton?: boolean;
 }
 
+// Baseline markers are SDK tree leaves, but they are not selectable dialogue
+// branches. Keep markers with children intact so their lineage stays visible.
+function visibleNodes(nodes: readonly SessionTreeNode[]): SessionTreeNode[] {
+  return nodes.filter((node) => !(
+    node.children.length === 0
+    && node.entry.type === "custom"
+    && node.entry.customType === "pi-web:fork-cost-baseline"
+  ));
+}
+
 // Find the visible entry IDs on the path from root to activeLeafId.
 // Iterative DFS: a linear session degrades into a chain whose depth equals the
 // entry count, so a recursive search overflows the call stack. Walk with an
@@ -63,8 +73,8 @@ export function compressChain(node: SessionTreeNode): {
   let branchPreview = current.branchPreview;
   let labelEntry: SessionEntry | null = isMessageEntry(current.entry) ? current.entry : null;
   let skipped = current.compressedEntryIds?.length ?? 0;
-  while (current.children.length === 1) {
-    current = current.children[0];
+  while (visibleNodes(current.children).length === 1) {
+    current = visibleNodes(current.children)[0];
     branchPreview ??= current.branchPreview;
     if (!labelEntry && isMessageEntry(current.entry)) labelEntry = current.entry;
     skipped += 1 + (current.compressedEntryIds?.length ?? 0);
@@ -76,10 +86,12 @@ export function compressChain(node: SessionTreeNode): {
 // the very first message) the roots themselves are the branches; otherwise the
 // children of the first branching node.
 export function selectTopLevelBranches(tree: SessionTreeNode[]): SessionTreeNode[] {
-  if (tree.length > 1) return tree;
-  if (tree.length === 0) return [];
-  const first = compressChain(tree[0]).node;
-  return first.children.length > 1 ? first.children : [];
+  const roots = visibleNodes(tree);
+  if (roots.length > 1) return roots;
+  if (roots.length === 0) return [];
+  const first = compressChain(roots[0]).node;
+  const children = visibleNodes(first.children);
+  return children.length > 1 ? children : [];
 }
 
 function getLabel(entry: SessionEntry): string {
@@ -106,12 +118,14 @@ function getLabel(entry: SessionEntry): string {
 // branching but recursing over it would overflow the stack, so walk with a stack.
 export function hasSessionBranches(nodes: SessionTreeNode[]): boolean {
   // Sessions branched from the very first message have multiple root nodes.
-  if (nodes.length > 1) return true;
-  const stack: SessionTreeNode[] = [...nodes];
+  const roots = visibleNodes(nodes);
+  if (roots.length > 1) return true;
+  const stack: SessionTreeNode[] = [...roots];
   while (stack.length > 0) {
     const node = stack.pop()!;
-    if (node.children.length > 1) return true;
-    for (const child of node.children) stack.push(child);
+    const children = visibleNodes(node.children);
+    if (children.length > 1) return true;
+    for (const child of children) stack.push(child);
   }
   return false;
 }
@@ -127,6 +141,7 @@ interface TreeNodeProps {
 
 function TreeNodeView({ node, activePathIds, depth, isLast, parentLines, onSelect }: TreeNodeProps) {
   const { node: rep, skipped, branchPreview, labelEntry } = compressChain(node);
+  const children = visibleNodes(rep.children);
   const isActive = activePathIds.has(rep.entry.id);
   const isOnPath = activePathIds.has(node.entry.id) || activePathIds.has(rep.entry.id);
   const label = branchPreview?.text ?? getLabel(labelEntry);
@@ -239,13 +254,13 @@ function TreeNodeView({ node, activePathIds, depth, isLast, parentLines, onSelec
       </div>
 
       {/* Children */}
-      {rep.children.map((child, idx) => (
+      {children.map((child, idx) => (
         <TreeNodeView
           key={child.entry.id}
           node={child}
           activePathIds={activePathIds}
           depth={depth + 1}
-          isLast={idx === rep.children.length - 1}
+          isLast={idx === children.length - 1}
           parentLines={[...parentLines, !isLast]}
           onSelect={onSelect}
         />

@@ -323,7 +323,7 @@ function assertParentMayStart(
   if (parent.isChatOnly?.()) throw new Error("Chat-only Main cannot delegate without Agent tools");
   const entries = parent.inner.sessionManager.getEntries() as unknown as SessionEntry[];
   // Throws on a corrupt subagent marker. A legacy v1 specialist cannot delegate.
-  const resources = readSubagentSessionResources(entries);
+  const resources = readSubagentSessionResources(entries, parent.inner.sessionManager.getHeader?.()?.parentSession);
   if (!resources) {
     const rootPolicy = readMainSessionResources(entries);
     if (!rootPolicy) {
@@ -544,7 +544,7 @@ export function createSubagentController(
 
   function parentPolicy(parent: HostSession): PinnedOrchestration | undefined {
     const entries = parent.inner.sessionManager.getEntries() as unknown as SessionEntry[];
-    return readSubagentSessionResources(entries)?.orchestration
+    return readSubagentSessionResources(entries, parent.inner.sessionManager.getHeader?.()?.parentSession)?.orchestration
       ?? readMainSessionResources(entries)?.orchestration;
   }
 
@@ -1131,7 +1131,7 @@ export function createSubagentController(
           if (dependencyAdmission) {
             assertParentMayStart(parent, parentSessionId, profile.name, dependencies.getSession);
             assertDependencyProvidersPinned(parent.cwd, profile.name,
-              readSubagentSessionResources(parent.inner.sessionManager.getEntries() as unknown as SessionEntry[])?.orchestration);
+              readSubagentSessionResources(parent.inner.sessionManager.getEntries() as unknown as SessionEntry[], parent.inner.sessionManager.getHeader?.()?.parentSession)?.orchestration);
           }
           await inner.prompt(delegatedTask, {
             source: "rpc",
@@ -1144,7 +1144,7 @@ export function createSubagentController(
               if (dependencyAdmission) {
                 assertParentMayStart(parent, parentSessionId, profile.name, dependencies.getSession);
                 assertDependencyProvidersPinned(parent.cwd, profile.name,
-                  readSubagentSessionResources(parent.inner.sessionManager.getEntries() as unknown as SessionEntry[])?.orchestration);
+                  readSubagentSessionResources(parent.inner.sessionManager.getEntries() as unknown as SessionEntry[], parent.inner.sessionManager.getHeader?.()?.parentSession)?.orchestration);
               }
               if (dependencyAdmission && !dependencyInputsStillCurrent({
                 entries: parent.inner.sessionManager.getEntries() as unknown as SessionEntry[],
@@ -1335,13 +1335,13 @@ export function createSubagentController(
     if (wrapper.isRunning()) throw new Error("Subagent is already running");
     if (request.signal?.aborted || !parentMayContinue(parent, parentSessionId, parentGeneration)) throw new Error("Subagent resume was stopped");
     const manager = wrapper.inner.sessionManager;
-    const childResources = readSubagentSessionResources(manager.getEntries() as unknown as SessionEntry[]);
+    const childResources = readSubagentSessionResources(manager.getEntries() as unknown as SessionEntry[], manager.getHeader?.()?.parentSession);
     if (childResources?.fastMode && !isFastSupported(wrapper.inner.model)) {
       throw new Error(`Fast mode for ${existing.profile} requires an OpenAI Responses or OpenAI Codex Responses model; restore a supported model before resuming`);
     }
     const parentEntries = parent.inner.sessionManager.getEntries() as unknown as SessionEntry[];
     const orchestration = depth > 1
-      ? readSubagentSessionResources(parentEntries)?.orchestration
+      ? readSubagentSessionResources(parentEntries, parent.inner.sessionManager.getHeader?.()?.parentSession)?.orchestration
       : readMainSessionResources(parentEntries)?.orchestration;
     dependencyGraph = orchestration?.dependencies;
     if (orchestration?.contextProviders) {
@@ -1480,7 +1480,7 @@ export function createSubagentController(
         if (dependencyAdmission) {
           assertParentMayStart(parent, parentSessionId, existing.profile, dependencies.getSession);
           assertDependencyProvidersPinned(parent.cwd, existing.profile,
-            readSubagentSessionResources(parent.inner.sessionManager.getEntries() as unknown as SessionEntry[])?.orchestration);
+            readSubagentSessionResources(parent.inner.sessionManager.getEntries() as unknown as SessionEntry[], parent.inner.sessionManager.getHeader?.()?.parentSession)?.orchestration);
         }
         turns = monitorSubagentTurns(wrapper!.inner, childResources?.maxTurns);
         await wrapper!.inner.prompt(request.task + contextSuffix + (dependencyAdmission?.taskSuffix ?? ""), {
@@ -1497,7 +1497,7 @@ export function createSubagentController(
             if (dependencyAdmission) {
               assertParentMayStart(parent, parentSessionId, existing.profile, dependencies.getSession);
               assertDependencyProvidersPinned(parent.cwd, existing.profile,
-                readSubagentSessionResources(parent.inner.sessionManager.getEntries() as unknown as SessionEntry[])?.orchestration);
+                readSubagentSessionResources(parent.inner.sessionManager.getEntries() as unknown as SessionEntry[], parent.inner.sessionManager.getHeader?.()?.parentSession)?.orchestration);
             }
             if (dependencyAdmission && !dependencyInputsStillCurrent({
               entries: parent.inner.sessionManager.getEntries() as unknown as SessionEntry[],
@@ -1662,6 +1662,7 @@ export function createSubagentController(
         wrapper.inner.sessionManager.getEntries() as unknown as SessionEntry[],
         sessionId,
         wrapper.sessionFile,
+        wrapper.inner.sessionManager.getHeader?.()?.parentSession,
       );
       if (run && callerSessionId && run.parentSessionId !== callerSessionId) return null;
       if (run && wrapper.isRunning()) return { ...run, status: "running" };
@@ -1670,7 +1671,7 @@ export function createSubagentController(
     const sessionPath = await dependencies.resolveSessionPath(sessionId);
     if (!sessionPath) return null;
     const manager = SessionManager.open(sessionPath);
-    const run = readSubagentRun(manager.getEntries() as unknown as SessionEntry[], sessionId, sessionPath);
+    const run = readSubagentRun(manager.getEntries() as unknown as SessionEntry[], sessionId, sessionPath, manager.getHeader?.()?.parentSession);
     if (run && callerSessionId && run.parentSessionId !== callerSessionId) return null;
     return run && (run.status === "running" || run.status === "queued") ? { ...run, status: "interrupted" } : run;
   }

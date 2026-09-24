@@ -58,6 +58,7 @@ import {
   type PinnedExtensionTool,
 } from "./agent-resource-selection";
 import { isBuiltInSubagentsEnabled } from "./subagent-settings";
+import { markForkCostBaseline, ownSessionCost } from "./fork-cost";
 import { repositoryMainPromptFallback } from "./main-prompt";
 import { resolveShellTools } from "./powershell-settings";
 import { CHAT_ONLY_RESOURCE_LOADER_OPTIONS, contextFilesSystemPrompt } from "./chat-only";
@@ -495,7 +496,7 @@ export class AgentSessionWrapper {
   private subagentSessionResources() {
     // Test doubles may omit getEntries; real Pi sessions always expose it.
     const entries = this.inner.sessionManager.getEntries?.();
-    return entries ? readSubagentSessionResources(entries as unknown as SessionEntry[]) : null;
+    return entries ? readSubagentSessionResources(entries as unknown as SessionEntry[], this.inner.sessionManager.getHeader?.()?.parentSession) : null;
   }
 
   setActiveToolSelection(toolNames: string[]): void {
@@ -872,12 +873,15 @@ export class AgentSessionWrapper {
           }
 
           if (!existsSync(newSessionFile)) {
+            markForkCostBaseline(forkedManager);
             const header = forkedManager.getHeader();
             if (!header) throw new Error("Forked session is missing a session header");
             const content = [header, ...forkedManager.getEntries()]
               .map((forkedEntry) => JSON.stringify(forkedEntry))
               .join("\n") + "\n";
             writeFileSync(newSessionFile, content, { encoding: "utf8", flag: "wx" });
+          } else {
+            markForkCostBaseline(forkedManager);
           }
 
           const newSessionId = forkedManager.getSessionId();
@@ -903,6 +907,7 @@ export class AgentSessionWrapper {
         const sourceManager = SessionManager.open(currentSessionFile, sessionDir);
         const forkedPath = sourceManager.createBranchedSession(entryId);
         if (!forkedPath) throw new Error("Failed to create forked session");
+        markForkCostBaseline(sourceManager);
 
         const newSessionId = SessionManager.open(forkedPath, sessionDir).getSessionId();
         cacheSessionPath(newSessionId, forkedPath);
@@ -929,6 +934,7 @@ export class AgentSessionWrapper {
           const sourceManager = SessionManager.open(currentSessionFile, sessionDir);
           const clonedPath = sourceManager.createBranchedSession(leafId);
           if (!clonedPath || !existsSync(clonedPath)) throw new Error("Failed to clone current session branch");
+          markForkCostBaseline(sourceManager);
 
           const newSessionId = SessionManager.open(clonedPath, sessionDir).getSessionId();
           cacheSessionPath(newSessionId, clonedPath);
@@ -978,9 +984,14 @@ export class AgentSessionWrapper {
       }
 
       case "get_session_stats": {
+        const stats = this.inner.getSessionStats();
+        const manager = this.inner.sessionManager;
+        const ownCost = ownSessionCost(manager.getEntries() as SessionEntry[], stats.cost, manager.getHeader?.()?.parentSession, manager.getHeader?.()?.id ?? this.sessionId);
         return {
-          ...this.inner.getSessionStats(),
-          sessionName: this.inner.sessionManager.getSessionName(),
+          ...stats,
+          cost: ownCost ?? stats.cost,
+          ...(ownCost === null ? { costKnown: false } : {}),
+          sessionName: manager.getSessionName(),
         };
       }
 
@@ -1789,7 +1800,7 @@ export class AgentSessionWrapper {
     // Lightweight test doubles may omit getEntries; real SDK sessions expose it.
     const entries = this.inner.sessionManager.getEntries?.() as SessionEntry[] | undefined;
     if (!entries) return;
-    const subagent = readSubagentSessionResources(entries);
+    const subagent = readSubagentSessionResources(entries, this.inner.sessionManager.getHeader?.()?.parentSession);
     const main = subagent ? null : readMainSessionResources(entries);
     const selectedSkills = subagent?.selectedSkills ?? main?.selectedSkills;
     const selectedExtensionTools = subagent?.selectedExtensionTools ?? main?.selectedExtensionTools;
@@ -1930,7 +1941,7 @@ export async function setRpcSessionTools(
   if (!existing?.isAlive()) {
     if (!sessionFile) throw new Error("Session not found");
     const manager = SessionManager.open(sessionFile, undefined);
-    if (readSubagentSessionResources(manager.getEntries() as unknown as SessionEntry[])) {
+    if (readSubagentSessionResources(manager.getEntries() as unknown as SessionEntry[], manager.getHeader?.()?.parentSession)) {
       throw new Error("Subagent tool selection is fixed by its profile");
     }
     if (toolNames === undefined) appendClearedSessionToolSelection(manager);
@@ -1941,7 +1952,7 @@ export async function setRpcSessionTools(
   }
 
   if (existing.isRunning()) throw new Error("Cannot change tools while the session is running");
-  if (readSubagentSessionResources(existing.inner.sessionManager.getEntries() as unknown as SessionEntry[])) {
+  if (readSubagentSessionResources(existing.inner.sessionManager.getEntries() as unknown as SessionEntry[], existing.inner.sessionManager.getHeader?.()?.parentSession)) {
     throw new Error("Subagent tool selection is fixed by its profile");
   }
 
@@ -2020,7 +2031,7 @@ export function getRpcSessionInfos(options: { includeTransient?: boolean } = {})
     const firstUserMessage = messages.find((entry) => entry.message.role === "user");
     const sessionFile = manager.getSessionFile() ?? session.sessionFile;
     const persisted = Boolean(sessionFile && existsSync(sessionFile));
-    const subagent = readSubagentRun(entries as unknown as SessionEntry[], header?.id ?? session.sessionId, sessionFile ?? "");
+    const subagent = readSubagentRun(entries as unknown as SessionEntry[], header?.id ?? session.sessionId, sessionFile ?? "", header?.parentSession);
 
     // An ensure_session call creates an idle, empty runtime while the composer
     // loads commands. Do not leak it into history before a prompt is accepted.
@@ -2133,6 +2144,7 @@ export async function startRpcSession(
   const subagentResources = sessionFile
     ? readSubagentSessionResources(
         sessionManager.getEntries() as unknown as SessionEntry[],
+        sessionManager.getHeader?.()?.parentSession,
       )
     : null;
   const isMainSession = !subagentResources;

@@ -366,13 +366,14 @@ export function AppShell() {
     };
   }, [selectedSession?.id, familyRootId, familySessionKey, familyRunning, pageVisible]);
   const visibleSessionStats = sessionStats?.sessionId === selectedSession?.id ? sessionStats : null;
+  const knownAgentCost = visibleSessionStats?.costKnown === false ? null : visibleSessionStats?.cost ?? null;
   const visibleFamilyCost = familyCost?.rootSessionId === familyRootId && familyCost.familyKey === familySessionKey
     ? familyCost : null;
   const familyCostIncomplete = Boolean(visibleFamilyCost && (
-    !visibleFamilyCost.complete || (visibleSessionStats?.cost ?? 0) > visibleFamilyCost.cost + 0.000001
+    !visibleFamilyCost.complete || (knownAgentCost ?? 0) > visibleFamilyCost.cost + 0.000001
   ));
   const familyCostText = visibleFamilyCost
-    ? `${familyCostIncomplete ? "≥" : familyRunning ? "≈" : ""}${formatSessionCost(Math.max(visibleFamilyCost.cost, visibleSessionStats?.cost ?? 0))}`
+    ? `${familyCostIncomplete ? "≥" : familyRunning ? "≈" : ""}${formatSessionCost(Math.max(visibleFamilyCost.cost, knownAgentCost ?? 0))}`
     : "…";
   const [copiedSessionField, setCopiedSessionField] = useState<SessionCopyField | null>(null);
   const sessionCopyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -1677,7 +1678,7 @@ export function AppShell() {
       : value >= 1000
         ? `${(value / 1000).toFixed(0)}k`
         : String(value);
-    const costText = visibleSessionStats ? formatSessionCost(cost) : null;
+    const costText = visibleSessionStats ? knownAgentCost === null ? "…" : formatSessionCost(cost) : null;
 
     let contextColor = "var(--text-muted)";
     let desktopContextText: string | null = null;
@@ -2224,7 +2225,7 @@ export function AppShell() {
                     const ctx = contextUsage ?? sessionStats.contextUsage;
                     const formatCompact = (n: number) => n >= 1_000_000 ? `${(n / 1_000_000).toFixed(1)}M` : n >= 1000 ? `${(n / 1000).toFixed(0)}k` : String(n);
                     const extraTokenRows = [
-                       [translate("session.agentCost"), formatSessionCost(sessionStats.cost)],
+                       [translate("session.agentCost"), sessionStats.costKnown === false ? "…" : formatSessionCost(sessionStats.cost)],
                        ...(selectedSession ? [[translate("session.familyCost"), familyCostText]] : []),
                        ...(ctx?.contextWindow ? [[translate("session.context"), `${ctx.percent !== null ? `${ctx.percent.toFixed(1)}%` : "?"} / ${formatCompact(ctx.contextWindow)}`]] : []),
                        // Cache hit rate = cache reads / (input + cache writes + cache reads) — the denominator covers all input-class tokens.

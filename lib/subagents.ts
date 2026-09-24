@@ -12,6 +12,7 @@ import { pendingContextRequest } from "./subagent-context-handoff";
 import { getRepositoryRosterRoot } from "./repository-roster";
 import { isProjectMainConfigTrusted } from "./project-trust";
 import { PRESET_READ_ONLY } from "./tool-presets";
+import { sessionPathKey } from "./session-path";
 import type { SessionEntry, SubagentSessionStatus } from "./types";
 import {
   portableSelectedSkillReferences,
@@ -954,11 +955,15 @@ function subagentMetadataData(entries: readonly SessionEntry[]): ValidSubagentMe
 /** Restore the isolated prompt and tool scope used by a persisted subagent session. */
 export function readSubagentSessionResources(
   entries: readonly SessionEntry[],
+  parentSessionPath?: string,
 ): SubagentSessionResources | null {
   const marker = entries.find((entry) => entry.type === "custom" && entry.customType === SUBAGENT_META_TYPE);
   if (!marker) return null;
   const data = subagentMetadataData(entries);
   if (!data) throw new Error("Invalid subagent metadata");
+  // A fork copies its ancestor's entries, including this marker. The copied
+  // marker belongs to the source session, not to the fork's actual parent.
+  if (parentSessionPath && sessionPathKey(data.parentSessionPath) !== sessionPathKey(parentSessionPath)) return null;
   const snapshot = data.resourceSnapshot;
   if (!isRecord(snapshot) || (snapshot.version !== 1 && snapshot.version !== 2 && snapshot.version !== 3)) {
     throw new Error("Invalid or unsupported subagent resource snapshot");
@@ -1093,9 +1098,10 @@ export function selectSubagentExtensionTools(
   });
 }
 
-export function readSubagentRun(entries: readonly SessionEntry[], sessionId: string, sessionPath: string): SubagentRunInfo | null {
+export function readSubagentRun(entries: readonly SessionEntry[], sessionId: string, sessionPath: string, parentSessionPath?: string): SubagentRunInfo | null {
   const data = subagentMetadataData(entries);
   if (!data) return null;
+  if (parentSessionPath && sessionPathKey(data.parentSessionPath) !== sessionPathKey(parentSessionPath)) return null;
   if ((typeof data.contextFor === "string") !== (typeof data.contextForResultId === "string")
     || (typeof data.contextFor === "string" && (!data.contextFor || !data.contextForResultId))) {
     throw new Error("Invalid pinned context requester metadata");
