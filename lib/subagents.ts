@@ -373,6 +373,40 @@ const ORCHESTRATION_PROFILES: SubagentProfile[] = [
   }),
 ];
 
+const CORE_PROFILES = [...BUILTIN_PROFILES, ...ORCHESTRATION_PROFILES];
+const CORE_PROFILE_NAMES = new Set(CORE_PROFILES.map((profile) => profile.name.toLowerCase()));
+const ORCHESTRATION_PROFILE_NAMES = new Set(ORCHESTRATION_PROFILES.map((profile) => profile.name.toLowerCase()));
+
+export function isCoreSubagentProfile(name: string): boolean {
+  return CORE_PROFILE_NAMES.has(name.toLowerCase());
+}
+
+export function isOrchestrationSubagentProfile(name: string): boolean {
+  return ORCHESTRATION_PROFILE_NAMES.has(name.toLowerCase());
+}
+
+/** Git owns the role's behavior; the host still owns its capability boundary. */
+function assertOrchestrationProfile(profile: SubagentProfile, base: SubagentProfile): void {
+  const same = (left: unknown, right: unknown) => JSON.stringify(left ?? null) === JSON.stringify(right ?? null);
+  if (profile.name !== base.name
+    || !same(profile.tools, base.tools)
+    || !same(profile.extensionTools, base.extensionTools)
+    || profile.loadSkills !== base.loadSkills
+    || profile.loadExtensions !== base.loadExtensions
+    || !same(profile.allowedSubagents, base.allowedSubagents)
+    || profile.promptMode !== base.promptMode
+    || profile.inheritContext !== base.inheritContext
+    || profile.runInBackground !== base.runInBackground
+    || profile.maxTurns !== undefined
+    || profile.isolation !== undefined
+    || profile.persistSession !== undefined) {
+    throw new Error(`Repository agent ${base.name} cannot change host-owned tools, delegation, or execution policy`);
+  }
+  if (!profile.model || !profile.thinking || typeof profile.fastMode !== "boolean" || !profile.systemPrompt) {
+    throw new Error(`Repository agent ${base.name} requires a model, thinking level, Fast setting, and instructions`);
+  }
+}
+
 function stringValue(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }
@@ -476,6 +510,10 @@ function parseProfileFile(filePath: string, scope: SubagentScope): SubagentProfi
     if (scope === "roster" && data === null && FRONTMATTER_OPEN_RE.test(source)) {
       throw new Error(`Invalid repository agent profile frontmatter: ${filePath}`);
     }
+    if (scope === "roster" && isCoreSubagentProfile(basename(filePath, ".md"))
+      && typeof data?.pi_web_fast_mode !== "boolean") {
+      throw new Error(`Repository agent ${basename(filePath, ".md")} requires an explicit boolean Fast setting`);
+    }
     const name = stringValue(data?.name) ?? basename(filePath, ".md");
     if (!PROFILE_NAME_RE.test(name)) {
       if (scope === "roster") throw new Error(`Invalid repository agent name in ${filePath}`);
@@ -532,7 +570,18 @@ function readProfileDirectory(dir: string, scope: SubagentScope, cwd: string): S
   if (scope !== "roster" && scope !== "global" && !isProjectProfilePathAllowed(cwd, dir)) return [];
   return readdirSync(dir, { withFileTypes: true })
     .filter((entry) => entry.isFile() && entry.name.endsWith(".md"))
-    .map((entry) => parseProfileFile(join(dir, entry.name), scope))
+    .map((entry) => {
+      const profile = parseProfileFile(join(dir, entry.name), scope);
+      if (scope === "roster" && profile) {
+        const fileName = entry.name.slice(0, -3);
+        if ((isCoreSubagentProfile(fileName) || isCoreSubagentProfile(profile.name)) && profile.name !== fileName) {
+          throw new Error(`Repository agent ${fileName} must keep its file name and profile ID`);
+        }
+        const base = ORCHESTRATION_PROFILES.find((item) => item.name.toLowerCase() === fileName.toLowerCase());
+        if (base) assertOrchestrationProfile(profile, base);
+      }
+      return profile;
+    })
     .filter((profile): profile is SubagentProfile => profile !== null);
 }
 
@@ -546,15 +595,16 @@ function profileDirectories(cwd: string): Array<[string, Exclude<SubagentScope, 
   ];
 }
 
-function configuredProfiles(cwd: string): SubagentProfile[] {
+function configuredProfiles(cwd: string, orchestrationEnabled: boolean): SubagentProfile[] {
   const profiles: SubagentProfile[] = [];
   const rosterIds = new Set<string>();
   for (const [dir, scope] of profileDirectories(cwd)) {
     for (const profile of readProfileDirectory(dir, scope, cwd)) {
       const id = profile.name.toLowerCase();
+      if (scope === "roster" && !orchestrationEnabled && ORCHESTRATION_PROFILE_NAMES.has(id)) continue;
       if (scope === "roster") rosterIds.add(id);
-      // Project input cannot replace the operator's shared agent policy.
-      if ((scope === "workspace" || scope === "project") && rosterIds.has(id)) continue;
+      // A local same-name file cannot replace a versioned operator policy.
+      if (scope !== "roster" && rosterIds.has(id)) continue;
       profiles.push(profile);
     }
   }
@@ -577,22 +627,25 @@ function builtInProfiles(orchestrationEnabled = false): SubagentProfile[] {
   }));
 }
 
-/** Every configured source, including profiles shadowed by a higher-precedence scope. */
+/** The available sources; repository profiles hide same-name code defaults and local files. */
 export function listSubagentProfileSources(cwd: string, options: { orchestrationEnabled?: boolean } = {}): SubagentProfile[] {
-  const profiles = builtInProfiles(options.orchestrationEnabled);
-  profiles.push(...configuredProfiles(cwd));
+  const configured = configuredProfiles(cwd, options.orchestrationEnabled === true);
+  const rosterNames = new Set(configured.filter((profile) => profile.scope === "roster").map((profile) => profile.name.toLowerCase()));
+  const profiles = builtInProfiles(options.orchestrationEnabled)
+    .filter((profile) => !rosterNames.has(profile.name.toLowerCase()));
+  profiles.push(...configured);
   return profiles.sort((a, b) => a.displayName.localeCompare(b.displayName));
 }
 
 export function listSubagentProfiles(cwd: string, options: { orchestrationEnabled?: boolean } = {}): SubagentProfile[] {
   // A same-name file replaces the built-in outright, its own `enabled` included.
   const byName = new Map(builtInProfiles().map((profile) => [profile.name.toLowerCase(), profile]));
-  for (const profile of configuredProfiles(cwd)) byName.set(profile.name.toLowerCase(), profile);
-  // The opt-in orchestration contract is owned by the host. A project profile
-  // with the same name cannot silently replace its model, prompt or permissions.
+  for (const profile of configuredProfiles(cwd, options.orchestrationEnabled === true)) byName.set(profile.name.toLowerCase(), profile);
+  // Host defaults keep the opt-in contract when no repository checkout exists.
+  // In a checkout, only its validated repository version may replace that role.
   if (options.orchestrationEnabled) {
     for (const profile of builtInProfiles(true).filter((item) => item.name.startsWith(ORCHESTRATION_PREFIX))) {
-      byName.set(profile.name.toLowerCase(), profile);
+      if (byName.get(profile.name.toLowerCase())?.scope !== "roster") byName.set(profile.name.toLowerCase(), profile);
     }
   }
   return [...byName.values()].sort((a, b) => a.displayName.localeCompare(b.displayName));
@@ -652,11 +705,15 @@ export function saveSubagentProfile(
   profile: Omit<SubagentProfile, "scope" | "filePath">,
 ): SubagentProfile {
   const name = assertProfileName(profile.name);
-  if (scope === "project") {
+  const protectedRole = scope === "roster"
+    ? ORCHESTRATION_PROFILES.find((item) => item.name.toLowerCase() === name.toLowerCase())
+    : undefined;
+  if (protectedRole) assertOrchestrationProfile({ ...profile, scope }, protectedRole);
+  if (scope !== "roster") {
     const root = getRepositoryRosterRoot();
     if (root && readProfileDirectory(join(root, "agents"), "roster", cwd)
         .some((candidate) => candidate.name.toLowerCase() === name.toLowerCase())) {
-      throw new Error(`Project agent ${name} cannot override a repository agent; edit the Repository profile or use a different name`);
+      throw new Error(`${scope === "project" ? "Project" : "Global"} agent ${name} cannot override a repository agent; edit the Repository profile or use a different name`);
     }
   }
   const tools = [...new Set(profile.tools.filter((tool) => BUILTIN_TOOLS.has(tool)))];
@@ -711,7 +768,7 @@ export function saveSubagentProfile(
   syncFlagAlias(managed, "extensions", stored.extensions, loadExtensions);
   if (model) managed.model = model;
   if (profile.thinking) managed.thinking = profile.thinking;
-  if (fastMode) managed.pi_web_fast_mode = true;
+  if (scope === "roster" || fastMode) managed.pi_web_fast_mode = fastMode;
   if (allowedSubagents.length > 0) managed.orchestration_children = allowedSubagents;
   if (maxTurns) managed.max_turns = maxTurns;
   if (profile.color?.trim()) managed.color = profile.color.trim();
@@ -753,6 +810,9 @@ export function saveSubagentProfile(
 
 export function deleteSubagentProfile(cwd: string, scope: SubagentWritableScope, name: string): void {
   const safeName = assertProfileName(name);
+  if (scope === "roster" && isCoreSubagentProfile(safeName)) {
+    throw new Error(`Core agent ${safeName} cannot be deleted; disable it instead`);
+  }
   const filePath = join(assertWritableProfileDirectory(cwd, scope), `${safeName}.md`);
   if (scope === "roster") assertRegularRosterProfile(filePath);
   if (existsSync(filePath)) unlinkSync(filePath);

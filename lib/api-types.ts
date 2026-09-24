@@ -4,6 +4,7 @@ import type { SubagentProfile } from "./subagents";
 export interface SubagentProfilesResponse {
   profiles: SubagentProfile[];
   orchestrationProfileNames?: string[];
+  coreProfileNames?: string[];
   rosterAvailable?: boolean;
   rosterRoot?: string;
 }

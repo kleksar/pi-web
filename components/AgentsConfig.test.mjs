@@ -109,14 +109,21 @@ test("uses the same form controls for editable and readonly profiles", () => {
   assert.match(source, /<input aria-label=\{t\("agents\.displayName"\)\}[\s\S]*?disabled=\{disabled\}/);
   assert.match(source, /<input aria-label=\{t\("agents\.description"\)\}[\s\S]*?disabled=\{disabled\}/);
   assert.match(source, /<textarea className="agents-system-prompt"[\s\S]*?disabled=\{disabled\}/);
-  assert.match(source, /<Toggle key=\{tool\}[\s\S]*?disabled=\{disabled\}/);
+  assert.match(source, /<Toggle key=\{tool\}[\s\S]*?disabled=\{protectedFieldsDisabled\}/);
   assert.match(source, /<select aria-label=\{t\("agents\.thinking"\)\}[\s\S]*?disabled=\{disabled\}/);
-  assert.match(source, /<input aria-label=\{t\("agents\.maxTurns"\)[\s\S]*?disabled=\{disabled\}/);
-  assert.match(source, /<Toggle label=\{t\("agents\.inheritContext"\)\} disabled=\{disabled\}/);
-  assert.match(source, /<Toggle label=\{t\("agents\.background"\)\} disabled=\{disabled\}/);
-  assert.match(source, /<Toggle label=\{t\("agents\.loadSkills"\)\} disabled=\{disabled\}/);
-  assert.match(source, /<Toggle label=\{t\("agents\.loadExtensions"\)\} disabled=\{disabled\}/);
+  assert.match(source, /<input aria-label=\{t\("agents\.maxTurns"\)[\s\S]*?disabled=\{protectedFieldsDisabled\}/);
+  assert.match(source, /<Toggle label=\{t\("agents\.inheritContext"\)\} disabled=\{protectedFieldsDisabled\}/);
+  assert.match(source, /<Toggle label=\{t\("agents\.background"\)\} disabled=\{protectedFieldsDisabled\}/);
+  assert.match(source, /<Toggle label=\{t\("agents\.loadSkills"\)\} disabled=\{protectedFieldsDisabled\}/);
+  assert.match(source, /<Toggle label=\{t\("agents\.loadExtensions"\)\} disabled=\{protectedFieldsDisabled\}/);
   assert.doesNotMatch(source, /ReadonlyValue|readonlyPromptStyle|agents-readonly/);
+});
+
+test("allows Fast edits for Git-owned roles while keeping host tool permissions fixed", () => {
+  assert.match(source, /\[showOrchestrationProfiles, setShowOrchestrationProfiles\] = useState\(true\)/);
+  assert.match(source, /selected\?\.scope === "roster" && orchestrationProfileNames\.has\(selected\.name\.toLowerCase\(\)\)/);
+  assert.match(source, /<Toggle label=\{t\("agents\.fastMode"\)\} disabled=\{disabled\} checked=\{draft\.fastMode\}/);
+  assert.match(source, /!coreProfileNames\.has\(selected\.name\.toLowerCase\(\)\)/);
 });
 
 test("shows disabled controls with a gray background", () => {
