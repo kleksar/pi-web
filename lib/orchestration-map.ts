@@ -1,9 +1,9 @@
 import type { SubagentOrchestration, SubagentProfile } from "./subagents";
+import { MAP_NODE_HEIGHT, MAP_NODE_WIDTH } from "./orchestration-map-size.mjs";
+export { MAP_NODE_HEIGHT, MAP_NODE_WIDTH } from "./orchestration-map-size.mjs";
 
 /** Impossible for a persisted agent name (which matches /^[a-zA-Z0-9_-]+$/). */
 export const MAIN_NODE_ID = "\u0000main";
-export const MAP_NODE_WIDTH = 216;
-export const MAP_NODE_HEIGHT = 100;
 export const MAP_MIN_SCALE = 0.22;
 export const MAP_READABLE_SCALE = 0.75;
 
@@ -42,6 +42,60 @@ export interface OrchestrationGraph {
   unreachableAgentIds: string[];
 }
 
+/** Geometry may change when a new route appears even if every card stays put. */
+export function orchestrationLayoutFingerprint(storageKey: string, nodes: readonly MapNode[], edges: readonly MapEdge[]): string {
+  return JSON.stringify([storageKey,
+    nodes.map((node) => [node.id, node.x, node.y]),
+    edges.map((edge) => [edge.kind, edge.ownerId, edge.source, edge.target])]);
+}
+
+/** The overview is a navigation surface. The full graph remains available for search and editing. */
+export function navigationOrchestrationGraph(graph: OrchestrationGraph, directChildren: readonly string[], limit = 12):
+  OrchestrationGraph & { hiddenDirectCount: number } {
+  const children = new Set(directChildren.map(key));
+  const direct = graph.nodes.filter((node) => children.has(key(node.id)) && node.id !== MAIN_NODE_ID);
+  // Keep coordinators visible first; specialists still appear when space permits.
+  const shown = [...direct.filter((node) => node.kind === "orchestrator"),
+    ...direct.filter((node) => node.kind !== "orchestrator")].slice(0, limit);
+  const visible = new Set([MAIN_NODE_ID, ...shown.map((node) => node.id)]);
+  const nodes = graph.nodes.filter((node) => visible.has(node.id));
+  const edges = graph.edges.filter((edge) => edge.kind === "delegation" && edge.source === MAIN_NODE_ID && visible.has(edge.target));
+  return { ...graph, nodes: autoLayoutGraph(nodes, edges, null), edges, hiddenDirectCount: direct.length - shown.length };
+}
+
+/** Keep large owner branches usable without drawing hundreds of cards at once. */
+export function windowOrchestrationBranch(graph: OrchestrationGraph, ownerId: string,
+  layer: OrchestrationMapEdgeKind, limit = 24, focus: { edge?: MapEdge; nodeId?: string } = {}):
+  OrchestrationGraph & { hiddenDirectCount: number } {
+  const activeEdges = filterOrchestrationEdges(graph.edges, layer);
+  const layout = autoLayoutGraph(graph.nodes, activeEdges, ownerId);
+  const children = layout.filter((node) => node.id !== ownerId)
+    .sort((a, b) => a.x - b.x || a.y - b.y || a.id.localeCompare(b.id));
+  const available = new Set(children.map((node) => node.id));
+  const shown = new Set([ownerId]);
+  if (focus.edge?.ownerId === ownerId && focus.edge.kind === layer) {
+    for (const id of [focus.edge.source, focus.edge.target]) {
+      if (available.has(id) && shown.size - 1 < limit) shown.add(id);
+    }
+  }
+  if (focus.nodeId && available.has(focus.nodeId) && shown.size - 1 < limit) shown.add(focus.nodeId);
+  // Reserve the first slots for real relations; a late pair must not leave the
+  // first page looking unrelated while this layer actually contains links.
+  if (layer !== "delegation") for (const edge of activeEdges) {
+    if (!available.has(edge.source) || !available.has(edge.target)) continue;
+    const additional = [edge.source, edge.target].filter((id) => !shown.has(id));
+    if (shown.size - 1 + additional.length > limit) continue;
+    additional.forEach((id) => shown.add(id));
+  }
+  for (const child of children) {
+    if (shown.size - 1 >= limit) break;
+    shown.add(child.id);
+  }
+  return { ...graph, nodes: layout.filter((node) => shown.has(node.id)),
+    edges: graph.edges.filter((edge) => shown.has(edge.source) && shown.has(edge.target)),
+    hiddenDirectCount: children.length - (shown.size - 1) };
+}
+
 /** Display-only filter: keep graph layout and owner policy unchanged. */
 export function filterOrchestrationEdges(edges: readonly MapEdge[], layer: OrchestrationMapLayer): MapEdge[] {
   return layer === "all" ? [...edges] : edges.filter((edge) => edge.kind === layer);
@@ -49,13 +103,13 @@ export function filterOrchestrationEdges(edges: readonly MapEdge[], layer: Orche
 
 /** Explicit overview action: fit every node, even when labels become too small to read. */
 export function fitOrchestrationMap(
-  nodes: readonly MapNode[], width: number, height: number, rootId: string,
+  nodes: readonly MapNode[], width: number, height: number, rootId: string, routePoints: readonly { x: number; y: number }[] = [],
 ): { x: number; y: number; scale: number } | null {
   if (!nodes.length) return null;
-  const left = Math.min(...nodes.map((node) => node.x));
-  const top = Math.min(...nodes.map((node) => node.y));
-  const right = Math.max(...nodes.map((node) => node.x + MAP_NODE_WIDTH));
-  const bottom = Math.max(...nodes.map((node) => node.y + MAP_NODE_HEIGHT));
+  const left = Math.min(...nodes.map((node) => node.x), ...routePoints.map((point) => point.x));
+  const top = Math.min(...nodes.map((node) => node.y), ...routePoints.map((point) => point.y));
+  const right = Math.max(...nodes.map((node) => node.x + MAP_NODE_WIDTH), ...routePoints.map((point) => point.x));
+  const bottom = Math.max(...nodes.map((node) => node.y + MAP_NODE_HEIGHT), ...routePoints.map((point) => point.y));
   const scale = Math.min(1, Math.max(1, width - 72) / (right - left), Math.max(1, height - 72) / (bottom - top));
   const root = nodes.find((node) => node.id === rootId) ?? nodes[0];
   const position = (size: number, start: number, span: number, rootPosition: number) =>
@@ -66,14 +120,14 @@ export function fitOrchestrationMap(
 
 /** Open a large branch at a legible scale. Fit all remains a separate, explicit action. */
 export function readableOrchestrationMap(
-  nodes: readonly MapNode[], width: number, height: number, rootId: string,
+  nodes: readonly MapNode[], width: number, height: number, rootId: string, routePoints: readonly { x: number; y: number }[] = [],
 ): { x: number; y: number; scale: number } | null {
-  const fitted = fitOrchestrationMap(nodes, width, height, rootId);
+  const fitted = fitOrchestrationMap(nodes, width, height, rootId, routePoints);
   if (!fitted || fitted.scale >= MAP_READABLE_SCALE) return fitted;
-  const left = Math.min(...nodes.map((node) => node.x));
-  const right = Math.max(...nodes.map((node) => node.x + MAP_NODE_WIDTH));
-  const top = Math.min(...nodes.map((node) => node.y));
-  const bottom = Math.max(...nodes.map((node) => node.y + MAP_NODE_HEIGHT));
+  const left = Math.min(...nodes.map((node) => node.x), ...routePoints.map((point) => point.x));
+  const right = Math.max(...nodes.map((node) => node.x + MAP_NODE_WIDTH), ...routePoints.map((point) => point.x));
+  const top = Math.min(...nodes.map((node) => node.y), ...routePoints.map((point) => point.y));
+  const bottom = Math.max(...nodes.map((node) => node.y + MAP_NODE_HEIGHT), ...routePoints.map((point) => point.y));
   const root = nodes.find((node) => node.id === rootId) ?? nodes[0];
   const position = (size: number, start: number, span: number, rootPosition: number) =>
     span * MAP_READABLE_SCALE > size - 72
@@ -204,13 +258,15 @@ function buildEdges(
 }
 
 /** A flat overview or one owner's direct children. No source file is modified. */
-export function buildOrchestrationGraph({ profiles: sources, main, ownerId, draft, layer, query = "", connectedOnly = false }: {
+export function buildOrchestrationGraph({ profiles: sources, main, ownerId, draft, layer, query = "", exactQuery = false, connectedOnly = false }: {
   profiles: readonly MapProfile[];
   main: SubagentOrchestration | null;
   ownerId: OrchestrationMapOwner | null;
   draft?: SubagentOrchestration | null;
   layer: OrchestrationMapLayer;
   query?: string;
+  /** Programmatic navigation to one profile; typed search remains substring-based. */
+  exactQuery?: boolean;
   /** Hide profiles outside Main's delegation tree in an unsearched overview. */
   connectedOnly?: boolean;
 }): OrchestrationGraph {
@@ -261,9 +317,9 @@ export function buildOrchestrationGraph({ profiles: sources, main, ownerId, draf
       y: 0,
     } : { id, label: id, kind: "missing", enabled: false, x: 0, y: 0 };
   });
-  const matches = needle ? nodes.filter((node) =>
-    node.id.toLowerCase().includes(needle) || node.label.toLowerCase().includes(needle)
-  ) : nodes;
+  const matches = needle ? nodes.filter((node) => exactQuery
+    ? node.id.toLowerCase() === needle
+    : node.id.toLowerCase().includes(needle) || node.label.toLowerCase().includes(needle)) : nodes;
   const matchedIds = new Set(matches.map((node) => node.id));
   const visibleIds = new Set(matchedIds);
   if (needle) {
@@ -314,6 +370,7 @@ export function buildOrchestrationGraph({ profiles: sources, main, ownerId, draf
 
 /** Cycle tolerant: an overview may contain reciprocal delegations even though runtime has a depth limit. */
 export function autoLayoutGraph(nodes: readonly MapNode[], edges: readonly MapEdge[], ownerId: string | null): MapNode[] {
+  if (ownerId !== null) return layoutOwnerBranch(nodes, edges, ownerId);
   const ids = new Set(nodes.map((node) => node.id));
   const depth = new Map<string, number>();
   if (ids.has(MAIN_NODE_ID)) depth.set(MAIN_NODE_ID, 0);
@@ -397,6 +454,64 @@ export function autoLayoutGraph(nodes: readonly MapNode[], edges: readonly MapEd
     const row = rows.get(column) ?? 0;
     rows.set(column, row + 1);
     return { ...node, x: 44 + column * 290, y: 40 + row * 136 };
+  });
+}
+
+/** Strict prerequisites determine workflow stages. Delegation and on-demand providers do not. */
+function layoutOwnerBranch(nodes: readonly MapNode[], edges: readonly MapEdge[], ownerId: string): MapNode[] {
+  const children = nodes.filter((node) => node.id !== ownerId);
+  const prerequisites = edges.filter((edge) => edge.kind === "dependencies" && edge.source !== ownerId && edge.target !== ownerId);
+  const ranks = new Map(children.map((node) => [node.id, 1]));
+  const indegree = new Map(children.map((node) => [node.id, 0]));
+  const outgoing = new Map<string, string[]>();
+  for (const edge of prerequisites) {
+    if (!ranks.has(edge.source) || !ranks.has(edge.target)) continue;
+    indegree.set(edge.target, (indegree.get(edge.target) ?? 0) + 1);
+    const targets = outgoing.get(edge.source) ?? [];
+    targets.push(edge.target);
+    outgoing.set(edge.source, targets);
+  }
+  const queue = children.filter((node) => indegree.get(node.id) === 0).map((node) => node.id);
+  for (let index = 0; index < queue.length; index++) {
+    const source = queue[index];
+    for (const target of outgoing.get(source) ?? []) {
+      ranks.set(target, Math.max(ranks.get(target) ?? 1, (ranks.get(source) ?? 1) + 1));
+      indegree.set(target, (indegree.get(target) ?? 1) - 1);
+      if (indegree.get(target) === 0) queue.push(target);
+    }
+  }
+  // Imported/legacy cyclic policies still need a stable, finite layout.
+  const byStage = new Map<number, MapNode[]>();
+  for (const node of children) {
+    const stage = ranks.get(node.id) ?? 1;
+    const members = byStage.get(stage) ?? [];
+    members.push(node);
+    byStage.set(stage, members);
+  }
+  const positions = new Map<string, number>();
+  for (const stage of [...byStage.keys()].sort((a, b) => a - b)) {
+    const members = byStage.get(stage)!;
+    // Place consumers next to the actual producers, without packing stages back at the top.
+    const ordered = members.map((node, index) => ({ node, index,
+      barycentre: (() => {
+        const parents = prerequisites.filter((edge) => edge.target === node.id && positions.has(edge.source));
+        return parents.length ? parents.reduce((sum, edge) => sum + positions.get(edge.source)!, 0) / parents.length : Infinity;
+      })(),
+    })).sort((a, b) => a.barycentre - b.barycentre || a.index - b.index);
+    let previousY = -Infinity;
+    ordered.forEach(({ node, barycentre }, row) => {
+      const preferredY = Number.isFinite(barycentre) ? barycentre : 40 + row * 136;
+      const y = Math.max(40, preferredY, previousY + 136);
+      positions.set(node.id, y);
+      previousY = y;
+    });
+  }
+  const stageGap = 240; // Each gap is a free routing corridor, including the root-to-child bus.
+  return nodes.map((node) => {
+    if (node.id === ownerId) return { ...node, x: 44, y: 40 };
+    const stage = ranks.get(node.id) ?? 1;
+    return { ...node, x: 44 + stage * (MAP_NODE_WIDTH + stageGap),
+      y: positions.get(node.id) ?? 40 };
   });
 }
 

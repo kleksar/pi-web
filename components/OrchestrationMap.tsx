@@ -6,8 +6,7 @@ import type { SubagentOrchestration } from "@/lib/subagents";
 import {
   MAIN_NODE_ID,
   MAP_MIN_SCALE,
-  MAP_NODE_HEIGHT,
-  MAP_NODE_WIDTH,
+  autoLayoutGraph,
   buildOrchestrationGraph,
   centerOrchestrationMapNode,
   changeChildLink,
@@ -19,12 +18,17 @@ import {
   fitOrchestrationMap,
   mapOwnersForAgent,
   mapPathFromMain,
+  mainPolicyForMap,
+  navigationOrchestrationGraph,
+  orchestrationLayoutFingerprint,
   orchestrationForOwner,
   readableOrchestrationMap,
   type MapEdge,
   type MapProfile,
-  type OrchestrationMapLayer,
+  type OrchestrationMapEdgeKind,
+  windowOrchestrationBranch,
 } from "@/lib/orchestration-map";
+import { applyManualMapPositions, canPlaceMapNode, routeOrchestrationEdges } from "@/lib/orchestration-map-routing";
 import "./OrchestrationMap.css";
 
 interface MainMapNode {
@@ -73,9 +77,9 @@ const ERROR_KEYS: Record<string, string> = {
   "This link creates a dependency cycle.": "map.errorCycle",
 };
 
-function layoutStorageKey(cwd: string, ownerId: string | null): string {
-  // v2 ignores positions from the old alphabetical grid; Arrange still resets manual moves.
-  return `pi-web:orchestration-map-layout:v2:${cwd}:${ownerId ?? "overview"}`;
+function layoutStorageKey(cwd: string, ownerId: string | null, layer: OrchestrationMapEdgeKind): string {
+  // v3 ignores coordinates saved for the former column layout.
+  return `pi-web:orchestration-map-layout:v3:${cwd}:${ownerId ?? "overview"}:${layer}`;
 }
 
 function readLayout(storageKey: string): Record<string, Point> {
@@ -95,19 +99,6 @@ function edgeId(edge: MapEdge): string {
   return [edge.kind, edge.ownerId, edge.source, edge.target].join("\u0000");
 }
 
-function edgePath(source: Point, target: Point, offset = 0): string {
-  const x1 = source.x + MAP_NODE_WIDTH;
-  const y1 = source.y + MAP_NODE_HEIGHT / 2;
-  const x2 = target.x;
-  const y2 = target.y + MAP_NODE_HEIGHT / 2;
-  if (x2 <= x1 + 36) {
-    const bendY = Math.max(y1, y2) + 96 + offset;
-    return `M ${x1} ${y1} C ${x1 + 65} ${bendY}, ${x2 - 65} ${bendY}, ${x2} ${y2}`;
-  }
-  const half = Math.max(60, (x2 - x1) / 2);
-  return `M ${x1} ${y1} C ${x1 + half} ${y1 + offset}, ${x2 - half} ${y2 + offset}, ${x2} ${y2}`;
-}
-
 function scaledViewport(previous: Viewport, factor: number, width: number, height: number): Viewport {
   // Fit all may be smaller than the interactive minimum; zoom in gradually from that overview.
   const scale = Math.max(Math.min(MAP_MIN_SCALE, previous.scale), Math.min(MAX_SCALE, previous.scale * factor));
@@ -121,8 +112,11 @@ export function OrchestrationMap({
   onSelectOwner, onOpenProfile, onRestrictMain, onToggleChild, onToggleDependency, onToggleContextProvider,
 }: OrchestrationMapProps) {
   const { t } = useI18n();
-  const [layer, setLayer] = useState<OrchestrationMapLayer>("delegation");
+  const [layer, setLayer] = useState<OrchestrationMapEdgeKind>("delegation");
+  const [inspectorOpen, setInspectorOpen] = useState(true);
+  const [visibleLimit, setVisibleLimit] = useState(24);
   const [query, setQuery] = useState("");
+  const [exactQuery, setExactQuery] = useState(false);
   const [selectedNode, setSelectedNode] = useState<string>(focusNodeId ?? MAIN_NODE_ID);
   const [userSelectedNode, setUserSelectedNode] = useState(false);
   const [selectedEdge, setSelectedEdge] = useState<string | null>(null);
@@ -134,20 +128,36 @@ export function OrchestrationMap({
   const [viewport, setViewport] = useState<Viewport>(DEFAULT_VIEW);
   const stage = useRef<HTMLDivElement>(null);
   const drag = useRef<DragState | null>(null);
+  const pendingFocusNode = useRef<string | null>(null);
   const lastLayoutFingerprint = useRef("");
   const lastStorageKey = useRef<string | null>(null);
   const profiles = useMemo(() => effectiveMapProfiles(sources), [sources]);
   const policy = ownerId === null ? null : orchestrationForOwner(ownerId, profiles, main.orchestration ?? null, ownerId, draftOrchestration);
-  const graph = useMemo(() => buildOrchestrationGraph({ profiles, main: main.orchestration ?? null, ownerId, draft: draftOrchestration,
-    layer: ownerId === null ? "delegation" : "all", query, connectedOnly: true }),
-    [profiles, main.orchestration, ownerId, draftOrchestration, query]);
+  const fullGraph = useMemo(() => buildOrchestrationGraph({ profiles, main: main.orchestration ?? null, ownerId, draft: draftOrchestration,
+    layer: ownerId === null ? "delegation" : "all", query, exactQuery, connectedOnly: true }),
+    [profiles, main.orchestration, ownerId, draftOrchestration, query, exactQuery]);
+  const visibleLayer: OrchestrationMapEdgeKind = ownerId === null ? "delegation" : layer;
+  const navigationGraph = useMemo(() => ownerId === null && !query.trim()
+    ? navigationOrchestrationGraph(fullGraph, mainPolicyForMap(profiles, main.orchestration ?? null).allowedChildren)
+    : null, [ownerId, query, fullGraph, profiles, main.orchestration]);
+  const pinnedEdge = fullGraph.edges.find((edge) => edgeId(edge) === selectedEdge);
+  const branchWindow = useMemo(() => ownerId !== null && !query.trim()
+    ? windowOrchestrationBranch(fullGraph, ownerId, visibleLayer, visibleLimit, { edge: pinnedEdge, nodeId: selectedNode })
+    : null, [ownerId, query, fullGraph, visibleLayer, visibleLimit, pinnedEdge, selectedNode]);
+  const graph = navigationGraph ?? branchWindow ?? fullGraph;
+  const hiddenDirectCount = (navigationGraph ?? branchWindow)?.hiddenDirectCount ?? 0;
   // Requirements and on-demand data belong to a particular coordinator. A roster-wide
   // overlay combines unrelated policies and implies a global dependency that does not exist.
-  const visibleLayer = ownerId === null ? "delegation" : layer;
   const visibleEdges = useMemo(() => filterOrchestrationEdges(graph.edges, visibleLayer), [graph.edges, visibleLayer]);
-  const storageKey = layoutStorageKey(cwd, ownerId);
-  const layoutFingerprint = `${storageKey}:${graph.nodes.map((node) => node.id).join("\u0000")}`;
-  const nodes = useMemo(() => graph.nodes.map((node) => ({ ...node, ...(positions[node.id] ?? {}) })), [graph.nodes, positions]);
+  const layoutNodes = useMemo(() => branchWindow ? graph.nodes : autoLayoutGraph(graph.nodes, visibleEdges, ownerId),
+    [branchWindow, graph.nodes, visibleEdges, ownerId]);
+  const storageKey = layoutStorageKey(cwd, ownerId, visibleLayer);
+  const layoutFingerprint = orchestrationLayoutFingerprint(storageKey, layoutNodes, visibleEdges);
+  const nodes = useMemo(() => applyManualMapPositions(layoutNodes, positions, visibleEdges), [layoutNodes, positions, visibleEdges]);
+  const routes = useMemo(() => routeOrchestrationEdges(nodes, visibleEdges), [nodes, visibleEdges]);
+  const workflowStages = ownerId !== null && visibleLayer === "dependencies" && visibleEdges.length > 0
+    ? [...new Set(layoutNodes.filter((node) => node.id !== ownerId).map((node) => node.x))].sort((a, b) => a - b)
+    : [];
   const nodeById = useMemo(() => new Map(nodes.map((node) => [node.id, node])), [nodes]);
   const path = useMemo(() => ownerId === null ? [] : mapPathFromMain(ownerId, profiles, main.orchestration ?? null), [ownerId, profiles, main.orchestration]);
   const selected = selectedNode === MAIN_NODE_ID ? null : findMapProfile(profiles, selectedNode);
@@ -179,32 +189,21 @@ export function OrchestrationMap({
   const relatedOverviewEdges = ownerId === null
     ? visibleEdges.filter((edge) => edge.source === selectedNode || edge.target === selectedNode)
     : [];
-  const overlapOffsets = useMemo(() => {
-    const groups = new Map<string, MapEdge[]>();
-    for (const edge of visibleEdges) {
-      const pair = `${edge.source}\u0000${edge.target}`;
-      const group = groups.get(pair) ?? [];
-      group.push(edge);
-      groups.set(pair, group);
-    }
-    const offsets = new Map<string, number>();
-    for (const group of groups.values()) {
-      group.forEach((edge, index) => offsets.set(edgeId(edge), Math.max(-120, Math.min(120, (index - (group.length - 1) / 2) * 40))));
-    }
-    return offsets;
-  }, [visibleEdges]);
   const canChange = canEdit && ownerId !== null && policy !== null && !mainNeedsRestriction;
   const candidates = profiles.filter((profile) => profile.enabled && !profile.configurationError
     && profile.name.toLowerCase() !== ownerId?.toLowerCase()
     && !policy?.allowedChildren.some((name) => name.toLowerCase() === profile.name.toLowerCase()));
 
-  const fit = useCallback((currentNodes = graph.nodes, readable = false) => {
+  useEffect(() => { setVisibleLimit(24); }, [ownerId]);
+
+  const fit = useCallback((currentNodes = layoutNodes, readable = false) => {
     const element = stage.current;
     if (!element || !currentNodes.length) return;
     const { width, height } = element.getBoundingClientRect();
-    const next = (readable ? readableOrchestrationMap : fitOrchestrationMap)(currentNodes, width, height, ownerId ?? MAIN_NODE_ID);
+    const routePoints = routeOrchestrationEdges(currentNodes, visibleEdges).flatMap((route) => route.points);
+    const next = (readable ? readableOrchestrationMap : fitOrchestrationMap)(currentNodes, width, height, ownerId ?? MAIN_NODE_ID, routePoints);
     if (next) setViewport(next);
-  }, [graph.nodes, ownerId]);
+  }, [layoutNodes, visibleEdges, ownerId]);
 
   useEffect(() => {
     if (lastLayoutFingerprint.current === layoutFingerprint) return;
@@ -213,16 +212,16 @@ export function OrchestrationMap({
     lastStorageKey.current = storageKey;
     const restored = storageChanged ? readLayout(storageKey) : positions;
     if (storageChanged) setPositions(restored);
-    const currentNodes = graph.nodes.map((node) => ({ ...node, ...((storageChanged ? restored : positions)[node.id] ?? {}) }));
+    const currentNodes = applyManualMapPositions(layoutNodes, restored, visibleEdges);
     const focusNode = focusNodeId ? currentNodes.find((node) => node.id.toLowerCase() === focusNodeId.toLowerCase()) : undefined;
     const rectangle = stage.current?.getBoundingClientRect();
     if (focusNode && rectangle) {
       setViewport(centerOrchestrationMapNode(focusNode, rectangle.width, rectangle.height, 0.9));
     } else fit(currentNodes, true);
-    setSelectedEdge(null);
+    setSelectedEdge((current) => current && visibleEdges.some((edge) => edgeId(edge) === current) ? current : null);
     setConnectionSource(null);
     setError(null);
-  }, [storageKey, layoutFingerprint, fit, graph.nodes, positions, focusNodeId]);
+  }, [storageKey, layoutFingerprint, fit, layoutNodes, positions, focusNodeId, visibleEdges]);
 
   useEffect(() => {
     if (focusNodeId) {
@@ -230,6 +229,19 @@ export function OrchestrationMap({
       setUserSelectedNode(false);
     }
   }, [focusNodeId]);
+
+  useEffect(() => {
+    const id = pendingFocusNode.current;
+    const element = stage.current;
+    if (!id || !element) return;
+    // Link navigation may change the layer and restore layer-specific manual positions.
+    const current = applyManualMapPositions(layoutNodes, readLayout(storageKey), visibleEdges);
+    const node = current.find((candidate) => candidate.id === id);
+    if (!node) return;
+    pendingFocusNode.current = null;
+    const { width, height } = element.getBoundingClientRect();
+    setViewport(centerOrchestrationMapNode(node, width, height, 0.9));
+  }, [layoutNodes, storageKey, visibleEdges]);
 
   useEffect(() => {
     if (!userSelectedNode && focusNodeId && nodeById.has(focusNodeId) && selectedNode !== focusNodeId) {
@@ -296,7 +308,8 @@ export function OrchestrationMap({
   const moveNode = (id: string, dx: number, dy: number) => {
     const node = nodeById.get(id);
     if (!node) return;
-    savePositions({ ...positions, [id]: { x: node.x + dx, y: node.y + dy } });
+    const next = { x: node.x + dx, y: node.y + dy };
+    if (canPlaceMapNode(id, next, nodes, visibleEdges)) savePositions({ ...positions, [id]: next });
   };
 
   const moveKey = (event: KeyboardEvent<HTMLButtonElement>, id: string) => {
@@ -323,7 +336,7 @@ export function OrchestrationMap({
     const result = changeDependencyLink(policy, from, to, enabled);
     if (!result.ok) { setError(result.error); return; }
     setError(null);
-    if (enabled) setLayer("dependencies");
+    if (enabled) { setLayer("dependencies"); setConnectionKind("dependencies"); }
     onToggleDependency?.(ownerId, from, to, enabled, result.next);
   };
 
@@ -332,7 +345,7 @@ export function OrchestrationMap({
     const result = changeContextProviderLink(policy, from, to, enabled);
     if (!result.ok) { setError(result.error); return; }
     setError(null);
-    if (enabled) setLayer("contextProviders");
+    if (enabled) { setLayer("contextProviders"); setConnectionKind("contextProviders"); }
     onToggleContextProvider(ownerId, from, to, enabled, result.next);
   };
 
@@ -358,6 +371,7 @@ export function OrchestrationMap({
     // search and selection intact in that case; otherwise show the full branch.
     if (onSelectOwner(nextOwner) === false) return;
     setQuery("");
+    setExactQuery(false);
     setSelectedEdge(null);
     setConnectionSource(null);
   };
@@ -374,13 +388,14 @@ export function OrchestrationMap({
           </span>)}
         </div>
         <div className="orchestration-map-controls">
-          <input type="search" value={query} onChange={(event) => setQuery(event.target.value)} aria-label={t("map.search")} placeholder={t("map.searchPlaceholder")} />
-          {query && <button type="button" onClick={() => setQuery("")}>{t("map.showAllDirectAgents")}</button>}
+          <input type="search" value={query} onChange={(event) => { setQuery(event.target.value); setExactQuery(false); }} aria-label={t("map.search")} placeholder={t("map.searchPlaceholder")} />
+          {query && <button type="button" onClick={() => { setQuery(""); setExactQuery(false); }}>{t("map.showAllDirectAgents")}</button>}
           <button type="button" onClick={() => zoom(1.15)} aria-label={t("map.zoomIn")}>＋</button>
           <button type="button" onClick={() => zoom(1 / 1.15)} aria-label={t("map.zoomOut")}>−</button>
           <button type="button" onClick={centerSelected} disabled={!nodeById.has(selectedNode)}>{t("map.focusSelection")}</button>
           <button type="button" onClick={() => fit(nodes)} title={t("map.fit")}>{t("map.fit")}</button>
-          <button type="button" onClick={() => { savePositions({}); fit(graph.nodes, true); }} title={t("map.arrange")}>{t("map.arrangeShort")}</button>
+          <button type="button" onClick={() => { savePositions({}); fit(layoutNodes, true); }} title={t("map.arrange")}>{t("map.arrangeShort")}</button>
+          <button type="button" aria-pressed={inspectorOpen} onClick={() => setInspectorOpen((open) => !open)}>{t("map.details")}</button>
         </div>
       </div>
       <div className="orchestration-map-scope" role="status">
@@ -389,34 +404,39 @@ export function OrchestrationMap({
         <span>{t(ownerId === null ? "map.overviewHint" : "map.branchHint")}</span>
       </div>
       <div className="orchestration-map-layers" role="group" aria-label={t("map.layers")}>
-        {(["delegation", ...(ownerId === null ? [] : ["dependencies", "contextProviders"])] as OrchestrationMapLayer[]).map((kind) => <button key={kind} type="button"
+        {(["delegation", ...(ownerId === null ? [] : ["dependencies", "contextProviders"])] as OrchestrationMapEdgeKind[]).map((kind) => <button key={kind} type="button"
           className="orchestration-map-legend" aria-pressed={visibleLayer === kind}
           onClick={() => { setLayer(kind); if (kind === "dependencies" || kind === "contextProviders") setConnectionKind(kind); setConnectionSource(null); setSelectedEdge(null); }}>
           <i className={`is-${kind}`} aria-hidden="true" />{t(kind === "delegation" ? "map.delegationMeaning" : kind === "dependencies" ? "map.dependenciesMeaning" : "map.contextProvidersMeaning")}
         </button>)}
-        {ownerId !== null && <button type="button" className="orchestration-map-filter" aria-pressed={layer === "all"}
-          onClick={() => { setLayer("all"); setConnectionSource(null); setSelectedEdge(null); }}>{t("map.showAllConnections")}</button>}
         <span className="orchestration-map-count">{query.trim() ? t("map.searchResults", { count: graph.matchCount })
-          : ownerId === null ? t("map.connectedAgents", { count: graph.nodes.length - 1 })
+          : ownerId === null ? t("map.directAgents", { count: mainPolicyForMap(profiles, main.orchestration ?? null).allowedChildren.length })
             : t("map.directAgents", { count: policy?.allowedChildren.length ?? 0 })}</span>
       </div>
+      {ownerId === null && hiddenDirectCount > 0 && <div className="orchestration-map-collapsed">
+        <span>{t("map.hiddenDirectAgents", { count: hiddenDirectCount })}</span>
+        <button type="button" onClick={() => switchOwner(MAIN_NODE_ID)}>{t("map.openMainBranch")}</button>
+      </div>}
+      {ownerId !== null && hiddenDirectCount > 0 && <div className="orchestration-map-collapsed">
+        <span>{t("map.hiddenBranchAgents", { count: hiddenDirectCount })}</span>
+        <button type="button" onClick={() => setVisibleLimit((limit) => limit + 24)}>{t("map.showMoreAgents")}</button>
+      </div>}
       <div className="orchestration-map-pan-hint">{t("map.panHint")}</div>
       <div className="orchestration-map-body">
         <div className="orchestration-map-stage" ref={stage} onPointerDown={panStart}
           onPointerMove={panMove} onPointerUp={() => { drag.current = null; }}
           onPointerCancel={() => { drag.current = null; }} aria-label={t("map.graph")}>
           <div className="orchestration-map-canvas" style={{ transform: `translate(${viewport.x}px, ${viewport.y}px) scale(${viewport.scale})` }}>
+            {workflowStages.map((x, index) => <div key={x} className="orchestration-map-stage-label" style={{ left: x, top: 9 }}>
+              {t("map.workflowStage", { count: index + 1 })}
+            </div>)}
             <svg className="orchestration-map-edges" width="100%" height="100%" aria-hidden="true">
               <defs>
                 <marker id="orchestration-map-arrow-delegation" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M 0 0 L 10 5 L 0 10 Z" /></marker>
                 <marker id="orchestration-map-arrow-dependencies" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M 0 0 L 10 5 L 0 10 Z" /></marker>
                 <marker id="orchestration-map-arrow-contextProviders" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M 0 0 L 10 5 L 0 10 Z" /></marker>
               </defs>
-              {visibleEdges.map((edge) => {
-                const source = nodeById.get(edge.source);
-                const target = nodeById.get(edge.target);
-                if (!source || !target) return null;
-                const d = edgePath(source, target, overlapOffsets.get(edgeId(edge)) ?? 0);
+              {routes.map(({ edge, path: d }) => {
                 return <g key={edgeId(edge)}>
                   <path className={`orchestration-map-edge is-${edge.kind}${highlightedEdges.has(edgeId(edge)) ? "" : " is-muted"}${selectedEdge === edgeId(edge) ? " is-selected" : ""}`}
                     d={d} markerEnd={`url(#orchestration-map-arrow-${edge.kind})`} />
@@ -431,7 +451,9 @@ export function OrchestrationMap({
                 aria-pressed={selectedNode === node.id} onClick={() => { setSelectedNode(node.id); setUserSelectedNode(true); setSelectedEdge(null); }}>
                 <span className="orchestration-map-node-kind">{t(node.kind === "main" ? "map.kindMain" : node.kind === "orchestrator" ? "map.kindOrchestrator" : node.kind === "missing" ? "map.kindMissing" : "map.kindAgent")}</span>
                 <strong title={node.id === MAIN_NODE_ID ? t("common.main") : node.label}>{node.id === MAIN_NODE_ID ? t("common.main") : node.label}</strong>
-                <small title={node.id}>{node.scope ? `${t(`agents.scope.${node.scope}`)} · ` : ""}{node.id === MAIN_NODE_ID ? t("common.main") : node.id}</small>
+                <small title={node.id}>{node.id !== MAIN_NODE_ID && findMapProfile(profiles, node.id)?.orchestration
+                  ? t("map.directAgents", { count: findMapProfile(profiles, node.id)!.orchestration!.allowedChildren.length })
+                  : node.scope ? `${t(`agents.scope.${node.scope}`)} · ${node.id}` : node.id === MAIN_NODE_ID ? t("common.main") : node.id}</small>
               </button>
               <button type="button" className="orchestration-map-node-move" aria-label={t("map.move", { name: node.id === MAIN_NODE_ID ? t("common.main") : node.label })}
                 title={t("map.moveHint")} onKeyDown={(event) => moveKey(event, node.id)}
@@ -449,6 +471,7 @@ export function OrchestrationMap({
                   const next = {
                     x: start.x + (event.clientX - x) / viewport.scale, y: start.y + (event.clientY - y) / viewport.scale,
                   };
+                  if (!canPlaceMapNode(node.id, next, nodes, visibleEdges)) return;
                   drag.current.last = next;
                   setPositions((previous) => ({ ...previous, [node.id]: next }));
                 }}
@@ -470,10 +493,10 @@ export function OrchestrationMap({
             </div>)}
           </div>
           {query.trim() && graph.matchCount === 0 ? <div className="orchestration-map-empty" role="status">{t("map.noMatches")}</div> : null}
-          {ownerId !== null && visibleEdges.length === 0 && !query.trim() ?
+          {ownerId !== null && !fullGraph.edges.some((edge) => edge.kind === visibleLayer) && !query.trim() ?
             <div className="orchestration-map-empty" role="status">{t("map.noRelations")}</div> : null}
         </div>
-        <aside className="orchestration-map-inspector" aria-label={t("map.details")}>
+        <aside className="orchestration-map-inspector" aria-label={t("map.details")} hidden={!inspectorOpen}>
           <h3>{selectedNode === MAIN_NODE_ID ? t("common.main") : selected?.displayName ?? selectedNode}</h3>
           {error && <p role="alert" className="orchestration-map-error">{ERROR_KEYS[error] ? t(ERROR_KEYS[error]) : error}</p>}
           {selectedNode !== MAIN_NODE_ID && selected && <>
@@ -488,7 +511,7 @@ export function OrchestrationMap({
             <h4>{t("map.directDelegates")}</h4>
             <div className="orchestration-map-inspector-branch-list">
               {policy?.allowedChildren.map((name) => <button key={name} type="button"
-                onClick={() => { setSelectedNode(name); setUserSelectedNode(true); setSelectedEdge(null); }}>
+                onClick={() => { pendingFocusNode.current = name; setQuery(""); setExactQuery(false); setSelectedNode(name); setUserSelectedNode(true); setSelectedEdge(null); }}>
                 {findMapProfile(profiles, name)?.displayName ?? name}
               </button>)}
             </div>
@@ -557,7 +580,7 @@ export function OrchestrationMap({
             {!query.trim() && graph.unreachableAgentIds.length > 0 && <details className="orchestration-map-unassigned">
               <summary>{t("map.unassignedAgents", { count: graph.unreachableAgentIds.length })}</summary>
               {graph.unreachableAgentIds.map((name) => <button key={name} type="button" title={t("map.openUnassigned")}
-                onClick={() => { setQuery(name); setSelectedNode(name); setUserSelectedNode(true); setSelectedEdge(null); }}>
+                onClick={() => { pendingFocusNode.current = name; setQuery(name); setExactQuery(true); setSelectedNode(name); setUserSelectedNode(true); setSelectedEdge(null); }}>
                 {findMapProfile(profiles, name)?.displayName ?? name}
               </button>)}
             </details>}
@@ -607,10 +630,18 @@ export function OrchestrationMap({
             {(["delegation", "contextProviders", "dependencies"] as const).map((kind) => <details key={`${ownerId}:${kind}`}
               className="orchestration-map-link-group">
               <summary>{t(kind === "delegation" ? "map.directDelegates" : kind === "dependencies" ? "map.requiredResults" : "map.availableProviders")}
-                <span>{graph.edges.filter((edge) => edge.ownerId === ownerId && edge.kind === kind).length}</span></summary>
-              {graph.edges.filter((edge) => edge.ownerId === ownerId && edge.kind === kind).map((edge) => <div key={edgeId(edge)}
+                <span>{fullGraph.edges.filter((edge) => edge.ownerId === ownerId && edge.kind === kind).length}</span></summary>
+              {fullGraph.edges.filter((edge) => edge.ownerId === ownerId && edge.kind === kind).map((edge) => <div key={edgeId(edge)}
                 className={`orchestration-map-link is-${edge.kind}${selectedEdge === edgeId(edge) ? " is-selected" : ""}`}>
-                <button type="button" onClick={() => { setSelectedEdge(edgeId(edge)); setSelectedNode(edge.target); setUserSelectedNode(true); }}>
+                <button type="button" onClick={() => {
+                  pendingFocusNode.current = edge.target;
+                  setLayer(edge.kind);
+                  if (edge.kind === "dependencies" || edge.kind === "contextProviders") setConnectionKind(edge.kind);
+                  setConnectionSource(null);
+                  setQuery("");
+                  setExactQuery(false);
+                  setSelectedEdge(edgeId(edge)); setSelectedNode(edge.target); setUserSelectedNode(true);
+                }}>
                   {edge.source === MAIN_NODE_ID ? t("common.main") : findMapProfile(profiles, edge.source)?.displayName ?? edge.source}
                   <span aria-hidden="true"> → </span>{findMapProfile(profiles, edge.target)?.displayName ?? edge.target}
                 </button>

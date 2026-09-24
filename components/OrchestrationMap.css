@@ -114,6 +114,17 @@
 }
 .orchestration-map-scope strong { color: var(--text); }
 .orchestration-map-scope span { color: var(--text-muted); }
+.orchestration-map-collapsed {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 14px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-panel);
+  color: var(--text-muted);
+  font-size: 12px;
+}
+.orchestration-map-collapsed button { border: 0; background: transparent; color: var(--accent); padding: 2px; font-weight: 600; }
 
 .orchestration-map-body { display: flex; flex: 1; min-height: 0; }
 .orchestration-map-stage {
@@ -130,6 +141,7 @@
 }
 .orchestration-map-stage:active { cursor: grabbing; }
 .orchestration-map-canvas { position: absolute; inset: 0; width: 100%; height: 100%; transform-origin: 0 0; }
+.orchestration-map-stage-label { position: absolute; color: var(--text-muted); font-size: 11px; font-weight: 650; white-space: nowrap; }
 .orchestration-map-edges { position: absolute; left: 0; top: 0; overflow: visible; pointer-events: none; }
 .orchestration-map-edges #orchestration-map-arrow-delegation path { fill: var(--accent); }
 .orchestration-map-edges #orchestration-map-arrow-dependencies path { fill: var(--map-prerequisite); }
@@ -138,6 +150,7 @@
 .orchestration-map-edge.is-dependencies { stroke: var(--map-prerequisite); stroke-dasharray: 9 5; }
 .orchestration-map-edge.is-contextProviders { stroke: var(--map-provider); stroke-dasharray: 2 6; stroke-linecap: round; }
 .orchestration-map-edge.is-selected { stroke-width: 4; opacity: 1; }
+.orchestration-map-edge.is-selected { filter: drop-shadow(0 0 3px var(--accent)); }
 .orchestration-map-edge.is-muted { opacity: .28; }
 .orchestration-map-edge.is-muted.is-selected { opacity: 1; }
 .orchestration-map-edge-target { fill: none; stroke: transparent; stroke-width: 18; pointer-events: stroke; cursor: pointer; }
@@ -223,6 +236,7 @@
   border-left: 1px solid var(--border);
   background: var(--bg-panel);
 }
+.orchestration-map-inspector[hidden] { display: none; }
 .orchestration-map-inspector h3 { font-size: 16px; margin: 0 0 8px; overflow-wrap: anywhere; }
 .orchestration-map-inspector h4 { font-size: 13px; margin: 22px 0 10px; }
 .orchestration-map-inspector p { color: var(--text-muted); font-size: 12px; line-height: 1.5; margin: 10px 0; }
