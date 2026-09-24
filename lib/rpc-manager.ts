@@ -580,8 +580,8 @@ export class AgentSessionWrapper {
       && entry.customType === "pi-web:subagent"
       && (entry.data as { orchestrationEnabled?: boolean } | undefined)?.orchestrationEnabled === true);
     if ((readMainDispatcherSession(runtimeEntries) || orchestrationRole)
-      && (type === "set_model" || type === "set_thinking_level" || type === "set_tools")) {
-      throw new Error("Orchestration role model, effort, and tools are pinned for this session");
+      && (type === "set_model" || type === "set_thinking_level" || type === "set_tools" || type === "bash")) {
+      throw new Error("Orchestration role model, effort, tools, and direct shell access are pinned for this session");
     }
     const allowedDuringReplacement = COMMANDS_ALLOWED_DURING_SESSION_REPLACEMENT.has(type);
     if (this.sessionReplacement && !allowedDuringReplacement) {
@@ -2039,6 +2039,10 @@ export async function startRpcSession(
     sessionManager.appendCustomEntry(MAIN_DISPATCHER_ENTRY_TYPE, { version: 1, enabled: true, config: dispatcherConfig });
   }
   const sessionCwd = sessionManager.getCwd();
+  if (mainDispatcher && !listSubagentProfiles(sessionCwd, { orchestrationEnabled: true })
+    .some((profile) => profile.name === "orchestration-task-owner" && profile.enabled)) {
+    throw new Error("Dispatcher requires an enabled orchestration-task-owner");
+  }
   const subagentMeta = existingEntries.find((entry) => entry.type === "custom" && entry.customType === "pi-web:subagent");
   const subagentMetadata = subagentMeta?.type === "custom"
     ? subagentMeta.data as { orchestrationEnabled?: boolean; subagentSessionId?: string; profile?: string } | undefined
@@ -2272,6 +2276,10 @@ export async function startRpcSession(
     // extensions stay usable in Pi Web just like in the `pi` CLI.
     if (mainDispatcher) {
       inner.setActiveToolsByName([...SUBAGENT_CONTROL_TOOL_NAMES]);
+      const active = inner.getActiveToolNames();
+      if (!active.includes("Agent") || active.some((name) => !SUBAGENT_CONTROL_TOOL_NAMES.includes(name as typeof SUBAGENT_CONTROL_TOOL_NAMES[number]))) {
+        throw new Error("Dispatcher must have only sub-agent control tools, including Agent");
+      }
       applyFastMode(inner, dispatcherConfig!.fastMode);
     } else if (!subagentResources && !chatOnly) {
       inner.setActiveToolsByName(withExtensionTools(inner, selectedToolNames ?? inner.getActiveToolNames()));

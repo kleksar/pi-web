@@ -49,6 +49,7 @@ interface Props {
   compact?: boolean;
   model?: { provider: string; modelId: string } | null;
   mainDispatcherEnabled?: boolean;
+  sessionModePending?: boolean;
   /** Available only before a new session is created. */
   onMainDispatcherChange?: (enabled: boolean) => void;
   isAutoModelSelection?: boolean;
@@ -552,7 +553,7 @@ export function ModelScopeWarningBanner({ warnings }: { warnings?: string[] }) {
 }
 
 export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
-  onSend, onAbort, onSteer, onFollowUp, isStreaming, model, mainDispatcherEnabled, onMainDispatcherChange, isAutoModelSelection, modelNames, modelList, modelError, modelScopeWarnings, onModelChange, modelSwitching,
+  onSend, onAbort, onSteer, onFollowUp, isStreaming, model, mainDispatcherEnabled, sessionModePending, onMainDispatcherChange, isAutoModelSelection, modelNames, modelList, modelError, modelScopeWarnings, onModelChange, modelSwitching,
   onCompact, onAbortCompaction, isCompacting, compactError, compactResult, toolPreset, onToolPresetChange,
   thinkingLevel, isAutoThinkingSelection = false, onThinkingLevelChange, availableThinkingLevels, thinkingLevelMap,
   retryInfo, queuedMessages, inputHistory = [], onRecallQueue,
@@ -945,6 +946,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   }, [attachedImages.length, clearInput, onBuiltinCommand]);
 
   const handleSend = useCallback(async () => {
+    if (sessionModePending) return;
     const msg = value.trim();
     if (!msg && !attachedImages.length) return;
     onAudioUnlock?.();
@@ -953,7 +955,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     if (isStreaming) return;
     clearInput();
     onSend(msg, attachedImages.length ? attachedImages : undefined);
-  }, [value, attachedImages, isStreaming, runBuiltinCommand, onSend, clearInput, onAudioUnlock]);
+  }, [value, attachedImages, isStreaming, sessionModePending, runBuiltinCommand, onSend, clearInput, onAudioUnlock]);
 
   const slashQuery = !compact && value.startsWith("/") && !/\s/.test(value.slice(1))
     ? value.slice(1).toLowerCase()
@@ -2234,21 +2236,21 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
           ) : (
             <button
               onClick={handleSend}
-              disabled={!value.trim() && !attachedImages.length}
+              disabled={sessionModePending || (!value.trim() && !attachedImages.length)}
               style={{
                 flexShrink: 0,
                 alignSelf: "flex-end",
                 display: "flex", alignItems: "center", gap: 6,
                 padding: "7px 14px",
-                background: (value.trim() || attachedImages.length) ? "var(--accent)" : "var(--bg-panel)",
+                background: !sessionModePending && (value.trim() || attachedImages.length) ? "var(--accent)" : "var(--bg-panel)",
                 border: "none",
                 borderRadius: 8,
-                color: (value.trim() || attachedImages.length) ? "var(--accent-contrast)" : "var(--text-dim)",
-                cursor: (value.trim() || attachedImages.length) ? "pointer" : "not-allowed",
+                color: !sessionModePending && (value.trim() || attachedImages.length) ? "var(--accent-contrast)" : "var(--text-dim)",
+                cursor: !sessionModePending && (value.trim() || attachedImages.length) ? "pointer" : "not-allowed",
                 fontSize: 13,
                 fontWeight: 600,
                 letterSpacing: "-0.01em",
-                boxShadow: (value.trim() || attachedImages.length) ? "0 1px 3px color-mix(in srgb, var(--accent) 25%, transparent)" : "none",
+                boxShadow: !sessionModePending && (value.trim() || attachedImages.length) ? "0 1px 3px color-mix(in srgb, var(--accent) 25%, transparent)" : "none",
                 transition: "background 0.15s, box-shadow 0.15s",
               }}
             >
@@ -2309,9 +2311,15 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
               </svg>
             </button>
             {/* Model selector - visible always, disabled while the session or switch is busy */}
-            {mainDispatcherEnabled && (
-              <span title={t("chat.mainDispatcherHint")} style={{ color: "var(--accent)", fontSize: 11, whiteSpace: "nowrap", padding: "0 6px" }}>
-                Luna High Fast
+            {sessionModePending && (
+              <span style={{ color: "var(--text-muted)", fontSize: 11, whiteSpace: "nowrap", padding: "0 6px" }}>
+                {t("chat.loadingSessionMode")}
+              </span>
+            )}
+            {typeof mainDispatcherEnabled === "boolean" && (
+              <span title={mainDispatcherEnabled ? t("chat.mainDispatcherHint") : t("chat.standardSessionHint")}
+                style={{ color: mainDispatcherEnabled ? "var(--accent)" : "var(--text-muted)", fontSize: 11, whiteSpace: "nowrap", padding: "0 6px" }}>
+                {t(mainDispatcherEnabled ? "chat.dispatcherSession" : "chat.standardSession")}
               </span>
             )}
             {(modelOptions.length > 0 || model || modelError) && onModelChange && (

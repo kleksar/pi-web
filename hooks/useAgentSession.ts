@@ -283,6 +283,7 @@ type SelectedModel = { provider: string; modelId: string };
 type ModelEntry = { id: string; name: string; provider: string };
 type ModelsResponse = {
   models: Record<string, string>;
+  defaultMainDispatcher?: boolean;
   modelList?: ModelEntry[];
   defaultModel?: SelectedModel | null;
   defaultThinkingLevel?: string | null;
@@ -327,8 +328,16 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const [newSessionModel, setNewSessionModel] = useState<SelectedModel | null>(null);
   const [newSessionDefaultModel, setNewSessionDefaultModel] = useState<SelectedModel | null>(null);
   const [toolPreset, setToolPreset] = useState<ToolPreset>(CONFIGURED_TOOL_PRESET);
-  const [newSessionDispatcher, setNewSessionDispatcher] = useState(false);
-  useEffect(() => { setNewSessionDispatcher(false); }, [newSessionDraftKey]);
+  const [newSessionDispatcher, setNewSessionDispatcher] = useState<boolean | null>(null);
+  const dispatcherOverrideRef = useRef(false);
+  useEffect(() => {
+    dispatcherOverrideRef.current = false;
+    setNewSessionDispatcher(null);
+  }, [newSessionDraftKey]);
+  const changeNewSessionDispatcher = useCallback((enabled: boolean) => {
+    dispatcherOverrideRef.current = true;
+    setNewSessionDispatcher(enabled);
+  }, []);
   const [newSessionThinkingLevel, setNewSessionThinkingLevel] = useState<ConcreteThinkingLevel | null>(null);
   const [newSessionDefaultThinkingLevel, setNewSessionDefaultThinkingLevel] = useState<ConcreteThinkingLevel | null>(null);
   const [currentThinkingOverride, setCurrentThinkingOverride] = useState<ConcreteThinkingLevel | null>(null);
@@ -766,6 +775,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     if (sessionIdRef.current) return sessionIdRef.current;
     if (!isNew || !newSessionCwd) return sessionIdRef.current;
     if (ensuringNewSessionRef.current) return ensuringNewSessionRef.current;
+    if (newSessionDispatcher === null) throw new Error("Wait for the session mode to load before starting a chat");
 
     const promise = (async () => {
       // Only send explicit user overrides. The server resolves the current
@@ -783,7 +793,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         body: JSON.stringify({
           cwd: newSessionCwd,
           type: "ensure_session",
-          ...(newSessionDispatcher ? { mainDispatcher: true } : {}),
+          mainDispatcher: newSessionDispatcher,
           ...(toolNames !== undefined ? { toolNames } : {}),
           ...(selectedModel ? { provider: selectedModel.provider, modelId: selectedModel.modelId } : {}),
           ...(selectedThinkingLevel
@@ -1859,6 +1869,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     thinkingLevelPinsRef.current = d.thinkingLevelPins ?? {};
     defaultThinkingLevelRef.current = asConcreteThinkingLevel(d.defaultThinkingLevel);
     if (isNew && !sessionIdRef.current) {
+      if (!dispatcherOverrideRef.current) setNewSessionDispatcher(d.defaultMainDispatcher === true);
       // The first listed model is not necessarily the runtime's automatic choice.
       // An `enabledModels` pattern may pin a thinking level (`anthropic/*:high`).
       // Like pi, apply it to the model a new session starts with.
@@ -2443,8 +2454,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
 
   return {
     // State
-    mainDispatcherEnabled: isNew ? newSessionDispatcher : data?.mainDispatcher === true,
-    setMainDispatcherEnabled: setNewSessionDispatcher,
+    mainDispatcherEnabled: isNew ? newSessionDispatcher ?? undefined : data ? data.mainDispatcher === true : undefined,
+    sessionModePending: isNew && newSessionDispatcher === null,
+    setMainDispatcherEnabled: changeNewSessionDispatcher,
     data, loading, error, activeLeafId, messages, activeToolResults, entryIds, historyCursor, hasEarlierMessages, streamState,
     agentRunning, modelNames, modelList, modelError, modelScopeWarnings, modelThinkingLevels, modelThinkingLevelMaps, newSessionModel, toolPreset, thinkingLevel,
     retryInfo, contextUsage, systemPrompt, forkingEntryId,

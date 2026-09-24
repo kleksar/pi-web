@@ -14,8 +14,16 @@ test("new-session startup sends only explicit browser overrides", () => {
   assert.doesNotMatch(ensureSource, /newSessionModel \?\? newSessionDefaultModel/);
   assert.match(ensureSource, /const selectedThinkingLevel = newSessionDispatcher \? null : thinkingLevelOverrideRef\.current;/);
   assert.doesNotMatch(ensureSource, /thinkingLevel !== "auto"/);
-  assert.match(ensureSource, /\.\.\.\(newSessionDispatcher \? \{ mainDispatcher: true \} : \{\}\)/);
+  assert.match(ensureSource, /if \(newSessionDispatcher === null\) throw new Error\(/);
+  assert.match(ensureSource, /mainDispatcher: newSessionDispatcher,/);
   assert.match(ensureSource, /const toolNames = newSessionDispatcher \? undefined : getToolNamesForPreset\(toolPreset\);/);
+});
+
+test("fresh composer waits for a live default and keeps an explicit mode choice", () => {
+  assert.match(source, /useState<boolean \| null>\(null\)/);
+  assert.match(source, /if \(!dispatcherOverrideRef\.current\) setNewSessionDispatcher\(d\.defaultMainDispatcher === true\)/);
+  assert.match(source, /dispatcherOverrideRef\.current = true;\s*setNewSessionDispatcher\(enabled\)/);
+  assert.match(source, /sessionModePending: isNew && newSessionDispatcher === null/);
 });
 
 test("new-session startup adopts server state only while explicit overrides are unchanged", () => {
