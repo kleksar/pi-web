@@ -99,6 +99,7 @@ npx @agegr/pi-web@latest
 - **Shared configuration**: the Models panel uses pi's model, settings, and credential storage, so changes are visible to both interfaces.
 - **File access boundary**: the file browser is limited to working directories selected in Pi Web and project or session roots it already knows about; it is not a general filesystem browser.
 - **Git worktrees**: see [Worktrees in Pi Web](./docs/worktrees.md) for switcher visibility, worktree creation, and removal behavior.
+- **Experimental task orchestration**: enable built-in subagents, then select Main dispatcher when creating a session. The opt-in roster, boundaries, and evaluation plan are in [ADR 0006](./docs/adr/0006-task-scoped-orchestration.md).
 
 ### Downstream Session Context Menu
 

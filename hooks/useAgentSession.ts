@@ -49,6 +49,7 @@ export interface SessionData {
   tree: SessionTreeNode[];
   leafId: string | null;
   toolNames?: string[];
+  mainDispatcher?: boolean;
   /** Opaque freshness token for the session view cache (summary tree reads). */
   snapshotRevision?: string | null;
   /** "summary" when `tree` carries the body-free navigation format. */
@@ -326,6 +327,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const [newSessionModel, setNewSessionModel] = useState<SelectedModel | null>(null);
   const [newSessionDefaultModel, setNewSessionDefaultModel] = useState<SelectedModel | null>(null);
   const [toolPreset, setToolPreset] = useState<ToolPreset>(CONFIGURED_TOOL_PRESET);
+  const [newSessionDispatcher, setNewSessionDispatcher] = useState(false);
+  useEffect(() => { setNewSessionDispatcher(false); }, [newSessionDraftKey]);
   const [newSessionThinkingLevel, setNewSessionThinkingLevel] = useState<ConcreteThinkingLevel | null>(null);
   const [newSessionDefaultThinkingLevel, setNewSessionDefaultThinkingLevel] = useState<ConcreteThinkingLevel | null>(null);
   const [currentThinkingOverride, setCurrentThinkingOverride] = useState<ConcreteThinkingLevel | null>(null);
@@ -508,15 +511,17 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   }, [newSessionDraftKey, opts.chatInputRef, resolveComposerDraftKey]);
 
   const sessionStats = useMemo(() => {
+    const stats = mergeSessionStats(data?.stats, data?.context.messages ?? [], messages);
     if (sessionStatsOverride) {
       return {
         ...sessionStatsOverride,
+        ...(data?.stats ? { cost: stats.cost } : {}),
+        ...(stats.costKnown === false ? { costKnown: false } : {}),
         totalActiveMs: data?.totalActiveMs,
         ...(contextUsage ? { contextUsage } : {}),
       };
     }
     const fileStats = data?.stats;
-    const stats = mergeSessionStats(fileStats, data?.context.messages ?? [], messages);
     if (stats.tokens.total === 0 && messages.length === 0 && !fileStats) return null;
     return {
       sessionFile: data?.filePath || undefined,
@@ -765,12 +770,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     const promise = (async () => {
       // Only send explicit user overrides. The server resolves the current
       // enabledModels scope atomically with AgentSession construction.
-      const selectedModel = newSessionModelOverrideRef.current;
-      const selectedThinkingLevel = thinkingLevelOverrideRef.current;
+      const selectedModel = newSessionDispatcher ? null : newSessionModelOverrideRef.current;
+      const selectedThinkingLevel = newSessionDispatcher ? null : thinkingLevelOverrideRef.current;
       if (selectedModel) setPendingModel(selectedModel);
       // Undefined means the user never overrode the loadout: omit the field entirely
       // so pi resolves settings.json defaultTools instead of being pinned to ours (#700).
-      const toolNames = getToolNamesForPreset(toolPreset);
+      const toolNames = newSessionDispatcher ? undefined : getToolNamesForPreset(toolPreset);
       sessionToolsPinnedRef.current = toolNames !== undefined;
       const res = await fetch("/api/agent/new", {
         method: "POST",
@@ -778,6 +783,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         body: JSON.stringify({
           cwd: newSessionCwd,
           type: "ensure_session",
+          ...(newSessionDispatcher ? { mainDispatcher: true } : {}),
           ...(toolNames !== undefined ? { toolNames } : {}),
           ...(selectedModel ? { provider: selectedModel.provider, modelId: selectedModel.modelId } : {}),
           ...(selectedThinkingLevel
@@ -815,7 +821,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     } finally {
       ensuringNewSessionRef.current = null;
     }
-  }, [isNew, newSessionCwd, toolPreset]);
+  }, [isNew, newSessionCwd, toolPreset, newSessionDispatcher]);
 
   // Opening the System or Tools panel may initialize an otherwise dormant
   // session. This is deliberately a non-prompt command: it creates no message
@@ -1531,6 +1537,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
 
     const isBashCommand = !images?.length && trimmedMessage.startsWith("!");
     if (isBashCommand) {
+      if (newSessionDispatcher || data?.mainDispatcher) {
+        addNotice({ type: "error", message: "Luna dispatcher cannot execute shell commands" });
+        restoreSubmission(message, images, composerDraftKey);
+        return;
+      }
       const isExcluded = trimmedMessage.startsWith("!!");
       const bashCmd = (isExcluded ? trimmedMessage.slice(2) : trimmedMessage.slice(1)).trim();
       if (!bashCmd) {
@@ -1569,7 +1580,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
 
     try {
       if (isNew && newSessionCwd) {
-        const selectedModel = newSessionModel;
+        const selectedModel = newSessionDispatcher ? null : newSessionModel;
         const existingSid = sessionIdRef.current ?? await ensuringNewSessionRef.current;
         const sid = existingSid ?? await ensureNewSession();
 
@@ -1637,7 +1648,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       setAgentPhase(null);
       dispatch({ type: "end" });
     }
-  }, [isNew, newSessionCwd, newSessionModel, session, ensureNewSession, ensureEventsConnected, promoteNewSession, waitForPromptSettlement, addNotice, cancelEventStreamGrace, closeEvents, composerDraftKey, reconcileAgentState, restoreSubmission]);
+  }, [isNew, newSessionCwd, newSessionModel, newSessionDispatcher, data?.mainDispatcher, session, ensureNewSession, ensureEventsConnected, promoteNewSession, waitForPromptSettlement, addNotice, cancelEventStreamGrace, closeEvents, composerDraftKey, reconcileAgentState, restoreSubmission]);
 
   const executeBash = useCallback(async (command: string, excludeFromContext: boolean) => {
     if (agentRunningRef.current || bashRunningRef.current) return;
@@ -2432,6 +2443,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
 
   return {
     // State
+    mainDispatcherEnabled: isNew ? newSessionDispatcher : data?.mainDispatcher === true,
+    setMainDispatcherEnabled: setNewSessionDispatcher,
     data, loading, error, activeLeafId, messages, activeToolResults, entryIds, historyCursor, hasEarlierMessages, streamState,
     agentRunning, modelNames, modelList, modelError, modelScopeWarnings, modelThinkingLevels, modelThinkingLevelMaps, newSessionModel, toolPreset, thinkingLevel,
     retryInfo, contextUsage, systemPrompt, forkingEntryId,

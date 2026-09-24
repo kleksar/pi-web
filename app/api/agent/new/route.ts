@@ -45,7 +45,13 @@ export async function POST(req: Request) {
     }
 
     // Use a one-time key so startRpcSession's lock doesn't conflict with real session ids
-    const { provider, modelId, toolNames, thinkingLevel, ...promptCommand } = command as { provider?: string; modelId?: string; toolNames?: string[]; thinkingLevel?: unknown; [key: string]: unknown };
+    const { provider, modelId, toolNames, thinkingLevel, mainDispatcher, ...promptCommand } = command as { provider?: string; modelId?: string; toolNames?: string[]; thinkingLevel?: unknown; mainDispatcher?: unknown; [key: string]: unknown };
+    if (mainDispatcher !== undefined && typeof mainDispatcher !== "boolean") {
+      throw new Error("mainDispatcher must be a boolean");
+    }
+    if (mainDispatcher && (provider !== undefined || modelId !== undefined || toolNames !== undefined || thinkingLevel !== undefined)) {
+      throw new Error("Main dispatcher selects its own model, thinking level and control tools");
+    }
     if ((provider && !modelId) || (!provider && modelId)) {
       throw new Error("provider and modelId must be provided together");
     }
@@ -59,6 +65,7 @@ export async function POST(req: Request) {
       ...(toolNames ? { toolNames } : {}),
       ...(provider && modelId ? { initialModel: { provider, modelId } } : {}),
       ...(explicitThinkingLevel ? { thinkingLevel: explicitThinkingLevel } : {}),
+      ...(mainDispatcher ? { mainDispatcher: true } : {}),
     });
 
     // Keep the files-route allowed-roots cache (see app/api/files/[...path]/route.ts)

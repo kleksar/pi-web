@@ -73,6 +73,18 @@ type AutoNameStatus =
 const TOP_BAR_ICON_BUTTON_SIZE = 36;
 const AGENT_PANEL_WIDTH = 420;
 
+function formatSessionCost(cost: number): string {
+  return `$${cost === 0 ? "0.0000" : cost < 0.0001 ? cost.toPrecision(2) : cost.toFixed(4)}`;
+}
+
+interface FamilyCostResponse {
+  rootSessionId: string;
+  cost: number;
+  sessionCount: number;
+  complete: boolean;
+  tasks?: Array<{ rootTaskId: string; cost: number; sessionCount: number; complete: boolean }>;
+}
+
 function parkedNewSessionDraftKey(cwd: string): string {
   return `parked-new:${cwd}`;
 }
@@ -303,6 +315,74 @@ export function AppShell() {
   const handleSessionStatsChange = useCallback((stats: SessionStatsInfo | null) => {
     setSessionStats(stats);
   }, []);
+  const [familyCost, setFamilyCost] = useState<(FamilyCostResponse & { familyKey: string }) | null>(null);
+  const [familyCostError, setFamilyCostError] = useState(false);
+  const [pageVisible, setPageVisible] = useState(true);
+  useEffect(() => {
+    const onVisibilityChange = () => setPageVisible(document.visibilityState !== "hidden");
+    onVisibilityChange();
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    return () => document.removeEventListener("visibilitychange", onVisibilityChange);
+  }, []);
+  const familyRootId = activeSessionFamily?.root.id ?? null;
+  const familySessionKey = activeSessionFamily
+    ? [activeSessionFamily.root.id, ...activeSessionFamily.subagents.map((item) => item.id).sort()].join("|")
+    : null;
+  const familyRunning = Boolean(activeSessionFamily && [
+    activeSessionFamily.root, ...activeSessionFamily.subagents,
+  ].some((item) => runningSessionIds.has(item.id)));
+
+  useEffect(() => {
+    const selectedId = selectedSession?.id;
+    if (!selectedId || !familyRootId || !familySessionKey) {
+      setFamilyCost(null);
+      setFamilyCostError(false);
+      return;
+    }
+    if (!pageVisible) return;
+    let stopped = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const controller = new AbortController();
+    setFamilyCost((current) => current?.rootSessionId === familyRootId && current.familyKey === familySessionKey ? current : null);
+    setFamilyCostError(false);
+    const refresh = async () => {
+      try {
+        const response = await fetch(`/api/sessions/${encodeURIComponent(selectedId)}/family-cost`, { cache: "no-store", signal: controller.signal });
+        if (!response.ok) throw new Error(`Family cost: HTTP ${response.status}`);
+        const result = await response.json() as FamilyCostResponse;
+        if (!stopped && result.rootSessionId === familyRootId && Number.isFinite(result.cost)) {
+          setFamilyCost({ ...result, familyKey: familySessionKey });
+          setFamilyCostError(false);
+        }
+      } catch {
+        if (!stopped) {
+          setFamilyCost(null);
+          setFamilyCostError(true);
+        }
+      } finally {
+        if (!stopped && familyRunning) timer = setTimeout(() => void refresh(), 3000);
+      }
+    };
+    void refresh();
+    return () => {
+      stopped = true;
+      controller.abort();
+      if (timer) clearTimeout(timer);
+    };
+  }, [selectedSession?.id, familyRootId, familySessionKey, familyRunning, pageVisible]);
+
+  const visibleSessionStats = sessionStats?.sessionId === selectedSession?.id ? sessionStats : null;
+  const knownAgentCost = visibleSessionStats?.costKnown === false ? null : visibleSessionStats?.cost ?? null;
+  const visibleFamilyCost = familyCost?.rootSessionId === familyRootId && familyCost.familyKey === familySessionKey ? familyCost : null;
+  const familyCostIncomplete = Boolean(visibleFamilyCost && (
+    !visibleFamilyCost.complete || (knownAgentCost ?? 0) > visibleFamilyCost.cost + 0.000001
+  ));
+  const familyCostText = visibleFamilyCost
+    ? `${familyCostIncomplete ? "≥" : "≈"}${formatSessionCost(Math.max(visibleFamilyCost.cost, knownAgentCost ?? 0))}`
+    : familyCostError ? "—" : "…";
+  const selectedTaskId = selectedSession?.relation?.kind === "subagent" ? selectedSession.relation.rootTaskId : undefined;
+  const taskCost = selectedTaskId ? visibleFamilyCost?.tasks?.find((task) => task.rootTaskId === selectedTaskId) : undefined;
+  const taskCostText = taskCost ? `${taskCost.complete ? "≈" : "≥"}${formatSessionCost(taskCost.cost)}` : null;
   const [copiedSessionField, setCopiedSessionField] = useState<SessionCopyField | null>(null);
   const sessionCopyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const handleCopySessionField = useCallback((field: SessionCopyField, value: string) => {
@@ -1597,16 +1677,16 @@ export function AppShell() {
   };
 
   const renderSessionStatsButton = (mobile: boolean) => {
-    if (!mobile && (!showChat || (!sessionStats && !contextUsage))) return null;
+    if (!mobile && (!showChat || (!visibleSessionStats && !contextUsage && !visibleFamilyCost))) return null;
 
-    const tokens = sessionStats?.tokens;
-    const cost = sessionStats?.cost ?? 0;
+    const tokens = visibleSessionStats?.tokens;
+    const cost = visibleSessionStats?.cost ?? 0;
     const formatCompact = (value: number) => value >= 1_000_000
       ? `${(value / 1_000_000).toFixed(1)}M`
       : value >= 1000
         ? `${(value / 1000).toFixed(0)}k`
         : String(value);
-    const costText = cost > 0 ? (cost >= 0.01 ? `$${cost.toFixed(2)}` : `<$0.01`) : null;
+    const costText = visibleSessionStats ? knownAgentCost === null ? "—" : formatSessionCost(cost) : null;
 
     let contextColor = "var(--text-muted)";
     let desktopContextText: string | null = null;
@@ -1627,8 +1707,12 @@ export function AppShell() {
       tooltipParts.push(`out: ${tokens.output.toLocaleString(locale)}`);
       tooltipParts.push(`cache read: ${tokens.cacheRead.toLocaleString(locale)}`);
       tooltipParts.push(`cache write: ${tokens.cacheWrite.toLocaleString(locale)}`);
-      if (cost > 0) tooltipParts.push(`cost: $${cost.toFixed(4)}`);
     }
+    if (costText) tooltipParts.push(`${translate("session.agentCost")}: ${costText}`);
+    if (selectedSession) tooltipParts.push(`${translate("session.familyCost")}: ${familyCostText}${familyCostIncomplete ? ` (${translate("session.partialCost")})` : ""}`);
+    if (taskCostText) tooltipParts.push(`${translate("session.taskCost")}: ${taskCostText}`);
+    if (taskCostText) tooltipParts.push(translate("session.taskCostHelp"));
+    if (selectedSession) tooltipParts.push(translate("session.familyCostHelp"));
     if (contextUsage?.contextWindow) {
       const percent = contextUsage.percent;
       tooltipParts.push(`context: ${percent !== null ? percent.toFixed(1) + "%" : "unknown"} of ${contextUsage.contextWindow.toLocaleString()} tokens`);
@@ -1637,7 +1721,7 @@ export function AppShell() {
     const covered = mobile && isNarrowMobile && mobileToolbarMoreOpen;
     const hasMobileValues = Boolean(
       (tokens && (tokens.input > 0 || tokens.output > 0))
-      || costText
+      || costText || selectedSession
       || mobileContextText,
     );
 
@@ -1703,6 +1787,7 @@ export function AppShell() {
                 {costText}
               </span>
             )}
+            {selectedSession && <span style={{ color: "var(--text)", fontWeight: 600, flexShrink: 0 }}>Σ {familyCostText}</span>}
             {mobileContextText && (
               <span style={{ color: contextColor, flexShrink: 0 }}>
                 {mobileContextText}
@@ -1745,6 +1830,9 @@ export function AppShell() {
                 {costText}
               </span>
             )}
+            {selectedSession && <span style={{ display: "flex", alignItems: "center", color: "var(--text)", fontWeight: 600 }}>
+              {translate("session.familyCost")}: {familyCostText}
+            </span>}
             {desktopContextText && (
               <span style={{ display: "flex", alignItems: "center", gap: 4, color: contextColor }}>
                 <svg width="12" height="12" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
@@ -2098,7 +2186,8 @@ export function AppShell() {
                   boxShadow: "0 10px 28px rgba(0,0,0,0.10)",
                   padding: "12px 16px",
                 }}>
-                  {sessionStats ? (() => {
+                  {visibleSessionStats ? (() => {
+                    const sessionStats = visibleSessionStats;
                     const formatDuration = (ms: number) => {
                       if (ms <= 0) return "0s";
                       const totalSec = Math.floor(ms / 1000);
@@ -2139,7 +2228,9 @@ export function AppShell() {
                     const ctx = contextUsage ?? sessionStats.contextUsage;
                     const formatCompact = (n: number) => n >= 1_000_000 ? `${(n / 1_000_000).toFixed(1)}M` : n >= 1000 ? `${(n / 1000).toFixed(0)}k` : String(n);
                     const extraTokenRows = [
-                       ...(sessionStats.cost > 0 ? [[translate("session.cost"), `$${sessionStats.cost.toFixed(4)}`]] : []),
+                       [translate("session.agentCost"), sessionStats.costKnown === false ? "—" : formatSessionCost(sessionStats.cost)],
+                       ...(selectedSession ? [[translate("session.familyCost"), familyCostText]] : []),
+                       ...(taskCostText ? [[translate("session.taskCost"), taskCostText]] : []),
                        ...(ctx?.contextWindow ? [[translate("session.context"), `${ctx.percent !== null ? `${ctx.percent.toFixed(1)}%` : "?"} / ${formatCompact(ctx.contextWindow)}`]] : []),
                        // Cache hit rate = cache reads / (input + cache writes + cache reads) — the denominator covers all input-class tokens.
                        ...(sessionStats.tokens.cacheRead + sessionStats.tokens.cacheWrite > 0 && sessionStats.tokens.cacheRead + sessionStats.tokens.cacheWrite + sessionStats.tokens.input > 0
@@ -2287,7 +2378,13 @@ export function AppShell() {
                           {projectInfoSection}
                         </div>
                          {section(translate("session.messages"), messageRows)}
-                         {section(translate("session.tokens"), [...tokenRows, ...extraTokenRows], "right", true)}
+                         <div>
+                           {section(translate("session.tokens"), [...tokenRows, ...extraTokenRows], "right", true)}
+                           <div style={{ marginTop: 8, color: "var(--text-dim)", fontSize: 11 }}>
+                             {translate("session.familyCostHelp")}{familyCostIncomplete ? ` ${translate("session.partialCost")}.` : ""}
+                             {taskCostText && <> {translate("session.taskCostHelp")}</>}
+                           </div>
+                         </div>
                       </div>
                     );
                   })() : (

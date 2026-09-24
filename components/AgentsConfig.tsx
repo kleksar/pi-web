@@ -47,6 +47,7 @@ const EMPTY_PROFILE: EditableProfile = {
   description: "",
   systemPrompt: "",
   tools: ["read", "bash", "edit", "write", "grep", "find", "ls"],
+  fastMode: false,
   loadSkills: false,
   loadExtensions: false,
   promptMode: "append",
@@ -81,6 +82,12 @@ function editableProfile(profile: SubagentProfile): EditableProfile {
     description: profile.description,
     systemPrompt: profile.systemPrompt,
     tools: [...profile.tools],
+    ...(profile.extensionTools ? { extensionTools: [...profile.extensionTools] } : {}),
+    ...(profile.allowedSubagents ? { allowedSubagents: [...profile.allowedSubagents] } : {}),
+    fastMode: profile.fastMode,
+    ...(profile.color ? { color: profile.color } : {}),
+    ...(profile.isolation ? { isolation: profile.isolation } : {}),
+    ...(profile.persistSession !== undefined ? { persistSession: profile.persistSession } : {}),
     loadSkills: profile.loadSkills,
     loadExtensions: profile.loadExtensions,
     promptMode: profile.promptMode,
@@ -161,6 +168,7 @@ export function AgentsConfig({
   const isMobile = useIsMobile();
   const { t } = useI18n();
   const [profiles, setProfiles] = useState<SubagentProfile[]>([]);
+  const [orchestrationProfileNames, setOrchestrationProfileNames] = useState<ReadonlySet<string>>(new Set());
   const [modelOptions, setModelOptions] = useState<ModelsData["modelList"]>([]);
   const [modelsLoading, setModelsLoading] = useState(true);
   const [modelsError, setModelsError] = useState<string | null>(null);
@@ -174,6 +182,7 @@ export function AgentsConfig({
   const [toggling, setToggling] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [builtInEnabled, setBuiltInEnabled] = useState(false);
+  const [showOrchestrationProfiles, setShowOrchestrationProfiles] = useState(false);
   const [maxConcurrent, setMaxConcurrent] = useState(10);
   const [settingsLoading, setSettingsLoading] = useState(true);
   const [settingsSaving, setSettingsSaving] = useState(false);
@@ -195,11 +204,12 @@ export function AgentsConfig({
     setLoading(true);
     setError(null);
     try {
-      const response = await fetch(`/api/subagents/profiles?cwd=${encodeURIComponent(cwd)}`, { cache: "no-store" });
+      const response = await fetch(`/api/subagents/profiles?cwd=${encodeURIComponent(cwd)}${showOrchestrationProfiles ? "&orchestration=1" : ""}`, { cache: "no-store" });
       const data = await response.json() as Partial<SubagentProfilesResponse> & { error?: string };
       if (!response.ok || data.error) throw new Error(data.error ?? `HTTP ${response.status}`);
       const next = data.profiles ?? [];
       setProfiles(next);
+      setOrchestrationProfileNames(new Set((data.orchestrationProfileNames ?? []).map((name) => name.toLowerCase())));
       const rememberedKey = preferredKey ?? getLastSettingsSelection("agents", cwd);
       const chosen = next.find((profile) => profileKey(profile) === rememberedKey)
         ?? next.find((profile) => profile.scope === "project")
@@ -217,7 +227,7 @@ export function AgentsConfig({
     } finally {
       setLoading(false);
     }
-  }, [cwd]);
+  }, [cwd, showOrchestrationProfiles]);
 
   useEffect(() => {
     void loadProfiles();
@@ -390,7 +400,7 @@ export function AgentsConfig({
       const response = await fetch("/api/subagents/profiles", {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ cwd, scope: selected.scope, name: selected.name, enabled }),
+        body: JSON.stringify({ cwd, scope: selected.scope, name: selected.name, enabled, ...(showOrchestrationProfiles ? { orchestration: true } : {}) }),
       });
       const data = await response.json() as { profile?: SubagentProfile; error?: string };
       if (!response.ok || data.error || !data.profile) throw new Error(data.error ?? `HTTP ${response.status}`);
@@ -467,6 +477,14 @@ export function AgentsConfig({
           {reloadNeeded && <span role="status" className="agents-feature-reload-notice">{t("agents.reloadRequired")}</span>}
         </div>
         <div className="agents-feature-actions">
+          <span style={{ display: "inline-flex", alignItems: "center", gap: 7, whiteSpace: "nowrap", fontSize: 11, color: "var(--text-muted)" }}>
+            {t("agents.showOrchestrationProfiles")}
+            <ConfigSwitch
+              checked={showOrchestrationProfiles}
+              label={t("agents.showOrchestrationProfiles")}
+              onChange={setShowOrchestrationProfiles}
+            />
+          </span>
           {reloadNeeded && sessionId && (
             <ConfigButton size="small" onClick={() => void reloadSession()} disabled={reloading || settingsSaving}>
               {reloading ? t("agents.reloading") : t("agents.reloadSession")}
@@ -506,7 +524,10 @@ export function AgentsConfig({
                   <div key={scope} className="config-sidebar-group">
                     <ConfigSidebarGroupLabel>{t(`agents.scope.${scope}`)}</ConfigSidebarGroupLabel>
                     {scopedProfiles.map((profile) => {
-                      const overridden = isSubagentProfileOverridden(profile, profiles);
+                      const protectedBuiltin = orchestrationProfileNames.has(profile.name.toLowerCase());
+                      const overridden = protectedBuiltin
+                        ? profile.scope !== "builtin"
+                        : isSubagentProfileOverridden(profile, profiles);
                       return (
                         <ConfigSidebarItem
                           key={profileKey(profile)}
@@ -640,6 +661,9 @@ export function AgentsConfig({
                   <div style={{ display: "flex", flexWrap: "wrap", gap: "10px 20px" }}>
                     <Toggle label={t("agents.inheritContext")} disabled={disabled} checked={draft.inheritContext} onChange={(checked) => update("inheritContext", checked)} />
                     <Toggle label={t("agents.background")} disabled={disabled} checked={draft.runInBackground} onChange={(checked) => update("runInBackground", checked)} />
+                    <span title={t("agents.fastModeDescription")}>
+                      <Toggle label={t("agents.fastMode")} disabled={disabled} checked={draft.fastMode} onChange={(checked) => update("fastMode", checked)} />
+                    </span>
                   </div>
                 </ConfigDetailStack>
               )}

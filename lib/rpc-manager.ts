@@ -34,11 +34,17 @@ import {
 } from "./subagent-extension";
 import {
   listSubagentProfiles,
+  ORCHESTRATION_MAIN_ROLE,
   readSubagentRun,
   readSubagentSessionResources,
   SUBAGENT_CONTROL_TOOL_NAMES,
 } from "./subagents";
 import { createSubagentController } from "./subagent-runtime";
+import { applyFastMode } from "./subagent-fast-mode";
+import { markForkCostBaseline } from "./fork-cost";
+import { readTaskEnvelope } from "./orchestration-task";
+import { resolveWorktreeRoot } from "./project-context";
+import { createOrchestrationToolsExtension } from "./orchestration-tools";
 import { isBuiltInSubagentsEnabled } from "./subagent-settings";
 import { resolveShellTools } from "./powershell-settings";
 import { CHAT_ONLY_RESOURCE_LOADER_OPTIONS, contextFilesSystemPrompt } from "./chat-only";
@@ -165,6 +171,15 @@ export interface RpcSessionStartOptions {
   initialModel?: { provider: string; modelId: string };
   allowInitialModelFallback?: boolean;
   thinkingLevel?: ThinkingLevel;
+  mainDispatcher?: boolean;
+}
+
+const MAIN_DISPATCHER_ENTRY_TYPE = "pi-web:main-dispatcher";
+
+export function readMainDispatcherSession(entries: readonly SessionEntry[]): boolean {
+  return entries.some((entry) => entry.type === "custom" && entry.customType === MAIN_DISPATCHER_ENTRY_TYPE
+    && (entry.data as { version?: number; enabled?: boolean } | undefined)?.version === 1
+    && (entry.data as { enabled?: boolean } | undefined)?.enabled === true);
 }
 
 const CODING_TOOL_NAMES = ["read", "bash", "powershell", "edit", "write", "grep", "find", "ls"];
@@ -543,6 +558,14 @@ export class AgentSessionWrapper {
 
   async send(command: Record<string, unknown>): Promise<unknown> {
     const type = command.type as string;
+    const runtimeEntries = (this.inner.sessionManager.getEntries?.() ?? []) as unknown as SessionEntry[];
+    const orchestrationRole = runtimeEntries.some((entry) => entry.type === "custom"
+      && entry.customType === "pi-web:subagent"
+      && (entry.data as { orchestrationEnabled?: boolean } | undefined)?.orchestrationEnabled === true);
+    if ((readMainDispatcherSession(runtimeEntries) || orchestrationRole)
+      && (type === "set_model" || type === "set_thinking_level" || type === "set_tools")) {
+      throw new Error("Orchestration role model, effort, and tools are pinned for this session");
+    }
     const allowedDuringReplacement = COMMANDS_ALLOWED_DURING_SESSION_REPLACEMENT.has(type);
     if (this.sessionReplacement && !allowedDuringReplacement) {
       throw new Error("Session is being copied to a new session");
@@ -757,6 +780,8 @@ export class AgentSessionWrapper {
               .join("\n") + "\n";
             writeFileSync(newSessionFile, content, { encoding: "utf8", flag: "wx" });
           }
+
+          markForkCostBaseline(forkedManager);
 
           const newSessionId = forkedManager.getSessionId();
           cacheSessionPath(newSessionId, newSessionFile);
@@ -1777,6 +1802,9 @@ export async function setRpcSessionTools(
     if (readSubagentSessionResources(manager.getEntries() as unknown as SessionEntry[])) {
       throw new Error("Subagent tool selection is fixed by its profile");
     }
+    if (readMainDispatcherSession(manager.getEntries() as unknown as SessionEntry[])) {
+      throw new Error("Dispatcher tool selection is pinned for this session");
+    }
     if (toolNames === undefined) appendClearedSessionToolSelection(manager);
     else appendSessionToolSelection(manager, toolNames);
     invalidateSessionListCache();
@@ -1787,6 +1815,9 @@ export async function setRpcSessionTools(
   if (existing.isRunning()) throw new Error("Cannot change tools while the session is running");
   if (readSubagentSessionResources(existing.inner.sessionManager.getEntries() as unknown as SessionEntry[])) {
     throw new Error("Subagent tool selection is fixed by its profile");
+  }
+  if (readMainDispatcherSession(existing.inner.sessionManager.getEntries() as unknown as SessionEntry[])) {
+    throw new Error("Dispatcher tool selection is pinned for this session");
   }
 
   const hasCurrentResourcePolicy = typeof existing.isChatOnly === "function"
@@ -1864,7 +1895,7 @@ export function getRpcSessionInfos(options: { includeTransient?: boolean } = {})
     const firstUserMessage = messages.find((entry) => entry.message.role === "user");
     const sessionFile = manager.getSessionFile() ?? session.sessionFile;
     const persisted = Boolean(sessionFile && existsSync(sessionFile));
-    const subagent = readSubagentRun(entries as unknown as SessionEntry[], header?.id ?? session.sessionId, sessionFile ?? "");
+    const subagent = readSubagentRun(entries as unknown as SessionEntry[], header?.id ?? session.sessionId, sessionFile ?? "", header?.parentSession ?? "");
 
     // An ensure_session call creates an idle, empty runtime while the composer
     // loads commands. Do not leak it into history before a prompt is accepted.
@@ -1897,6 +1928,7 @@ export function getRpcSessionInfos(options: { includeTransient?: boolean } = {})
           profile: subagent.profile,
           description: subagent.description,
           status: session.isRunning() ? "running" as const : subagent.status,
+          ...(subagent.rootTaskId ? { rootTaskId: subagent.rootTaskId } : {}),
         },
       } : {}),
       transient: !persisted,
@@ -1973,23 +2005,53 @@ export async function startRpcSession(
     if (!cwd) throw new Error("cwd is required for a new session");
     sessionManager = SessionManager.create(cwd, undefined);
   }
+  const existingEntries = sessionManager.getEntries() as unknown as SessionEntry[];
+  const mainDispatcher = readMainDispatcherSession(existingEntries) || (!sessionFile && options.mainDispatcher === true);
+  if (mainDispatcher && !isBuiltInSubagentsEnabled()) {
+    throw new Error("Dispatcher requires enabled built-in subagents");
+  }
+  if (sessionFile && options.mainDispatcher && !mainDispatcher) {
+    throw new Error("Dispatcher mode can only be enabled when creating a new session");
+  }
+  if (!sessionFile && mainDispatcher) {
+    sessionManager.appendCustomEntry(MAIN_DISPATCHER_ENTRY_TYPE, { version: 1, enabled: true });
+  }
   const sessionCwd = sessionManager.getCwd();
+  const subagentMeta = existingEntries.find((entry) => entry.type === "custom" && entry.customType === "pi-web:subagent");
+  const subagentMetadata = subagentMeta?.type === "custom"
+    ? subagentMeta.data as { orchestrationEnabled?: boolean; subagentSessionId?: string; profile?: string } | undefined
+    : undefined;
+  if (subagentMetadata?.orchestrationEnabled === true
+    && subagentMetadata.subagentSessionId !== sessionManager.getSessionId()) {
+    throw new Error("Forked subagent cannot reuse another task's orchestration identity");
+  }
   const subagentResources = sessionFile
     ? readSubagentSessionResources(
         sessionManager.getEntries() as unknown as SessionEntry[],
       )
     : null;
+  if (subagentMetadata?.orchestrationEnabled === true && !subagentResources) {
+    throw new Error("Orchestration child has an invalid persisted tool policy");
+  }
+  const orchestrationTask = subagentResources && subagentMetadata?.orchestrationEnabled === true
+    ? readTaskEnvelope(existingEntries)
+    : null;
+  if (subagentResources && subagentMetadata?.orchestrationEnabled === true && !orchestrationTask) {
+    throw new Error("Orchestration child is missing its persisted task envelope");
+  }
   const persistedToolNames = subagentResources
     ? undefined
     : readSessionToolSelection(sessionManager.getEntries() as unknown as SessionEntry[]);
-  const selectedToolNames = subagentResources?.tools ?? persistedToolNames ?? requestedToolNames;
+  const selectedToolNames = mainDispatcher
+    ? [...SUBAGENT_CONTROL_TOOL_NAMES]
+    : subagentResources?.tools ?? persistedToolNames ?? requestedToolNames;
   if (!subagentResources && persistedToolNames === undefined && requestedToolNames !== undefined) {
     appendSessionToolSelection(sessionManager, requestedToolNames);
   }
   const subagentLoadsResources = Boolean(
     subagentResources?.loadExtensions || subagentResources?.loadSkills,
   );
-  const chatOnly = selectedToolNames?.length === 0 && !subagentLoadsResources;
+  const chatOnly = !mainDispatcher && selectedToolNames?.length === 0 && !subagentLoadsResources;
   const finishStartingSession = trackStartingSession(sessionCwd);
   const starting = (async () => {
     // Some extensions access the SDK's global theme even outside the terminal UI.
@@ -2014,7 +2076,9 @@ export async function startRpcSession(
     // before the SDK restores the saved model from the session file.
     // Gate untrusted project extensions so opening a repository does not run
     // its .pi/extensions code automatically (see lib/project-trust.ts, #236).
-    const trustReloadOptions = subagentResources
+    const trustReloadOptions = mainDispatcher
+      ? undefined
+      : subagentResources
       ? subagentLoadsResources
         ? projectTrustReloadOptions(sessionCwd, agentDir)
         : undefined
@@ -2028,12 +2092,31 @@ export async function startRpcSession(
     // after the session is created, so the getter is filled in below.
     const exactSystemPromptRef: { current?: () => string } = {};
     const exactSystemPromptExtension = createExactSystemPromptExtension(() => exactSystemPromptRef.current?.());
-    const usesExactSystemPrompt = chatOnly || subagentResources?.exactSystemPrompt !== undefined;
+    const usesExactSystemPrompt = mainDispatcher || chatOnly || subagentResources?.exactSystemPrompt !== undefined;
     const services = await createAgentSessionServices({
       cwd: sessionCwd,
       agentDir,
       settingsManager,
-      resourceLoaderOptions: subagentResources
+      resourceLoaderOptions: mainDispatcher
+        ? {
+            noExtensions: true,
+            noSkills: true,
+            noPromptTemplates: true,
+            noThemes: true,
+            noContextFiles: true,
+            systemPrompt: " ",
+            systemPromptOverride: () => undefined,
+            extensionFactories: [
+              exactSystemPromptExtension,
+              createSubagentExtension(
+                SUBAGENT_CONTROLLER.extensionRuntime,
+                () => listSubagentProfiles(sessionCwd, { orchestrationEnabled: true })
+                  .filter((profile) => profile.name === "orchestration-task-owner"),
+                isBuiltInSubagentsEnabled,
+              ),
+            ],
+          }
+        : subagentResources
         ? {
             noExtensions: !subagentResources.loadExtensions,
             noSkills: !subagentResources.loadSkills,
@@ -2047,7 +2130,34 @@ export async function startRpcSession(
                 }
               : {}),
             appendSystemPrompt: subagentResources.appendSystemPrompt,
-            ...(usesExactSystemPrompt ? { extensionFactories: [exactSystemPromptExtension] } : {}),
+            ...((usesExactSystemPrompt || subagentResources.allowedSubagents?.length || orchestrationTask)
+              ? { extensionFactories: [
+                  ...(usesExactSystemPrompt ? [exactSystemPromptExtension] : []),
+                  ...(subagentResources.allowedSubagents?.length
+                    ? [createSubagentExtension(
+                        SUBAGENT_CONTROLLER.extensionRuntime,
+                        () => listSubagentProfiles(sessionCwd, { orchestrationEnabled: true })
+                          .filter((candidate) => subagentResources.allowedSubagents!.some((name) => name.toLowerCase() === candidate.name.toLowerCase())),
+                        isBuiltInSubagentsEnabled,
+                      )]
+                    : []),
+                  ...(orchestrationTask
+                    ? [createOrchestrationToolsExtension({
+                        cwd: resolveWorktreeRoot(sessionCwd),
+                        taskId: orchestrationTask.taskId,
+                        profileName: subagentMetadata!.profile ?? "",
+                        ...(orchestrationTask.mainSessionId && orchestrationTask.mainSessionPath
+                          ? { mainSessionId: orchestrationTask.mainSessionId, mainSessionPath: orchestrationTask.mainSessionPath }
+                          : {}),
+                        ...(subagentResources.writerAllowedPaths ? {
+                          allowedPaths: subagentResources.writerAllowedPaths,
+                          expectedSnapshotId: subagentResources.writerExpectedSnapshotId,
+                          expectedProjectFingerprint: subagentResources.writerProjectFingerprint,
+                        } : {}),
+                      })]
+                    : []),
+                ] }
+              : {}),
           }
         : chatOnly
           ? { ...CHAT_ONLY_RESOURCE_LOADER_OPTIONS, extensionFactories: [exactSystemPromptExtension] }
@@ -2098,19 +2208,30 @@ export async function startRpcSession(
     const startupModel = restoredModel && services.modelRuntime.hasConfiguredAuth(restoredModel.provider)
       ? restoredModel
       : initial?.model;
+    const [dispatcherProvider, ...dispatcherIdParts] = ORCHESTRATION_MAIN_ROLE.model.split("/");
+    const dispatcherModel = mainDispatcher
+      ? services.modelRuntime.getModel(dispatcherProvider, dispatcherIdParts.join("/"))
+      : undefined;
+    if (mainDispatcher && (!dispatcherModel || !services.modelRuntime.hasConfiguredAuth(dispatcherProvider))) {
+      throw new Error(`Dispatcher requires available ${ORCHESTRATION_MAIN_ROLE.model} with configured authentication`);
+    }
     const { session: inner } = await createAgentSessionFromServices({
       services,
       sessionManager,
-      ...(startupModel ? { model: startupModel } : {}),
-      ...(initial?.thinkingLevel ? { thinkingLevel: initial.thinkingLevel } : {}),
+      ...(mainDispatcher ? { model: dispatcherModel, thinkingLevel: ORCHESTRATION_MAIN_ROLE.thinking }
+        : {
+            ...(startupModel ? { model: startupModel } : {}),
+            ...(initial?.thinkingLevel ? { thinkingLevel: initial.thinkingLevel } : {}),
+          }),
       ...(scope.scopedModels.length > 0 ? { scopedModels: [...scope.scopedModels] } : {}),
       ...(toolsOption !== undefined ? { tools: toolsOption } : {}),
-      ...(subagentResources ? { excludeTools: [...SUBAGENT_CONTROL_TOOL_NAMES] } : {}),
+      ...(subagentResources ? { excludeTools: subagentResources.allowedSubagents?.length ? [] : [...SUBAGENT_CONTROL_TOOL_NAMES] } : {}),
     });
+    if (subagentResources?.fastMode) applyFastMode(inner, true);
 
     const persistedPreferences = await persistExplicitStartupPreferences(
       services.settingsManager,
-      {
+      mainDispatcher ? {} : {
         ...(effectiveInitialModel ? { model: effectiveInitialModel } : {}),
         ...(thinkingLevel ? { thinkingLevel } : {}),
       },
@@ -2127,11 +2248,16 @@ export async function startRpcSession(
     // If specific tool names were requested (non-empty), set the active tools to the
     // requested builtin coding tools PLUS all extension/package tools, so installed
     // extensions stay usable in Pi Web just like in the `pi` CLI.
-    if (!subagentResources && !chatOnly) {
+    if (mainDispatcher) {
+      inner.setActiveToolsByName([...SUBAGENT_CONTROL_TOOL_NAMES]);
+      applyFastMode(inner, ORCHESTRATION_MAIN_ROLE.fastMode);
+    } else if (!subagentResources && !chatOnly) {
       inner.setActiveToolsByName(withExtensionTools(inner, selectedToolNames ?? inner.getActiveToolNames()));
     }
 
-    const exactSystemPrompt = subagentResources?.exactSystemPrompt !== undefined
+    const exactSystemPrompt = mainDispatcher
+      ? () => ORCHESTRATION_MAIN_ROLE.systemPrompt
+      : subagentResources?.exactSystemPrompt !== undefined
       ? () => subagentResources.exactSystemPrompt!
       : chatOnly
         ? subagentResources

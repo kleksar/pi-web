@@ -371,6 +371,8 @@ export interface SessionInfo {
         profile: string;
         description: string;
         status: SubagentSessionStatus;
+        /** One owner task; only sub-agent costs can be attributed to it. */
+        rootTaskId?: string;
       };
   /** Main repo root shared by all worktrees of this cwd (cwd itself for non-git dirs).
    *  Always set by the server; optional because the client builds transient

@@ -3,6 +3,7 @@ import type { SubagentProfile } from "./subagents";
 
 export interface SubagentProfilesResponse {
   profiles: SubagentProfile[];
+  orchestrationProfileNames?: string[];
 }
 
 export interface SubagentSettingsResponse {

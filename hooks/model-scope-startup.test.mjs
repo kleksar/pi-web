@@ -10,10 +10,12 @@ test("new-session startup sends only explicit browser overrides", () => {
     source.indexOf("const loadSlashCommands"),
   );
 
-  assert.match(ensureSource, /const selectedModel = newSessionModelOverrideRef\.current;/);
+  assert.match(ensureSource, /const selectedModel = newSessionDispatcher \? null : newSessionModelOverrideRef\.current;/);
   assert.doesNotMatch(ensureSource, /newSessionModel \?\? newSessionDefaultModel/);
-  assert.match(ensureSource, /const selectedThinkingLevel = thinkingLevelOverrideRef\.current;/);
+  assert.match(ensureSource, /const selectedThinkingLevel = newSessionDispatcher \? null : thinkingLevelOverrideRef\.current;/);
   assert.doesNotMatch(ensureSource, /thinkingLevel !== "auto"/);
+  assert.match(ensureSource, /\.\.\.\(newSessionDispatcher \? \{ mainDispatcher: true \} : \{\}\)/);
+  assert.match(ensureSource, /const toolNames = newSessionDispatcher \? undefined : getToolNamesForPreset\(toolPreset\);/);
 });
 
 test("new-session startup adopts server state only while explicit overrides are unchanged", () => {

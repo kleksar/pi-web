@@ -48,6 +48,9 @@ interface Props {
   /** Text-only composer without the session controls or outer spacing. */
   compact?: boolean;
   model?: { provider: string; modelId: string } | null;
+  mainDispatcherEnabled?: boolean;
+  /** Available only before a new session is created. */
+  onMainDispatcherChange?: (enabled: boolean) => void;
   isAutoModelSelection?: boolean;
   modelNames?: Record<string, string>;
   modelList?: { id: string; name: string; provider: string; input?: string[] }[];
@@ -549,7 +552,7 @@ export function ModelScopeWarningBanner({ warnings }: { warnings?: string[] }) {
 }
 
 export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
-  onSend, onAbort, onSteer, onFollowUp, isStreaming, model, isAutoModelSelection, modelNames, modelList, modelError, modelScopeWarnings, onModelChange, modelSwitching,
+  onSend, onAbort, onSteer, onFollowUp, isStreaming, model, mainDispatcherEnabled, onMainDispatcherChange, isAutoModelSelection, modelNames, modelList, modelError, modelScopeWarnings, onModelChange, modelSwitching,
   onCompact, onAbortCompaction, isCompacting, compactError, compactResult, toolPreset, onToolPresetChange,
   thinkingLevel, isAutoThinkingSelection = false, onThinkingLevelChange, availableThinkingLevels, thinkingLevelMap,
   retryInfo, queuedMessages, inputHistory = [], onRecallQueue,
@@ -2306,6 +2309,11 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
               </svg>
             </button>
             {/* Model selector - visible always, disabled while the session or switch is busy */}
+            {mainDispatcherEnabled && (
+              <span title={t("chat.mainDispatcherHint")} style={{ color: "var(--accent)", fontSize: 11, whiteSpace: "nowrap", padding: "0 6px" }}>
+                Luna High Fast
+              </span>
+            )}
             {(modelOptions.length > 0 || model || modelError) && onModelChange && (
               <ModelSelector
                 options={modelOptions}
@@ -2394,6 +2402,17 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                 backdropFilter: "blur(10px)",
               } : null),
             }}>
+            {onMainDispatcherChange && (
+              <button
+                type="button"
+                role="switch"
+                aria-checked={Boolean(mainDispatcherEnabled)}
+                aria-label={t("chat.mainDispatcher")}
+                title={t("chat.mainDispatcherHint")}
+                onClick={() => onMainDispatcherChange(!mainDispatcherEnabled)}
+                style={{ height: 32, padding: "0 8px", border: "none", borderRadius: 9, background: mainDispatcherEnabled ? "var(--bg-selected)" : "transparent", color: mainDispatcherEnabled ? "var(--accent)" : "var(--text-muted)", cursor: "pointer", fontSize: 12, whiteSpace: "nowrap" }}
+              >{t("chat.mainDispatcher")}</button>
+            )}
             {onThinkingLevelChange && (
               <div ref={thinkingDropdownRef} style={{ position: "relative" }}>
                 <button

@@ -79,7 +79,7 @@ test("keeps the enabled switch live for built-ins whose fields stay read-only", 
 test("persists existing profile toggles immediately without submitting unsaved fields", () => {
   assert.match(source, /const toggleEnabled = async \(enabled: boolean\)/);
   assert.match(source, /method: "PATCH"/);
-  assert.match(source, /JSON\.stringify\(\{ cwd, scope: selected\.scope, name: selected\.name, enabled \}\)/);
+  assert.match(source, /JSON\.stringify\(\{ cwd, scope: selected\.scope, name: selected\.name, enabled, .*showOrchestrationProfiles/);
   assert.match(source, /setDraft\(\(current\) => \(\{ \.\.\.current, enabled: saved\.enabled \}\)\)/);
   assert.doesNotMatch(source, /method: "PATCH"[\s\S]*?profile: draft/);
 });

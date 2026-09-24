@@ -138,6 +138,35 @@ test("profiles route keeps same-name global and project profiles independently e
   assert.equal(response.status, 200);
 });
 
+test("opt-in roster listing stays separate and a profile toggle preserves Fast and nested permissions", async (t) => {
+  const cwd = await mkdtemp(join(tmpdir(), "pi-web-subagent-route-optin-"));
+  allowFileRoot(cwd);
+  t.after(() => rm(cwd, { recursive: true, force: true }));
+
+  const url = `http://localhost/api/subagents/profiles?cwd=${encodeURIComponent(cwd)}`;
+  const ordinary = await (await GET(new Request(url))).json();
+  const orchestration = await (await GET(new Request(`${url}&orchestration=1`))).json();
+  assert.equal(ordinary.profiles.some((item) => item.name === "orchestration-task-owner"), false);
+  assert.equal(orchestration.profiles.some((item) => item.name === "orchestration-task-owner"), true);
+  assert.equal(orchestration.orchestrationProfileNames.includes("orchestration-task-owner"), true);
+
+  const put = await PUT(jsonRequest("PUT", { cwd, scope: "project", profile: profile({
+    fastMode: true, allowedSubagents: ["code-reader"], model: "openai-codex/gpt-6-luna",
+  }) }));
+  assert.equal(put.status, 200);
+  const toggled = await PATCH(jsonRequest("PATCH", {
+    cwd, scope: "project", name: "api-test-agent", enabled: false, orchestration: true,
+  }));
+  assert.equal(toggled.status, 200);
+  const saved = (await toggled.json()).profile;
+  assert.equal(saved.enabled, false);
+  assert.equal(saved.fastMode, true);
+  assert.deepEqual(saved.allowedSubagents, ["code-reader"]);
+  const source = await readFile(join(cwd, ".pi", "agents", "api-test-agent.md"), "utf8");
+  assert.match(source, /pi_web_fast_mode: true/);
+  assert.match(source, /orchestration_children:\s*\n\s*- code-reader/);
+});
+
 test("profiles route toggles a built-in through settings.json without writing a profile file", async (t) => {
   const cwd = await mkdtemp(join(tmpdir(), "pi-web-subagent-route-"));
   allowFileRoot(cwd);
