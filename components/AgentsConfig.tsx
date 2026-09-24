@@ -169,6 +169,7 @@ export function AgentsConfig({
   const { t } = useI18n();
   const [profiles, setProfiles] = useState<SubagentProfile[]>([]);
   const [orchestrationProfileNames, setOrchestrationProfileNames] = useState<ReadonlySet<string>>(new Set());
+  const [coreProfileNames, setCoreProfileNames] = useState<ReadonlySet<string>>(new Set());
   const [modelOptions, setModelOptions] = useState<ModelsData["modelList"]>([]);
   const [modelsLoading, setModelsLoading] = useState(true);
   const [modelsError, setModelsError] = useState<string | null>(null);
@@ -186,7 +187,7 @@ export function AgentsConfig({
   const [toggling, setToggling] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [builtInEnabled, setBuiltInEnabled] = useState(false);
-  const [showOrchestrationProfiles, setShowOrchestrationProfiles] = useState(false);
+  const [showOrchestrationProfiles, setShowOrchestrationProfiles] = useState(true);
   const [maxConcurrent, setMaxConcurrent] = useState(10);
   const [settingsLoading, setSettingsLoading] = useState(true);
   const [settingsSaving, setSettingsSaving] = useState(false);
@@ -216,6 +217,7 @@ export function AgentsConfig({
       setRosterAvailable(Boolean(data.rosterAvailable));
       setRosterRoot(data.rosterRoot ?? "");
       setOrchestrationProfileNames(new Set((data.orchestrationProfileNames ?? []).map((name) => name.toLowerCase())));
+      setCoreProfileNames(new Set((data.coreProfileNames ?? []).map((name) => name.toLowerCase())));
       const rememberedKey = preferredKey ?? getLastSettingsSelection("agents", cwd);
       const chosen = next.find((profile) => profileKey(profile) === rememberedKey)
         ?? next.find((profile) => profile.scope === "roster")
@@ -374,6 +376,8 @@ export function AgentsConfig({
   const editing = mode !== "view";
   const creating = mode === "create";
   const disabled = !editing || saving || toggling;
+  const protectedRole = selected?.scope === "roster" && orchestrationProfileNames.has(selected.name.toLowerCase());
+  const protectedFieldsDisabled = disabled || protectedRole;
   const displayedScope = creating ? targetScope : selected?.scope;
   const displayedPath = creating
     ? targetScope === "global"
@@ -569,7 +573,7 @@ export function AgentsConfig({
                     {scopedProfiles.map((profile) => {
                       const protectedBuiltin = orchestrationProfileNames.has(profile.name.toLowerCase());
                       const overridden = protectedBuiltin
-                        ? profile.scope !== "builtin"
+                        ? profile.scope !== "builtin" && profile.scope !== "roster"
                         : isSubagentProfileOverridden(profile, profiles);
                       return (
                         <ConfigSidebarItem
@@ -615,7 +619,7 @@ export function AgentsConfig({
                     </ConfigDetailHeaderInfo>
                     <ConfigDetailActions>
                       {selected && (mode === "view" || mode === "edit") && <ConfigButton size="small" onClick={beginDuplicate} disabled={saving || toggling}>{t("agents.duplicate")}</ConfigButton>}
-                      {selected && isWritableScope(selected.scope) && mode === "edit" && <ConfigButton variant="danger" size="small" onClick={() => void remove()} disabled={saving || toggling}>{t("agents.delete")}</ConfigButton>}
+                      {selected && isWritableScope(selected.scope) && mode === "edit" && !coreProfileNames.has(selected.name.toLowerCase()) && <ConfigButton variant="danger" size="small" onClick={() => void remove()} disabled={saving || toggling}>{t("agents.delete")}</ConfigButton>}
                       <ConfigSwitch checked={draft.enabled} disabled={switchDisabled} label={draft.enabled ? t("agents.disable") : t("agents.enable")} onChange={(checked) => void toggleEnabled(checked)} />
                     </ConfigDetailActions>
                   </ConfigDetailHeader>
@@ -660,17 +664,18 @@ export function AgentsConfig({
                   </Field>
 
                   <Field label={t("agents.tools")}>
+                    {protectedRole && <span style={{ color: "var(--text-muted)", fontSize: 11 }}>{t("agents.hostPolicy")}</span>}
                     <div style={{ display: "flex", flexWrap: "wrap", gap: "8px 16px" }}>
                       {TOOL_OPTIONS.map((tool) => (
-                        <Toggle key={tool} label={tool} disabled={disabled} checked={draft.tools.includes(tool)} onChange={(checked) => update("tools", checked ? [...draft.tools, tool] : draft.tools.filter((item) => item !== tool))} />
+                        <Toggle key={tool} label={tool} disabled={protectedFieldsDisabled} checked={draft.tools.includes(tool)} onChange={(checked) => update("tools", checked ? [...draft.tools, tool] : draft.tools.filter((item) => item !== tool))} />
                       ))}
                     </div>
                   </Field>
 
                   <Field label={t("agents.resources")}>
                     <div style={{ display: "flex", flexWrap: "wrap", gap: "8px 20px" }}>
-                      <Toggle label={t("agents.loadSkills")} disabled={disabled} checked={draft.loadSkills} onChange={(checked) => update("loadSkills", checked)} />
-                      <Toggle label={t("agents.loadExtensions")} disabled={disabled} checked={draft.loadExtensions} onChange={(checked) => update("loadExtensions", checked)} />
+                      <Toggle label={t("agents.loadSkills")} disabled={protectedFieldsDisabled} checked={draft.loadSkills} onChange={(checked) => update("loadSkills", checked)} />
+                      <Toggle label={t("agents.loadExtensions")} disabled={protectedFieldsDisabled} checked={draft.loadExtensions} onChange={(checked) => update("loadExtensions", checked)} />
                     </div>
                   </Field>
 
@@ -698,13 +703,13 @@ export function AgentsConfig({
                       </select>
                     </Field>
                     <Field label={t("agents.maxTurns")}>
-                      <input aria-label={t("agents.maxTurns")} type="number" min={1} value={draft.maxTurns ?? ""} disabled={disabled} onChange={(event) => update("maxTurns", event.target.value ? Number(event.target.value) : undefined)} style={controlStyle} />
+                      <input aria-label={t("agents.maxTurns")} type="number" min={1} value={draft.maxTurns ?? ""} disabled={protectedFieldsDisabled} onChange={(event) => update("maxTurns", event.target.value ? Number(event.target.value) : undefined)} style={controlStyle} />
                     </Field>
                   </div>
 
                   <div style={{ display: "flex", flexWrap: "wrap", gap: "10px 20px" }}>
-                    <Toggle label={t("agents.inheritContext")} disabled={disabled} checked={draft.inheritContext} onChange={(checked) => update("inheritContext", checked)} />
-                    <Toggle label={t("agents.background")} disabled={disabled} checked={draft.runInBackground} onChange={(checked) => update("runInBackground", checked)} />
+                    <Toggle label={t("agents.inheritContext")} disabled={protectedFieldsDisabled} checked={draft.inheritContext} onChange={(checked) => update("inheritContext", checked)} />
+                    <Toggle label={t("agents.background")} disabled={protectedFieldsDisabled} checked={draft.runInBackground} onChange={(checked) => update("runInBackground", checked)} />
                     <span title={t("agents.fastModeDescription")}>
                       <Toggle label={t("agents.fastMode")} disabled={disabled} checked={draft.fastMode} onChange={(checked) => update("fastMode", checked)} />
                     </span>

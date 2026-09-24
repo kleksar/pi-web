@@ -273,12 +273,14 @@ test("profile API saves tracked repository agents and reports local settings tha
   allowFileRoot(project);
   const roster = join(checkout, "orchestration");
   await mkdir(join(roster, "agents"), { recursive: true });
+  await writeFile(join(roster, "agents", "orchestration-task-owner.md"),
+    await readFile(new URL("../../../../orchestration/agents/orchestration-task-owner.md", import.meta.url)));
   await mkdir(join(testAgentDir, "agents"), { recursive: true });
   await writeFile(join(roster, "subagent-settings.json"),
     JSON.stringify({ version: 1, builtInEnabled: true, disabledBuiltIns: [] }));
   await writeFile(localSettings, JSON.stringify({ version: 1, disabledBuiltIns: [] }));
   execFileSync("git", ["init", "-q", checkout]);
-  execFileSync("git", ["-C", checkout, "add", "orchestration/subagent-settings.json"]);
+  execFileSync("git", ["-C", checkout, "add", "orchestration"]);
   execFileSync("git", ["-C", checkout, "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "initial"]);
   process.env.PI_WEB_ROSTER_ROOT = roster;
 
@@ -286,6 +288,24 @@ test("profile API saves tracked repository agents and reports local settings tha
   let body = await response.json();
   assert.equal(body.rosterAvailable, true);
   assert.equal(body.rosterRoot, roster);
+  assert.equal(body.profiles.some((item) => item.name === "orchestration-task-owner"), false);
+
+  response = await GET(new Request(`http://localhost/api/subagents/profiles?cwd=${encodeURIComponent(project)}&orchestration=1`));
+  body = await response.json();
+  assert.equal(body.orchestrationProfileNames.includes("orchestration-task-owner"), true);
+  const owner = body.profiles.find((item) => item.name === "orchestration-task-owner");
+  assert.equal(owner.scope, "roster");
+  response = await PUT(jsonRequest("PUT", { cwd: project, scope: "roster", profile: { ...owner, fastMode: true } }));
+  assert.equal(response.status, 200);
+  assert.equal((await response.json()).profile.fastMode, true);
+  response = await PATCH(jsonRequest("PATCH", {
+    cwd: project, scope: "roster", name: owner.name, enabled: false, orchestration: true,
+  }));
+  assert.equal(response.status, 200);
+  assert.equal((await response.json()).profile.enabled, false);
+  assert.match(await readFile(join(roster, "agents", `${owner.name}.md`), "utf8"), /pi_web_fast_mode: true/);
+  assert.match(execFileSync("git", ["-C", checkout, "status", "--short"], { encoding: "utf8" }),
+    / M orchestration\/agents\/orchestration-task-owner\.md/);
 
   response = await PUT(jsonRequest("PUT", { cwd: project, scope: "roster", profile: profile({ name: "git-agent" }) }));
   assert.equal(response.status, 200);

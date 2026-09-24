@@ -2,10 +2,10 @@ import type { SubagentProfile, SubagentScope } from "./subagents";
 
 const SUBAGENT_SCOPE_PRIORITY: Record<SubagentScope, number> = {
   builtin: 0,
-  roster: 1,
-  global: 2,
-  workspace: 3,
-  project: 4,
+  global: 1,
+  workspace: 2,
+  project: 3,
+  roster: 4,
 };
 
 export function isSubagentProfileOverridden(

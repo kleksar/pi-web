@@ -4,6 +4,8 @@ import { getAllowedFileRoots, isExistingFilePathAllowed } from "@/lib/file-acces
 import {
   deleteSubagentProfile,
   listSubagentProfileSources,
+  isOrchestrationSubagentProfile,
+  isCoreSubagentProfile,
   saveSubagentProfile,
   type SubagentProfile,
   type SubagentWritableScope,
@@ -46,11 +48,11 @@ export async function GET(req: Request) {
     if (orchestration !== null && orchestration !== "1") throw new Error("orchestration must be 1");
     const profiles = listSubagentProfileSources(cwd, { orchestrationEnabled: orchestration === "1" });
     const rosterRoot = getRepositoryRosterRoot();
-    if (orchestration !== "1") return NextResponse.json({ profiles, rosterAvailable: Boolean(rosterRoot), ...(rosterRoot ? { rosterRoot } : {}) });
-    const regularBuiltins = new Set(listSubagentProfileSources(cwd)
-      .filter((item) => item.scope === "builtin").map((item) => item.name));
+    const coreProfileNames = profiles.filter((item) => isCoreSubagentProfile(item.name)).map((item) => item.name);
+    if (orchestration !== "1") return NextResponse.json({ profiles, coreProfileNames, rosterAvailable: Boolean(rosterRoot), ...(rosterRoot ? { rosterRoot } : {}) });
     return NextResponse.json({ profiles,
-      orchestrationProfileNames: profiles.filter((item) => item.scope === "builtin" && !regularBuiltins.has(item.name)).map((item) => item.name),
+      coreProfileNames,
+      orchestrationProfileNames: profiles.filter((item) => isOrchestrationSubagentProfile(item.name)).map((item) => item.name),
       rosterAvailable: Boolean(rosterRoot), ...(rosterRoot ? { rosterRoot } : {}),
     });
   } catch (error) {
