@@ -40,7 +40,7 @@ import { ModelSelector } from "./ModelSelector";
 import { AgentResourceSelector } from "./AgentResourceSelector";
 import { OrchestrationMap } from "./OrchestrationMap";
 
-const TOOL_OPTIONS = ["read", "bash", "edit", "write", "grep", "find", "ls", "github_read"];
+const TOOL_OPTIONS = ["read", "bash", "edit", "write", "grep", "find", "ls", "github_read", "git_read"];
 const THINKING_OPTIONS = ["", "off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 
 type EditableProfile = SubagentProfileInput;

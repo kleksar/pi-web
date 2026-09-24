@@ -56,7 +56,7 @@ change this result, so inspect Settings → Main and Sub-agents if the delegatio
 tool is missing.
 
 In a new session whose project `origin` is GitHub, ask Main for open issues
-and PRs. It should delegate via a coordinator to `github-reader`, return URLs
+and PRs. It should delegate via a coordinator to `git-reader`, return URLs
 and retrieval times, and make no GitHub writes. If the repository is private,
 authenticate `gh` for the Pi Web process or set `GH_TOKEN`; verify that a
 missing credential is reported rather than a guessed live status.

@@ -34,7 +34,7 @@ source. Trusted project-specific policies can override shared settings.
 | Project questions | `evidence-coordinator` | Main asks for a cited overview or another bounded answer; evidence delegates reading to docs and code readers. |
 | Task coordination | `small-task-coordinator`, `task-coordinator`, `complex-task-coordinator` | Main selects one by impact, uncertainty, and reversibility, never by line count alone. |
 | Complex subteams | `evidence-coordinator`, `implementation-coordinator`, `verification-coordinator` | The complex coordinator requests targeted findings, a bounded implementation, then an independent check. |
-| Source retrieval | `project-policy-reader`, `project-requirements-reader`, `project-docs-reader`, `project-code-reader`, `github-reader` | Read local project evidence or current issues and PRs from the project's GitHub origin. |
+| Source retrieval | `project-policy-reader`, `project-requirements-reader`, `project-docs-reader`, `project-code-reader`, `git-reader` | Read local project evidence, local Git status and patches, or current GitHub issues and PRs. |
 | Analysis | `technical-analyst`, `architecture-reviewer`, `test-planner` | Analyze supplied evidence without file or shell tools; request missing evidence through a permitted provider where configured. |
 | Edits | `bounded-writer`, `documentation-writer` | Receive a settled change order and relevant project constraints, then edit within assigned files. |
 | Checks | `change-verifier` | Inspect diff and run targeted, non-destructive checks independently of the writer. |
@@ -76,7 +76,7 @@ cannot change a child's pinned model or effort through `Agent`.
 | `project-requirements-reader` | Luna | medium | on | Preserve exact acceptance criteria and source limits. |
 | `project-docs-reader` | Luna | low | on | Retrieve named documentation without broad analysis. |
 | `project-code-reader` | Luna | medium | on | Find specific symbols and cite observed behavior. |
-| `github-reader` | Luna | medium | on | Retrieve current GitHub issues and PRs without write operations. |
+| `git-reader` | Luna | medium | on | Retrieve local Git status and tracked patches or current GitHub issues and PRs without write operations. |
 | `technical-analyst` | Astra | medium | off | Analyze options and consequences from supplied evidence. |
 | `architecture-reviewer` | Astra | high | off | Review consequential architecture and contract decisions. |
 | `bounded-writer` | Sol | medium | off | Implement a change order with codebase-specific judgment. |
@@ -110,7 +110,7 @@ flowchart TD
   Complex --> Verify["Verification coordinator"]
 ```
 
-In the complex path, Evidence can delegate to the policy, requirements, docs,
+In the complex path, Astra analysis is conditional when the technical direction is already clear from user instruction and current specification; independent verification remains required. Evidence can delegate to the policy, requirements, docs,
 code, and GitHub readers. Implementation can delegate to bounded code and documentation
 writers. Verification has a test planner and a change verifier. The Analyst
 and architecture reviewer can start with a small brief, then ask the parent
@@ -120,6 +120,8 @@ strict `depends_on` edge requires an earlier successful result; a
 child by themselves. The verified graph fits the runtime limit of three agent
 levels below Main, with at most 32 active descendants per root and the shared
 concurrency setting initially set to 10.
+
+The `git_read` tool reports status metadata and staged or unstaged tracked-file patches in the selected session cwd/worktree only; untracked content is not opened. Patches may contain secrets and are returned only as tool output, never logged. Old sessions pin profile IDs and permissions: start a new Main session after the rename; an old `github-reader` snapshot may no longer be delegable because the old profile is not retained as a duplicate.
 
 The `github_read` tool is implemented by Pi Web, assigned only to profiles that
 select it, and constrained to read the current project's GitHub `origin`. It
@@ -133,7 +135,7 @@ unsupported rather than treated as GitHub.
 Project-specific approval rules and knowledge belong with their project.
 `project-policy-reader` retrieves applicable boundaries, and the coordinator
 passes a compact change order to the writer. A current issue or pull request
-from the project's GitHub origin goes to `github-reader`; other remote sources
+from the project's GitHub origin goes to `git-reader`; other remote sources
 and Figma designs still require a supplied artifact or suitable reader.
 Architecture review flags choices
 for the user; prompts alone are **not** a technical approval gate. The runtime

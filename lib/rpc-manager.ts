@@ -43,6 +43,7 @@ import {
 import { createSubagentController, profileAuthorityPin } from "./subagent-runtime";
 import { applyFastMode } from "./subagent-fast-mode";
 import { readEffectiveMainAgentConfig } from "./main-agent-config";
+import { createGitReadExtension } from "./git-read-extension";
 import { getRepositorySkillPaths } from "./repository-roster";
 import { MAIN_RESOURCE_META_TYPE, readMainSessionResources, type MainSessionResources } from "./main-agent-snapshot";
 import {
@@ -2307,12 +2308,13 @@ export async function startRpcSession(
               skills: import("@earendil-works/pi-coding-agent").Skill[];
               diagnostics: import("@earendil-works/pi-coding-agent").ResourceDiagnostic[];
             }) => ({ ...base, skills: filterPinnedSkills(base.skills, subagentResources.selectedSkills!) }) } : {}),
-            ...(usesExactSystemPrompt || childOrchestratorExtension || subagentResources.tools.includes("github_read")
+            ...(usesExactSystemPrompt || childOrchestratorExtension || subagentResources.tools.includes("github_read") || subagentResources.tools.includes("git_read")
               || subagentResources.selectedSkills !== undefined || subagentResources.selectedExtensionTools !== undefined
               ? { extensionFactories: [
                   ...(usesExactSystemPrompt ? [exactSystemPromptExtension] : []),
                   ...(childOrchestratorExtension ? [childOrchestratorExtension] : []),
                   ...(subagentResources.tools.includes("github_read") ? [createGitHubReadExtension(sessionCwd)] : []),
+                  ...(subagentResources.tools.includes("git_read") ? [createGitReadExtension(sessionCwd)] : []),
                   ...(subagentResources.selectedSkills !== undefined || subagentResources.selectedExtensionTools !== undefined
                     ? [pinnedResourceIntegrityExtension(
                       () => subagentResources.selectedSkills,
