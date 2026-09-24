@@ -9,7 +9,7 @@ pi_web_selected_skills:
 load_extensions: false
 inherit_context: false
 run_in_background: false
-pi_web_fast_mode: false
+pi_web_fast_mode: true
 model: openai-codex/gpt-6-luna
 thinking: medium
 pi_web_orchestration:

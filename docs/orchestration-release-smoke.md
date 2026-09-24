@@ -28,8 +28,10 @@ credentials are separate local data.
    separately; deleting `~/.pi` can remove local session/model configuration.
    In Models, enable `openai-codex/gpt-6-luna`, `openai-codex/gpt-6-sol`, and
    `openai-codex/gpt-6-astra`; check that the 16 repository profiles display
-   their assigned model and effort. A profile with an unavailable model will
-   fail to launch rather than silently select the Main model.
+   their assigned model and effort. Confirm Fast mode is enabled for all 11
+   Luna profiles and disabled for the three Sol and two Astra profiles; the
+   Main session has its own Fast mode setting. A profile with an unavailable
+   model will fail to launch rather than silently select the Main model.
    In Main → Resources, confirm built-in tools and extension tools both show
    no assignments in the repository scope. A session created before this
    policy change keeps its original tools and must not be reused for the check.

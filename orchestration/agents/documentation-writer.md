@@ -8,7 +8,7 @@ pi_web_selected_skills:
   - skills/implement-change-order/SKILL.md
 load_extensions: false
 inherit_context: false
-pi_web_fast_mode: false
+pi_web_fast_mode: true
 model: openai-codex/gpt-6-luna
 thinking: medium
 ---

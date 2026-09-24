@@ -57,36 +57,41 @@ Even a small code change can have a large blast radius. The reusable skills
 ## Model and effort defaults
 
 All 16 repository profiles pin an `openai-codex` model and a reasoning level.
+The 11 Luna profiles have Fast mode enabled by default; the three Sol and two
+Astra profiles have it disabled. Main uses its own session Fast mode setting.
 The Main coordinator uses the model selected for its own session; this table
 configures its **children**. These are initial allocations by role, not a
 measured quality or latency ranking for this roster. Nested orchestrators
 cannot change a child's pinned model or effort through `Agent`.
 
-| Profile | Model | Effort | Reason for the default |
-| --- | --- | --- | --- |
-| `small-task-coordinator` | Luna | low | Route a bounded, reversible task. |
-| `task-coordinator` | Luna | medium | Manage missing evidence and handoffs. |
-| `complex-task-coordinator` | Luna | high | Track multi-stage dependencies and decisions. |
-| `evidence-coordinator` | Luna | high | Reconcile cited code and documentation findings. |
-| `implementation-coordinator` | Luna | medium | Assign bounded, nonoverlapping edits. |
-| `verification-coordinator` | Luna | medium | Coordinate independent checks and report gaps. |
-| `project-policy-reader` | Luna | medium | Extract applicable constraints and approval rules. |
-| `project-requirements-reader` | Luna | medium | Preserve exact acceptance criteria and source limits. |
-| `project-docs-reader` | Luna | low | Retrieve named documentation without broad analysis. |
-| `project-code-reader` | Luna | medium | Find specific symbols and cite observed behavior. |
-| `technical-analyst` | Astra | medium | Analyze options and consequences from supplied evidence. |
-| `architecture-reviewer` | Astra | high | Review consequential architecture and contract decisions. |
-| `bounded-writer` | Sol | medium | Implement a change order with codebase-specific judgment. |
-| `documentation-writer` | Luna | medium | Update assigned docs against implemented behavior. |
-| `test-planner` | Sol | medium | Choose checks that expose failures and regressions. |
-| `change-verifier` | Sol | medium | Independently inspect a diff and targeted checks. |
+| Profile | Model | Effort | Fast | Reason for the default |
+| --- | --- | --- | --- | --- |
+| `small-task-coordinator` | Luna | low | on | Route a bounded, reversible task. |
+| `task-coordinator` | Luna | medium | on | Manage missing evidence and handoffs. |
+| `complex-task-coordinator` | Luna | high | on | Track multi-stage dependencies and decisions. |
+| `evidence-coordinator` | Luna | high | on | Reconcile cited code and documentation findings. |
+| `implementation-coordinator` | Luna | medium | on | Assign bounded, nonoverlapping edits. |
+| `verification-coordinator` | Luna | medium | on | Coordinate independent checks and report gaps. |
+| `project-policy-reader` | Luna | medium | on | Extract applicable constraints and approval rules. |
+| `project-requirements-reader` | Luna | medium | on | Preserve exact acceptance criteria and source limits. |
+| `project-docs-reader` | Luna | low | on | Retrieve named documentation without broad analysis. |
+| `project-code-reader` | Luna | medium | on | Find specific symbols and cite observed behavior. |
+| `technical-analyst` | Astra | medium | off | Analyze options and consequences from supplied evidence. |
+| `architecture-reviewer` | Astra | high | off | Review consequential architecture and contract decisions. |
+| `bounded-writer` | Sol | medium | off | Implement a change order with codebase-specific judgment. |
+| `documentation-writer` | Luna | medium | on | Update assigned docs against implemented behavior. |
+| `test-planner` | Sol | medium | off | Choose checks that expose failures and regressions. |
+| `change-verifier` | Sol | medium | off | Independently inspect a diff and targeted checks. |
 
 Here Luna, Sol, and Astra mean `gpt-6-luna`, `gpt-6-sol`, and `gpt-6-astra`.
 The installed Pi SDK 0.87.1 recognizes each under `openai-codex/` and maps
 these levels to supported efforts. Ensure all three models are enabled and
 the Codex provider is authenticated before starting a child; an unavailable
 pinned model fails explicitly. Compare results on identical task scenarios
-before raising effort or enabling Fast mode. API token prices are not a proxy
+before changing effort or Fast mode. The runtime pins the Fast setting for a
+child session and validates that its model uses a compatible Codex API. Provider
+billing is authoritative; the displayed cost can be an estimate if its response
+does not report the service tier. API token prices are not a proxy
 for a ChatGPT subscription allowance.
 
 The family positioning follows [OpenAI's model guidance](https://developers.openai.com/api/docs/models)
