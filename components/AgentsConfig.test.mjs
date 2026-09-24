@@ -61,8 +61,9 @@ test("resolves roster models by exact provider and id with name/id/raw fallbacks
   assert.doesNotMatch(sidebarRow, /\{t\("agents\.model"\)\}:/);
 });
 
-test("shows compact model and effort on independent truncated lines beneath the sidebar name", () => {
-  assert.match(sidebarRow, /\{profile\.displayName\}<\/ConfigSidebarText>[\s\S]*?rosterModelName\(profile\.model[\s\S]*?<\/span>\s*<span className=\{`agents-profile-metadata[^>]*>\s*\{t\("agents\.thinking"\)\} · \{profile\.thinking \|\| t\("agents\.inherited"\)\}\s*<\/span>/);
+test("shows one truncated model and raw effort line beneath the sidebar name", () => {
+  assert.match(sidebarRow, /\{profile\.displayName\}<\/ConfigSidebarText>\s*<span className=\{`agents-profile-metadata[^>]*>\s*\{rosterModelName\(profile\.model, modelOptions, t\("agents\.inherited"\)\)\} \{profile\.thinking \|\| t\("agents\.inherited"\)\}\s*<\/span>/);
+  assert.doesNotMatch(sidebarRow, /\{t\("agents\.thinking"\)\}/);
   assert.match(cssSource, /\.agents-profile-summary \{[\s\S]*?min-width: 0;/);
   assert.match(cssSource, /\.agents-profile-metadata \{[\s\S]*?display: block;[\s\S]*?overflow: hidden;[\s\S]*?text-overflow: ellipsis;[\s\S]*?white-space: nowrap;/);
 });
@@ -71,7 +72,7 @@ test("labels each unset sidebar field Inherited without resolving session values
   assert.match(source, /if \(!value\) return inherited/);
   assert.match(sidebarRow, /profile\.thinking \|\| t\("agents\.inherited"\)/);
   assert.doesNotMatch(sidebarRow, /t\("agents\.inherit"\)|Parent default/);
-  assert.equal((sidebarRow.match(/className=\{`agents-profile-metadata\$\{profile\.enabled \? "" : " is-muted"\}`\}/g) ?? []).length, 2);
+  assert.equal((sidebarRow.match(/className=\{`agents-profile-metadata\$\{profile\.enabled \? "" : " is-muted"\}`\}/g) ?? []).length, 1);
   assert.match(cssSource, /\.agents-profile-metadata\.is-muted \{[\s\S]*?opacity: 0\.7;/);
 });
 
