@@ -8,7 +8,7 @@ pi_web_selected_skills:
   - skills/coordinate-task/SKILL.md
 load_extensions: false
 inherit_context: false
-run_in_background: false
+run_in_background: true
 pi_web_fast_mode: true
 model: openai-codex/gpt-6-luna
 thinking: medium

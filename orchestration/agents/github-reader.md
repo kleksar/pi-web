@@ -6,7 +6,7 @@ tools: github_read
 load_skills: false
 load_extensions: false
 inherit_context: false
-run_in_background: false
+run_in_background: true
 pi_web_fast_mode: true
 model: openai-codex/gpt-6-luna
 thinking: medium
