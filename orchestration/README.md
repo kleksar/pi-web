@@ -76,7 +76,7 @@ cannot change a child's pinned model or effort through `Agent`.
 | `project-requirements-reader` | Luna | medium | on | Preserve exact acceptance criteria and source limits. |
 | `project-docs-reader` | Luna | low | on | Retrieve named documentation without broad analysis. |
 | `project-code-reader` | Luna | medium | on | Find specific symbols and cite observed behavior. |
-| `git-reader` | Luna | medium | on | Retrieve current GitHub issues and PRs without write operations. |
+| `git-reader` | Luna | medium | on | Retrieve local Git status and tracked patches or current GitHub issues and PRs without write operations. |
 | `technical-analyst` | Astra | medium | off | Analyze options and consequences from supplied evidence. |
 | `architecture-reviewer` | Astra | high | off | Review consequential architecture and contract decisions. |
 | `bounded-writer` | Sol | medium | off | Implement a change order with codebase-specific judgment. |

@@ -24,7 +24,8 @@ export async function readLocalGit(cwd: string, input: { action: string; stage?:
   };
   // Reject bare repositories and paths outside the selected worktree; `-- .` confines
   // output to the selected directory even when it is a subdirectory of the worktree.
-  const root = (await run(["rev-parse", "--show-toplevel"])).trim();
+  // Strip only Git's line terminator; trim() would corrupt a worktree path ending in spaces.
+  const root = (await run(["rev-parse", "--show-toplevel"])).replace(/\n$/, "");
   const realRoot = await realpath(root).catch(() => { throw new Error("Git worktree is unavailable"); });
   if (directory !== realRoot && !directory.startsWith(realRoot + "/")) throw new Error("Selected directory is outside the worktree");
   if (input.action === "diff") {
