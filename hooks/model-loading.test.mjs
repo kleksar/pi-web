@@ -36,13 +36,14 @@ function setup(fetchImpl) {
     controller: new AbortController(),
     newSessionCwd: "/project", session: null, isNew: true,
     sessionIdRef: { current: null }, thinkingLevelOverrideRef: { current: null },
+    dispatcherOverrideRef: { current: false },
     thinkingLevelPinsRef: { current: {} }, defaultThinkingLevelRef: { current: null },
     asConcreteThinkingLevel: (value) => (!value || value === "auto" ? null : value),
     fetch: fetchImpl,
     MODELS_RETRY_DELAYS_MS: script(schedule.initializer.getText(source)).runInNewContext(),
     delay: async (ms) => { delays.push(ms); },
   };
-  for (const name of ["ModelError", "ModelNames", "ModelScopeWarnings", "ModelThinkingLevels", "ModelThinkingLevelMaps", "ModelList", "NewSessionDefaultModel", "NewSessionDefaultThinkingLevel"]) {
+  for (const name of ["ModelError", "ModelNames", "ModelScopeWarnings", "ModelThinkingLevels", "ModelThinkingLevelMaps", "ModelList", "NewSessionDefaultModel", "NewSessionDefaultThinkingLevel", "NewSessionDispatcher"]) {
     context[`set${name}`] = (value) => writes.push([name, value]);
   }
   context.loadModels = loadScript.runInNewContext(context);
@@ -70,6 +71,7 @@ test("model-load failures stay visible through bounded retries and clear on reco
       modelList: [{ provider: "custom", id: "test", name: "Test" }],
       defaultModel: { provider: "custom", modelId: "test" },
       thinkingLevelPins: { "custom/test": "high" },
+      defaultMainDispatcher: true,
     });
   });
   await recovered.run();
@@ -79,6 +81,7 @@ test("model-load failures stay visible through bounded retries and clear on reco
   assert.ok(recovered.writes.some(([name, value]) => name === "ModelList" && value[0].id === "test"));
   assert.ok(recovered.writes.some(([name, value]) => name === "NewSessionDefaultModel" && value.modelId === "test"));
   assert.ok(recovered.writes.some(([name, value]) => name === "NewSessionDefaultThinkingLevel" && value === "high"));
+  assert.ok(recovered.writes.some(([name, value]) => name === "NewSessionDispatcher" && value === true));
 });
 
 test("cancelling model loads prevents state writes and further retries", async () => {

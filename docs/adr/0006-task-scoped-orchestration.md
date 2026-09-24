@@ -1,8 +1,10 @@
-# 0006 — Opt-in task-scoped orchestration
+# 0006 — Task-scoped orchestration
 
 ## Status
 
-Experimental. Default Pi Web sessions and their existing agents retain their behavior.
+Experimental. In a Git checkout with a saved Main configuration and enabled
+built-in sub-agents, new chats default to Task dispatcher. Standard sessions
+remain an explicit new-chat choice. Existing sessions retain their mode.
 
 ## Context
 
@@ -61,7 +63,7 @@ snapshot are retried sequentially; they are not concurrent writes. One
 background batch can collect several reader results without waking the
 owner for each report.
 
-The UI exposes the opt-in when creating a session and lists the experimental
+The UI exposes the session mode when creating or viewing a session and lists the experimental
 profiles separately in Agents. Agent sessions are individually inspectable.
 The cost display includes each child and the session family; task cost is
 attributed to children because Main's shared spend crosses task boundaries.

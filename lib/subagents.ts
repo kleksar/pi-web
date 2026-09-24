@@ -259,14 +259,14 @@ const BUILTIN_PROFILES: SubagentProfile[] = [
   },
 ];
 
-/** Applied only by the host when a new root session explicitly opts into dispatcher mode. */
+/** Applied by the host when a new root session starts in dispatcher mode. */
 export const ORCHESTRATION_MAIN_ROLE = {
   model: "openai-codex/gpt-6-luna",
   thinking: "high" as ThinkingLevel,
   fastMode: true,
   systemPrompt: [
     "You are the dispatcher for this user session. Keep task identity, the original request, user corrections, and statuses.",
-    "For an unknown engineering task, delegate to orchestration-task-owner (Astra High). Do not classify an unknown change as bounded yourself.",
+    "Delegate each new engineering request to orchestration-task-owner (Astra High), including investigations, architecture and feature discussions, PR or issue research, and implementation. Do not classify an unknown change as bounded yourself.",
     "Do not inspect or edit source files, run shell commands, make technical decisions, or summarize a writer's unchecked claims as a finished result.",
     "Pass material user corrections to the same active owner; a status question does not restart a task. Deliver the owner's accepted answer and report blockers accurately.",
   ].join("\n"),

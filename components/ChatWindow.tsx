@@ -284,7 +284,7 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
     isAutoModelSelection,
     isAutoThinkingSelection,
     agentPhase,
-    isNew, mainDispatcherEnabled, setMainDispatcherEnabled,
+    isNew, mainDispatcherEnabled, sessionModePending, setMainDispatcherEnabled,
     showScrollToBottom,
     sessionIdRef, scrollContainerRef,
     lastUserMsgRef, promptAnchorActive,
@@ -872,13 +872,14 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
       isStreaming={sessionBusy}
       model={displayModelValue}
       mainDispatcherEnabled={mainDispatcherEnabled}
-      onMainDispatcherChange={isNew && !sessionIdRef.current ? setMainDispatcherEnabled : undefined}
+      sessionModePending={sessionModePending}
+      onMainDispatcherChange={isNew && !sessionIdRef.current && !sessionModePending ? setMainDispatcherEnabled : undefined}
       isAutoModelSelection={isAutoModelSelection}
       modelNames={modelNames}
       modelList={modelList}
       modelError={modelError}
       modelScopeWarnings={modelScopeWarnings}
-      onModelChange={mainDispatcherEnabled ? undefined : handleModelChange}
+      onModelChange={sessionModePending || mainDispatcherEnabled ? undefined : handleModelChange}
       modelSwitching={modelSwitching}
       onCompact={session || isNew ? handleCompact : undefined}
       onAbortCompaction={handleAbortCompaction}
@@ -886,10 +887,10 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
       compactError={compactError}
       compactResult={compactResult}
       toolPreset={toolPreset}
-      onToolPresetChange={mainDispatcherEnabled ? undefined : session || isNew ? handleToolPresetChange : undefined}
+      onToolPresetChange={sessionModePending || mainDispatcherEnabled ? undefined : session || isNew ? handleToolPresetChange : undefined}
       thinkingLevel={thinkingLevel}
       isAutoThinkingSelection={isAutoThinkingSelection}
-      onThinkingLevelChange={mainDispatcherEnabled ? undefined : session || isNew ? handleThinkingLevelChange : undefined}
+      onThinkingLevelChange={sessionModePending || mainDispatcherEnabled ? undefined : session || isNew ? handleThinkingLevelChange : undefined}
       availableThinkingLevels={availableThinkingLevels}
       thinkingLevelMap={currentThinkingLevelMap}
       retryInfo={retryInfo}

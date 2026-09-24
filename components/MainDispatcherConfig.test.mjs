@@ -32,8 +32,9 @@ test("edits the persisted dispatcher with a revision and keeps the fixed guard r
   assert.match(editor, /disabled=\{!path \|\| loading \|\| saving \|\| conflict\}/);
 });
 
-test("describes configurable opt-in Task dispatcher without claiming a fixed model", () => {
+test("distinguishes the new-chat dispatcher default from existing sessions", () => {
   assert.match(labels, /"chat\.mainDispatcher": "Task dispatcher"/);
   assert.match(labels, /"chat\.mainDispatcherHint": "New Task dispatcher sessions use the model, thinking level and Fast mode from Settings → Main\./);
-  assert.match(labels, /"main\.description": "Configure new Task dispatcher sessions\. Existing sessions keep their settings\."/);
+  assert.match(labels, /"main\.description": "With a Git-owned Main configuration and enabled sub-agents, new chats start as Task dispatchers\. Existing sessions keep their mode\./);
+  assert.match(labels, /"chat\.standardSession": "Standard session · direct tools"/);
 });

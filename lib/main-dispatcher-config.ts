@@ -7,6 +7,7 @@ import { writePrivateFileAtomicSync } from "./atomic-file";
 import { readBoundedRegularFile } from "./bounded-file";
 import { getRepositoryRosterRoot } from "./repository-roster";
 import { ORCHESTRATION_MAIN_ROLE } from "./subagents";
+import { isBuiltInSubagentsEnabled } from "./subagent-settings";
 
 export interface MainDispatcherConfig {
   model: string;
@@ -98,6 +99,12 @@ export function readMainDispatcherConfig(path = getMainDispatcherConfigPath()): 
     path,
     basePrompt: ORCHESTRATION_MAIN_ROLE.systemPrompt,
   };
+}
+
+/** A versioned Main configuration opts new chats into delegation when agents are available. */
+export function isMainDispatcherDefaultEnabled(): boolean {
+  const path = getMainDispatcherConfigPath();
+  return Boolean(path && isBuiltInSubagentsEnabled() && readMainDispatcherConfig(path).revision !== "absent");
 }
 
 /** Only the server chooses the repository path. Never accept a caller-supplied path from HTTP. */

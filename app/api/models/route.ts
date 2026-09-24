@@ -11,6 +11,7 @@ import {
 import { resolveVisibleModels, selectInitialModelScope } from "@/lib/model-scope";
 import { getAllowedFileRoots, isExistingFilePathAllowed } from "@/lib/file-access";
 import { projectTrustReloadOptions } from "@/lib/project-trust";
+import { isMainDispatcherDefaultEnabled } from "@/lib/main-dispatcher-config";
 
 export const dynamic = "force-dynamic";
 
@@ -124,9 +125,20 @@ export async function GET(req: Request) {
     return Response.json({ error: "Access denied" }, { status: 403 });
   }
 
+  let defaultMainDispatcher: boolean;
   try {
-    return Response.json(await loadModelsWithCache(cwd, () => loadModels(cwd)));
+    defaultMainDispatcher = isMainDispatcherDefaultEnabled();
   } catch {
-    return Response.json(withSafeModelLoadFailure(EMPTY_MODELS));
+    // A broken dispatcher configuration must not turn a new chat into an
+    // unrestricted standard session through the model-list fallback.
+    return Response.json({ error: "Unable to read Main dispatcher settings" }, { status: 500 });
+  }
+
+  try {
+    const models = await loadModelsWithCache(cwd, () => loadModels(cwd));
+    // Keep this outside the model cache: Git settings can change between chats.
+    return Response.json({ ...models, defaultMainDispatcher });
+  } catch {
+    return Response.json({ ...withSafeModelLoadFailure(EMPTY_MODELS), defaultMainDispatcher });
   }
 }
