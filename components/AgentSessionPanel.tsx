@@ -2,6 +2,7 @@
 
 import { useMemo, useState } from "react";
 import { useI18n } from "@/hooks/useI18n";
+import { buildAgentRunTree, visibleAgentRunIds } from "@/lib/agent-run-tree";
 import type { SessionInfo, SubagentSessionStatus } from "@/lib/types";
 
 interface Props {
@@ -72,12 +73,20 @@ function AgentRow({
   main,
   selected,
   running,
+  depth = 0,
+  hasChildren = false,
+  collapsed = false,
+  onToggle,
   onSelect,
 }: {
   session: SessionInfo;
   main?: boolean;
   selected: boolean;
   running: boolean;
+  depth?: number;
+  hasChildren?: boolean;
+  collapsed?: boolean;
+  onToggle?: () => void;
   onSelect: () => void;
 }) {
   const { locale, t } = useI18n();
@@ -89,6 +98,16 @@ function AgentRow({
     : `${relation?.profile ?? t("agentSwitcher.subagent")} · ${formatRelativeTime(session.modified, locale)}`;
 
   return (
+    <div style={{ display: "flex", alignItems: "stretch", paddingLeft: depth * 15 }}>
+      {hasChildren ? (
+        <button
+          type="button"
+          onClick={onToggle}
+          aria-label={`${t(collapsed ? "agentSwitcher.expand" : "agentSwitcher.collapse")} ${primary}`}
+          aria-expanded={!collapsed}
+          style={{ width: 23, flexShrink: 0, border: "none", background: "transparent", color: "var(--text-muted)", cursor: "pointer" }}
+        >{collapsed ? "▸" : "▾"}</button>
+      ) : <span style={{ width: 23, flexShrink: 0 }} />}
     <button
       type="button"
       role="option"
@@ -147,26 +166,32 @@ function AgentRow({
         )}
       </span>
     </button>
+    </div>
   );
 }
 
 export function AgentSessionPanel({ rootSession, subagents, selectedSessionId, runningSessionIds, onSelectSession }: Props) {
   const { t } = useI18n();
   const [query, setQuery] = useState("");
-  const sortedSubagents = useMemo(() => [...subagents].sort((a, b) => {
-    const aRunning = runningSessionIds.has(a.id);
-    const bRunning = runningSessionIds.has(b.id);
-    if (aRunning !== bRunning) return aRunning ? -1 : 1;
-    return b.modified.localeCompare(a.modified);
-  }), [runningSessionIds, subagents]);
+  const [collapsedIds, setCollapsedIds] = useState<ReadonlySet<string>>(new Set());
+  const rows = useMemo(() => buildAgentRunTree(rootSession, subagents, runningSessionIds), [rootSession, subagents, runningSessionIds]);
+  const parentIds = useMemo(() => new Set(rows.map((row) => row.parentId)), [rows]);
   const normalizedQuery = query.trim().toLowerCase();
-  const visibleSubagents = normalizedQuery
-    ? sortedSubagents.filter((session) => {
-        const relation = session.relation?.kind === "subagent" ? session.relation : null;
-        return [relation?.description, relation?.profile, session.name, session.firstMessage]
-          .some((value) => value?.toLowerCase().includes(normalizedQuery));
-      })
-    : sortedSubagents;
+  const matchingIds = normalizedQuery ? new Set(rows.filter(({ session }) => {
+    const relation = session.relation?.kind === "subagent" ? session.relation : null;
+    return [relation?.description, relation?.profile, session.name, session.firstMessage]
+      .some((value) => value?.toLowerCase().includes(normalizedQuery));
+  }).map(({ session }) => session.id)) : null;
+  const filteredIds = matchingIds ? visibleAgentRunIds(rootSession.id, rows, matchingIds) : null;
+  const hidden = new Set<string>();
+  const visibleSubagents = rows.filter(({ session, parentId }) => {
+    if (filteredIds && !filteredIds.has(session.id)) return false;
+    if (!normalizedQuery && (hidden.has(parentId) || collapsedIds.has(parentId))) {
+      hidden.add(session.id);
+      return false;
+    }
+    return true;
+  });
   const runningCount = subagents.filter((session) => runningSessionIds.has(session.id)).length;
 
   return (
@@ -215,14 +240,31 @@ export function AgentSessionPanel({ rootSession, subagents, selectedSessionId, r
           <AgentRow
             session={rootSession}
             main
+            hasChildren={parentIds.has(rootSession.id)}
+            collapsed={!normalizedQuery && collapsedIds.has(rootSession.id)}
+            onToggle={() => setCollapsedIds((old) => {
+              const next = new Set(old);
+              if (next.has(rootSession.id)) next.delete(rootSession.id);
+              else next.add(rootSession.id);
+              return next;
+            })}
             selected={rootSession.id === selectedSessionId}
             running={runningSessionIds.has(rootSession.id)}
             onSelect={() => onSelectSession(rootSession)}
           />
-          {visibleSubagents.map((session) => (
+          {visibleSubagents.map(({ session, depth }) => (
             <AgentRow
               key={session.id}
               session={session}
+              depth={depth}
+              hasChildren={parentIds.has(session.id)}
+              collapsed={!normalizedQuery && collapsedIds.has(session.id)}
+              onToggle={() => setCollapsedIds((old) => {
+                const next = new Set(old);
+                if (next.has(session.id)) next.delete(session.id);
+                else next.add(session.id);
+                return next;
+              })}
               selected={session.id === selectedSessionId}
               running={runningSessionIds.has(session.id)}
               onSelect={() => onSelectSession(session)}

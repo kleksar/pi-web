@@ -15,16 +15,18 @@ import {
   readSessionHeader,
 } from "@/lib/session-reader";
 import { sessionPathKey } from "@/lib/session-path";
-import { abortSubagent, getRpcSession, getRpcSessionInfos } from "@/lib/rpc-manager";
+import { abortSubagent, getRpcSession, getRpcSessionInfos, readMainDispatcherSession } from "@/lib/rpc-manager";
 import { projectTreeForResponse, toSummaryTree } from "@/lib/project-tree";
 import { computeSessionTotalActiveMs } from "@/lib/session-timing";
 import { computeSessionStats } from "@/lib/session-stats";
+import { hasForkCostBaseline, ownSessionCost } from "@/lib/fork-cost";
 import { startServerPerf } from "@/lib/perf";
 import { computeSessionRevision } from "@/lib/session-revision";
 import type { SessionEntry } from "@/lib/types";
 import { readSubagentRun, readSubagentSessionResources, SUBAGENT_META_TYPE } from "@/lib/subagents";
 import { readSessionToolSelection } from "@/lib/session-tool-selection";
 import { jsonResponse } from "@/lib/json-response";
+import { disposeOrchestrationTaskArtifacts } from "@/lib/orchestration-tools";
 
 export async function GET(
   req: Request,
@@ -59,6 +61,7 @@ export async function GET(
     perf?.span("open");
     const filePath = liveRpc?.sessionFile || sm.getSessionFile() || resolvedPath || "";
     const entries = sm.getEntries();
+    const mainDispatcher = readMainDispatcherSession(entries as SessionEntry[]);
     const leafId = sm.getLeafId();
     const summaryTree = searchParams.get("tree") === "summary";
     const tree = summaryTree
@@ -81,6 +84,10 @@ export async function GET(
     // the same aggregation the SDK's getSessionStats() uses. Lets the client
     // keep monotonic token/cost counters across compaction and page reloads.
     const stats = computeSessionStats(entries as unknown as SessionEntry[]);
+    const header = sm.getHeader();
+    const ownCost = ownSessionCost(entries as SessionEntry[], stats.cost, header?.parentSession, header?.id);
+    if (ownCost === null) stats.costKnown = false;
+    else stats.cost = ownCost;
     perf?.span("stats");
     // Opaque freshness token for the session view cache. Derived from the
     // disk fingerprint and the actual read source; null tells the client the
@@ -97,14 +104,13 @@ export async function GET(
     const firstUserEntry = entries.find((entry) => entry.type === "message" && entry.message.role === "user");
     const firstUserMessage = firstUserEntry?.type === "message" ? firstUserEntry.message : undefined;
 
-    const header = sm.getHeader();
     let modified = header?.timestamp ?? new Date().toISOString();
     try { modified = statSync(filePath).mtime.toISOString(); } catch { /* use header timestamp */ }
     const parentSessionId = header?.parentSession
       ? await resolveSessionIdByPath(header.parentSession)
       : undefined;
     const subagent = header
-      ? readSubagentRun(entries as never, header.id, filePath)
+      ? readSubagentRun(entries as never, header.id, filePath, header.parentSession ?? "")
       : null;
     const toolNames = readSubagentSessionResources(entries as never)?.tools
       ?? readSessionToolSelection(entries as never);
@@ -124,8 +130,8 @@ export async function GET(
         : "(no messages)",
       parentSessionId,
       ...(subagent
-        ? { relation: { kind: "subagent" as const, parentSessionId: subagent.parentSessionId, profile: subagent.profile, description: subagent.description, status: liveRpc?.isRunning() ? "running" as const : subagent.status } }
-        : header.parentSession
+        ? { relation: { kind: "subagent" as const, parentSessionId: subagent.parentSessionId, profile: subagent.profile, description: subagent.description, status: liveRpc?.isRunning() ? "running" as const : subagent.status, ...(subagent.rootTaskId ? { rootTaskId: subagent.rootTaskId } : {}) } }
+        : header.parentSession || hasForkCostBaseline(entries as SessionEntry[], header.id)
           ? { relation: { kind: "fork" as const, ...(parentSessionId ? { originSessionId: parentSessionId } : {}) } }
           : {}),
       transient: !filePath || !existsSync(filePath),
@@ -142,6 +148,7 @@ export async function GET(
         ...(summaryTree ? { treeFormat: "summary" as const } : {}),
         snapshotRevision,
         context,
+        mainDispatcher,
         stats,
         totalActiveMs,
         ...(toolNames !== undefined ? { toolNames } : {}),
@@ -158,6 +165,7 @@ export async function GET(
         ...(summaryTree ? { treeFormat: "summary" as const } : {}),
         snapshotRevision,
         context,
+        mainDispatcher,
         stats,
         totalActiveMs,
         ...(toolNames !== undefined ? { toolNames } : {}),
@@ -272,6 +280,10 @@ export async function DELETE(
         pending.push(childId);
       }
     }
+    const ownedTaskIds = new Set(sessions.flatMap((session) => session.relation?.kind === "subagent"
+      && session.relation.profile === "orchestration-task-owner"
+      && session.relation.rootTaskId && deletedSessionIds.has(session.id)
+      ? [session.relation.rootTaskId] : []));
     const deletedPaths = new Map<string, string>([[id, filePath]]);
     for (const deletedId of deletedSessionIds) {
       const sessionPath = sessionPaths.get(deletedId);
@@ -354,6 +366,10 @@ export async function DELETE(
       }
       invalidateSessionPathCache(deletedId);
       invalidateSessionManagerCache(deletedPath);
+    }
+    for (const taskId of ownedTaskIds) {
+      try { await disposeOrchestrationTaskArtifacts(taskId); }
+      catch (error) { console.error("[pi-web] failed to remove task evidence:", error); }
     }
     invalidateSessionListCache();
     return NextResponse.json({ ok: true });

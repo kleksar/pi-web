@@ -14,8 +14,10 @@ test("keeps the main session first and makes every agent session selectable", ()
   assert.match(source, /aria-selected=\{selected\}/);
 });
 
-test("sorts running subagents first and enables search only for larger families", () => {
-  assert.match(source, /if \(aRunning !== bRunning\) return aRunning \? -1 : 1/);
+test("keeps nesting, expandable parents and search in larger families", () => {
+  assert.match(source, /buildAgentRunTree\(rootSession, subagents, runningSessionIds\)/);
+  assert.match(source, /visibleAgentRunIds\(rootSession\.id, rows, matchingIds\)/);
+  assert.match(source, /onToggle=\{\(\) => setCollapsedIds/);
   assert.match(source, /subagents\.length > 8/);
   assert.match(source, /relation\?\.description, relation\?\.profile, session\.name, session\.firstMessage/);
   assert.match(source, /maxHeight: "min\(58dvh, 480px\)"/);

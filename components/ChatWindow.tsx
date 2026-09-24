@@ -284,7 +284,7 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
     isAutoModelSelection,
     isAutoThinkingSelection,
     agentPhase,
-    isNew,
+    isNew, mainDispatcherEnabled, setMainDispatcherEnabled,
     showScrollToBottom,
     sessionIdRef, scrollContainerRef,
     lastUserMsgRef, promptAnchorActive,
@@ -871,12 +871,14 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
       onPromptWithStreamingBehavior={agentRunning ? handlePromptWithStreamingBehavior : undefined}
       isStreaming={sessionBusy}
       model={displayModelValue}
+      mainDispatcherEnabled={mainDispatcherEnabled}
+      onMainDispatcherChange={isNew && !sessionIdRef.current ? setMainDispatcherEnabled : undefined}
       isAutoModelSelection={isAutoModelSelection}
       modelNames={modelNames}
       modelList={modelList}
       modelError={modelError}
       modelScopeWarnings={modelScopeWarnings}
-      onModelChange={handleModelChange}
+      onModelChange={mainDispatcherEnabled ? undefined : handleModelChange}
       modelSwitching={modelSwitching}
       onCompact={session || isNew ? handleCompact : undefined}
       onAbortCompaction={handleAbortCompaction}
@@ -884,10 +886,10 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
       compactError={compactError}
       compactResult={compactResult}
       toolPreset={toolPreset}
-      onToolPresetChange={session || isNew ? handleToolPresetChange : undefined}
+      onToolPresetChange={mainDispatcherEnabled ? undefined : session || isNew ? handleToolPresetChange : undefined}
       thinkingLevel={thinkingLevel}
       isAutoThinkingSelection={isAutoThinkingSelection}
-      onThinkingLevelChange={session || isNew ? handleThinkingLevelChange : undefined}
+      onThinkingLevelChange={mainDispatcherEnabled ? undefined : session || isNew ? handleThinkingLevelChange : undefined}
       availableThinkingLevels={availableThinkingLevels}
       thinkingLevelMap={currentThinkingLevelMap}
       retryInfo={retryInfo}

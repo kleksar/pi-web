@@ -195,7 +195,7 @@ function resolveScannedSessionRelation(
   if (!scanned.parentSessionPath) return { originSessionId, subagent: null };
 
   try {
-    const subagent = readSubagentRun(readSessionRelationEntries(scanned.path), scanned.id, scanned.path);
+    const subagent = readSubagentRun(readSessionRelationEntries(scanned.path), scanned.id, scanned.path, scanned.parentSessionPath ?? "");
     return { originSessionId, subagent };
   } catch {
     // Malformed or concurrently removed session.
@@ -225,7 +225,7 @@ function mapScannedSession(
       : scanned.firstMessage || "(no messages)",
     parentSessionId: originSessionId,
     ...(subagent
-      ? { relation: { kind: "subagent" as const, parentSessionId: subagent.parentSessionId, profile: subagent.profile, description: subagent.description, status: subagent.status } }
+      ? { relation: { kind: "subagent" as const, parentSessionId: subagent.parentSessionId, profile: subagent.profile, description: subagent.description, status: subagent.status, ...(subagent.rootTaskId ? { rootTaskId: subagent.rootTaskId } : {}) } }
       : scanned.parentSessionPath
         ? { relation: { kind: "fork" as const, ...(originSessionId ? { originSessionId } : {}) } }
         : {}),
