@@ -202,7 +202,7 @@ export interface SubagentRunInfo {
 
 const DEFAULT_TOOLS = ["read", "bash", "edit", "write", "grep", "find", "ls"];
 // Pi Web registers this read-only tool as an inline extension for selected leaves.
-const BUILTIN_TOOLS = new Set([...DEFAULT_TOOLS, "github_read"]);
+const BUILTIN_TOOLS = new Set([...DEFAULT_TOOLS, "github_read", "git_read"]);
 const SUBAGENT_CONTROL_TOOLS = new Set<string>(SUBAGENT_CONTROL_TOOL_NAMES);
 const SUBAGENT_SCOPES = new Set<SubagentScope>(["builtin", "roster", "global", "workspace", "project"]);
 const THINKING_LEVELS = new Set<ThinkingLevel>(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);

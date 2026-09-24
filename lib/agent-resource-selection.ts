@@ -92,7 +92,7 @@ export function portableSelectedSkillReferences(root: string, paths: readonly st
 export const RESERVED_EXTENSION_TOOL_NAMES = new Set([
   "read", "bash", "powershell", "edit", "write", "grep", "find", "ls",
   "Agent", "get_subagent_result", "steer_subagent",
-  "github_read",
+  "github_read", "git_read",
 ]);
 
 /** Explicit tool assignments must not activate a different implementation of a built-in. */
@@ -108,6 +108,7 @@ export function assertNoReservedExtensionToolCollisions(
       if (extension.path === "<inline:pi-web-subagents>"
         && (name === "Agent" || name === "get_subagent_result" || name === "steer_subagent")) continue;
       if (extension.path === "<inline:pi-web-github-read>" && name === "github_read") continue;
+      if (extension.path === "<inline:pi-web-git-read>" && name === "git_read") continue;
       throw new Error(`Extension ${extension.path} overrides reserved built-in tool ${name}; remove the conflicting extension before assigning extension tools`);
     }
   }
