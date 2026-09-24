@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useI18n } from "@/hooks/useI18n";
 import type { SessionInfo, SubagentSessionStatus } from "@/lib/types";
 
@@ -12,237 +12,140 @@ interface Props {
   onSelectSession: (session: SessionInfo) => void;
 }
 
-function sessionTitle(session: SessionInfo): string {
-  return session.name || session.firstMessage || session.id.slice(0, 12);
+export function useAgentProfileNames(sessions: readonly SessionInfo[]): ReadonlyMap<string, string> {
+  const cwds = [...new Set(sessions.filter((session) => session.relation?.kind === "subagent").map((session) => session.cwd))].sort().join("\n");
+  const [names, setNames] = useState<ReadonlyMap<string, string>>(new Map());
+  useEffect(() => {
+    let active = true;
+    void Promise.all(cwds ? cwds.split("\n").map(async (cwd) => {
+      try {
+        const response = await fetch(`/api/subagents/profiles?cwd=${encodeURIComponent(cwd)}`);
+        if (!response.ok) return [] as [string, string][];
+        const data = await response.json() as { profiles?: { name: string; displayName: string }[] };
+        return (data.profiles ?? []).map((profile): [string, string] => [`${cwd}\0${profile.name}`, profile.displayName]);
+      } catch { return [] as [string, string][]; }
+    }) : []).then((results) => { if (active) setNames(new Map(results.flat())); });
+    return () => { active = false; };
+  }, [cwds]);
+  return names;
 }
 
-function formatRelativeTime(value: string, locale: string): string {
+export function agentName(session: SessionInfo, names: ReadonlyMap<string, string>): string {
+  const relation = session.relation;
+  if (relation?.kind !== "subagent") return session.name || session.firstMessage || session.id.slice(0, 12);
+  return names.get(`${session.cwd}\0${relation.profile}`) || relation.profile || session.id.slice(0, 12);
+}
+
+export function agentStatus(session: SessionInfo, running: ReadonlySet<string>): SubagentSessionStatus | "unknown" {
+  if (running.has(session.id)) return "running";
+  return session.relation?.kind === "subagent" ? session.relation.status ?? "unknown" : "unknown";
+}
+
+export function agentTree(root: SessionInfo, descendants: readonly SessionInfo[]): { session: SessionInfo; depth: number }[] {
+  const byParent = new Map<string, SessionInfo[]>();
+  for (const session of descendants) {
+    if (session.relation?.kind !== "subagent") continue;
+    const siblings = byParent.get(session.relation.parentSessionId) ?? [];
+    siblings.push(session);
+    byParent.set(session.relation.parentSessionId, siblings);
+  }
+  for (const siblings of byParent.values()) siblings.sort((a, b) => b.modified.localeCompare(a.modified));
+  const rows: { session: SessionInfo; depth: number }[] = [];
+  const seen = new Set([root.id]);
+  const visit = (parentId: string, depth: number) => {
+    for (const session of byParent.get(parentId) ?? []) {
+      if (seen.has(session.id)) continue;
+      seen.add(session.id);
+      rows.push({ session, depth });
+      visit(session.id, depth + 1);
+    }
+  };
+  visit(root.id, 1);
+  return rows;
+}
+
+function relativeTime(value: string, locale: string): string {
   const timestamp = new Date(value).getTime();
   if (!Number.isFinite(timestamp)) return "";
-  const elapsedSeconds = Math.round((timestamp - Date.now()) / 1000);
+  const minutes = Math.round((timestamp - Date.now()) / 60000);
   const formatter = new Intl.RelativeTimeFormat(locale, { numeric: "auto" });
-  if (Math.abs(elapsedSeconds) < 60) return formatter.format(elapsedSeconds, "second");
-  const elapsedMinutes = Math.round(elapsedSeconds / 60);
-  if (Math.abs(elapsedMinutes) < 60) return formatter.format(elapsedMinutes, "minute");
-  const elapsedHours = Math.round(elapsedMinutes / 60);
-  if (Math.abs(elapsedHours) < 24) return formatter.format(elapsedHours, "hour");
-  return formatter.format(Math.round(elapsedHours / 24), "day");
+  if (Math.abs(minutes) < 60) return formatter.format(minutes, "minute");
+  const hours = Math.round(minutes / 60);
+  if (Math.abs(hours) < 24) return formatter.format(hours, "hour");
+  return formatter.format(Math.round(hours / 24), "day");
 }
 
-function statusColor(status: SubagentSessionStatus): string {
-  if (status === "running" || status === "starting") return "var(--accent)";
-  if (status === "needs_context") return "#0d9488";
-  if (status === "completed") return "#16a34a";
-  if (status === "failed") return "#dc2626";
-  if (status === "aborted") return "#d97706";
-  return "var(--text-dim)";
-}
-
-function StatusIcon({ status }: { status: SubagentSessionStatus }) {
-  if (status === "needs_context") {
-    return (
-      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-        <path d="M5 4h10l4 4v12H5z" /><path d="M15 4v4h4" /><path d="M9 13h6M9 17h4" />
-      </svg>
-    );
-  }
-  if (status === "running" || status === "starting") {
-    return (
-      <svg className="animate-spin" width="13" height="13" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-        <circle cx="12" cy="12" r="9" stroke="currentColor" strokeWidth="2" opacity="0.25" />
-        <path d="M21 12a9 9 0 0 0-9-9" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
-      </svg>
-    );
-  }
-  if (status === "failed") {
-    return (
-      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden="true">
-        <circle cx="12" cy="12" r="9" /><path d="m9 9 6 6M15 9l-6 6" />
-      </svg>
-    );
-  }
-  if (status === "aborted" || status === "interrupted") {
-    return (
-      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden="true">
-        <circle cx="12" cy="12" r="9" /><path d="M9 9h6v6H9z" />
-      </svg>
-    );
-  }
-  return (
-    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-      <circle cx="12" cy="12" r="9" /><path d="m8 12 3 3 5-6" />
-    </svg>
-  );
-}
-
-function AgentRow({
-  session,
-  main,
-  selected,
-  running,
-  onSelect,
-}: {
-  session: SessionInfo;
-  main?: boolean;
-  selected: boolean;
-  running: boolean;
-  onSelect: () => void;
-}) {
+export function AgentTreeRows({ rootSession, subagents, selectedSessionId, runningSessionIds, onSelectSession, compact = false, activeOnly = false }: Props & { compact?: boolean; activeOnly?: boolean }) {
   const { locale, t } = useI18n();
-  const relation = session.relation?.kind === "subagent" ? session.relation : null;
-  const status: SubagentSessionStatus = running ? "running" : relation?.status ?? "completed";
-  const primary = main ? t("agentSwitcher.main") : relation?.description || sessionTitle(session);
-  const secondary = main
-    ? sessionTitle(session)
-    : `${relation?.profile ?? t("agentSwitcher.subagent")} · ${formatRelativeTime(session.modified, locale)}`;
-
-  return (
-    <button
-      type="button"
-      role="option"
-      aria-selected={selected}
-      onClick={onSelect}
-      style={{
-        width: "100%",
-        minHeight: 56,
-        display: "grid",
-        gridTemplateColumns: "28px minmax(0, 1fr) auto",
-        alignItems: "center",
-        gap: 9,
-        padding: "7px 12px",
-        border: "none",
-        borderBottom: "1px solid var(--border)",
-        borderLeft: selected ? "2px solid var(--accent)" : "2px solid transparent",
-        background: selected ? "var(--bg-selected)" : "transparent",
-        color: "var(--text)",
-        cursor: "pointer",
-        textAlign: "left",
-      }}
-      onMouseEnter={(event) => {
-        if (!selected) event.currentTarget.style.background = "var(--bg-hover)";
-      }}
-      onMouseLeave={(event) => {
-        if (!selected) event.currentTarget.style.background = "transparent";
-      }}
-    >
-      <span style={{ width: 28, height: 28, display: "grid", placeItems: "center", color: main ? "var(--text-muted)" : "var(--accent)" }}>
-        {main ? (
-          <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-            <circle cx="12" cy="8" r="4" /><path d="M4 21a8 8 0 0 1 16 0" />
-          </svg>
-        ) : (
-          <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-            <rect x="5" y="7" width="14" height="11" rx="2" /><path d="M9 11h.01M15 11h.01M9 15h6M12 7V4M10 4h4" />
-          </svg>
-        )}
-      </span>
-      <span style={{ minWidth: 0 }}>
-        <span style={{ display: "block", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: 12, fontWeight: selected ? 600 : 500 }} title={primary}>
-          {primary}
+  const names = useAgentProfileNames(subagents);
+  const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(new Set());
+  const rows = useMemo(() => agentTree(rootSession, subagents), [rootSession, subagents]);
+  const children = new Set(rows.map(({ session }) => session.relation?.kind === "subagent" ? session.relation.parentSessionId : ""));
+  const visibleIds = activeOnly ? new Set(rows.filter(({ session }) => {
+    const status = agentStatus(session, runningSessionIds);
+    return status === "running" || status === "starting" || status === "needs_context" || status === "failed";
+  }).map(({ session }) => session.id)) : null;
+  if (visibleIds) {
+    const byId = new Map(subagents.map((session) => [session.id, session]));
+    for (const id of [...visibleIds]) {
+      let parent = byId.get(id)?.relation;
+      const seen = new Set([id]);
+      while (parent?.kind === "subagent" && !seen.has(parent.parentSessionId)) {
+        seen.add(parent.parentSessionId);
+        visibleIds.add(parent.parentSessionId);
+        parent = byId.get(parent.parentSessionId)?.relation;
+      }
+    }
+  }
+  const hidden = new Set<string>();
+  return <div role="tree" aria-label={t("agentSwitcher.title")}>
+    {([{ session: rootSession, depth: 0 }, ...rows]).map(({ session, depth }) => {
+      const parentId = session.relation?.kind === "subagent" ? session.relation.parentSessionId : null;
+      if ((visibleIds && depth > 0 && !visibleIds.has(session.id)) || (parentId && hidden.has(parentId))) { hidden.add(session.id); return null; }
+      const isCollapsed = collapsed.has(session.id);
+      if (isCollapsed) hidden.add(session.id);
+      const hasChildren = children.has(session.id);
+      const main = depth === 0;
+      const relation = session.relation?.kind === "subagent" ? session.relation : null;
+      const status = agentStatus(session, runningSessionIds);
+      const primary = main ? t("agentSwitcher.main") : agentName(session, names);
+      const secondary = main ? (session.name || session.firstMessage) : relation?.description;
+      return <div key={session.id} role="treeitem" aria-level={depth + 1} aria-expanded={hasChildren ? !isCollapsed : undefined} aria-selected={session.id === selectedSessionId} style={{ paddingLeft: 8 + depth * 17, display: "flex", alignItems: "center", borderBottom: "1px solid var(--border)", background: selectedSessionId === session.id ? "var(--bg-selected)" : "transparent" }}>
+        {hasChildren ? <button type="button" aria-label={isCollapsed ? "Expand agents" : "Collapse agents"} onClick={() => setCollapsed((old) => { const next = new Set(old); if (next.has(session.id)) next.delete(session.id); else next.add(session.id); return next; })} style={{ border: 0, background: "none", color: "var(--text-muted)", cursor: "pointer", padding: 5 }}>{isCollapsed ? "▸" : "▾"}</button> : <span style={{ width: 26, flexShrink: 0 }} />}
+        <button type="button" onClick={() => onSelectSession(session)} title={`${primary} · ${relation?.profile ?? session.id}\n${session.id}`} style={{ border: 0, background: "none", color: "var(--text)", textAlign: "left", cursor: "pointer", padding: "8px 4px", flex: 1, minWidth: 0 }}>
+          <strong style={{ display: "block", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: 12 }}>{primary}</strong>
+          {secondary && <span style={{ display: "block", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: "var(--text-dim)", fontSize: 11 }}>{secondary}</span>}
+          {compact && <span style={{ color: "var(--text-dim)", fontSize: 10 }}>{relativeTime(session.modified, locale)}</span>}
+        </button>
+        <span title={status} style={{ fontSize: 11, padding: "0 8px", whiteSpace: "nowrap", color: status === "failed" ? "#dc2626" : status === "needs_context" ? "#0d9488" : status === "running" || status === "starting" ? "var(--accent)" : "var(--text-dim)" }}>
+          {main && status === "unknown" ? "" : status === "unknown" ? "—" : t(`agentSwitcher.status.${status}`)}
         </span>
-        <span style={{ display: "block", marginTop: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: "var(--text-dim)", fontSize: 11 }} title={secondary}>
-          {secondary}
-        </span>
-      </span>
-      <span style={{ display: "flex", alignItems: "center", gap: 6, color: main && !running ? "var(--text-dim)" : statusColor(status), fontSize: 11, whiteSpace: "nowrap" }}>
-        {main && !running ? (
-          selected ? t("agentSwitcher.current") : null
-        ) : (
-          <>
-            <StatusIcon status={status} />
-            <span>{t(`agentSwitcher.status.${status}`)}</span>
-          </>
-        )}
-      </span>
-    </button>
-  );
+      </div>;
+    })}
+  </div>;
 }
 
-export function AgentSessionPanel({ rootSession, subagents, selectedSessionId, runningSessionIds, onSelectSession }: Props) {
+export function AgentSessionPanel(props: Props) {
   const { t } = useI18n();
   const [query, setQuery] = useState("");
-  const sortedSubagents = useMemo(() => [...subagents].sort((a, b) => {
-    const aRunning = runningSessionIds.has(a.id);
-    const bRunning = runningSessionIds.has(b.id);
-    if (aRunning !== bRunning) return aRunning ? -1 : 1;
-    return b.modified.localeCompare(a.modified);
-  }), [runningSessionIds, subagents]);
-  const normalizedQuery = query.trim().toLowerCase();
-  const visibleSubagents = normalizedQuery
-    ? sortedSubagents.filter((session) => {
-        const relation = session.relation?.kind === "subagent" ? session.relation : null;
-        return [relation?.description, relation?.profile, session.name, session.firstMessage]
-          .some((value) => value?.toLowerCase().includes(normalizedQuery));
-      })
-    : sortedSubagents;
-  const runningCount = subagents.filter((session) => runningSessionIds.has(session.id)).length;
-
-  return (
-    <div
-      role="listbox"
-      aria-label={t("agentSwitcher.title")}
-      style={{
-        background: "var(--bg-panel)",
-        borderLeft: "1px solid var(--border)",
-        borderRight: "1px solid var(--border)",
-        borderBottom: "1px solid var(--border)",
-        borderRadius: "0 0 6px 6px",
-        boxShadow: "0 10px 28px rgba(0,0,0,0.10)",
-        overflow: "hidden",
-      }}
-    >
-      <div>
-        <div style={{ minHeight: 44, display: "flex", alignItems: "center", gap: 8, padding: "7px 12px", borderBottom: "1px solid var(--border)" }}>
-          <strong style={{ fontSize: 12, fontWeight: 600 }}>{t("agentSwitcher.title")}</strong>
-          <span style={{ color: "var(--text-dim)", fontSize: 11 }}>
-            {t("agentSwitcher.count", { count: subagents.length })}
-          </span>
-          {runningCount > 0 && (
-            <span style={{ marginLeft: "auto", color: "var(--accent)", fontSize: 11 }}>
-              {t("agentSwitcher.runningCount", { count: runningCount })}
-            </span>
-          )}
-        </div>
-        {subagents.length > 8 && (
-          <div style={{ padding: 8, borderBottom: "1px solid var(--border)" }}>
-            <input
-              type="search"
-              value={query}
-              onChange={(event) => setQuery(event.target.value)}
-              placeholder={t("agentSwitcher.search")}
-              aria-label={t("agentSwitcher.search")}
-              style={{
-                width: "100%", height: 32, padding: "0 10px",
-                border: "1px solid var(--border)", borderRadius: 6,
-                background: "var(--bg)", color: "var(--text)", fontSize: 12, outline: "none",
-              }}
-            />
-          </div>
-        )}
-        <div style={{ maxHeight: "min(58dvh, 480px)", overflowY: "auto" }}>
-          <AgentRow
-            session={rootSession}
-            main
-            selected={rootSession.id === selectedSessionId}
-            running={runningSessionIds.has(rootSession.id)}
-            onSelect={() => onSelectSession(rootSession)}
-          />
-          {visibleSubagents.map((session) => (
-            <AgentRow
-              key={session.id}
-              session={session}
-              selected={session.id === selectedSessionId}
-              running={runningSessionIds.has(session.id)}
-              onSelect={() => onSelectSession(session)}
-            />
-          ))}
-          {visibleSubagents.length === 0 && (
-            <div style={{ padding: "22px 12px", color: "var(--text-dim)", fontSize: 12, textAlign: "center" }}>
-              {t("agentSwitcher.noMatches")}
-            </div>
-          )}
-        </div>
-      </div>
-    </div>
-  );
+  const names = useAgentProfileNames(props.subagents);
+  const filtered = query.trim() ? props.subagents.filter((session) => [agentName(session, names), session.relation?.kind === "subagent" ? session.relation.description : "", session.id].some((value) => value.toLowerCase().includes(query.trim().toLowerCase()))) : props.subagents;
+  // Keep ancestors when searching so results retain their hierarchy.
+  const included = new Set(filtered.map((session) => session.id));
+  const byId = new Map(props.subagents.map((session) => [session.id, session]));
+  for (const session of filtered) {
+    let parent = session.relation?.kind === "subagent" ? session.relation.parentSessionId : null;
+    const seen = new Set([session.id]);
+    while (parent && !seen.has(parent)) {
+      seen.add(parent);
+      included.add(parent);
+      const relation = byId.get(parent)?.relation;
+      parent = relation?.kind === "subagent" ? relation.parentSessionId : null;
+    }
+  }
+  return <div style={{ background: "var(--bg-panel)", border: "1px solid var(--border)", maxHeight: "min(58dvh, 480px)", overflowY: "auto" }}>
+    <div style={{ padding: 10, fontSize: 12 }}><strong>{t("agentSwitcher.title")}</strong> · {props.subagents.length}</div>
+    {props.subagents.length > 8 && <input type="search" aria-label={t("agentSwitcher.search")} placeholder={t("agentSwitcher.search")} value={query} onChange={(event) => setQuery(event.target.value)} style={{ width: "100%", padding: 8, background: "var(--bg)", color: "var(--text)", border: "1px solid var(--border)" }} />}
+    <AgentTreeRows {...props} subagents={props.subagents.filter((session) => included.has(session.id))} />
+  </div>;
 }

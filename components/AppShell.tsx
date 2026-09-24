@@ -15,6 +15,7 @@ import { BranchNavigator, hasSessionBranches } from "./BranchNavigator";
 import { SystemPromptPanel } from "./SystemPromptPanel";
 import { ToolDefinitionsPanel } from "./ToolDefinitionsPanel";
 import { AgentSessionPanel } from "./AgentSessionPanel";
+import { AgentActivityRail } from "./AgentActivityRail";
 import { TerminalPanel } from "./TerminalPanel";
 import { newTerminalTab, restoreTerminalTabs, TERMINAL_TABS_KEY, type TerminalTab } from "./terminal-tab-state";
 import { useTheme } from "@/hooks/useTheme";
@@ -182,6 +183,7 @@ export function AppShell() {
   const [projectTrustBusy, setProjectTrustBusy] = useState(false);
   const [projectTrustError, setProjectTrustError] = useState<string | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(() => !initialNavigation.sidebarCollapsed);
+  const [activityRailOpen, setActivityRailOpen] = useState(false);
   const [rightPanelOpen, setRightPanelOpen] = useState(false);
   const [rightPanelExpanded, setRightPanelExpanded] = useState(false);
   const rightPanelFullWidth = rightPanelOpen && rightPanelExpanded && !isMobile;
@@ -1843,6 +1845,14 @@ export function AppShell() {
     );
   };
 
+  const renderActivityToggle = () => (
+    <button type="button" aria-label="Agent activity" aria-controls="agent-activity-rail" aria-expanded={activityRailOpen}
+      onClick={() => setActivityRailOpen((open) => !open)}
+      style={{ width: TOP_BAR_ICON_BUTTON_SIZE, height: TOP_BAR_ICON_BUTTON_SIZE, border: 0, borderLeft: "1px solid var(--border)", background: activityRailOpen ? "var(--bg-selected)" : "none", color: "var(--text-muted)", cursor: "pointer", flexShrink: 0 }}>
+      ◉
+    </button>
+  );
+
   const renderMainFileToggle = (mobile: boolean) => {
     const covered = mobile && isNarrowMobile && mobileToolbarMoreOpen;
     return (
@@ -2095,6 +2105,7 @@ export function AppShell() {
               )}
               {!isNarrowMobile && renderChatToolbarActions(true)}
               {renderSessionStatsButton(true)}
+              {renderActivityToggle()}
               {renderMainFileToggle(true)}
               {isNarrowMobile && mobileToolbarMoreOpen && (
                 <div
@@ -2128,6 +2139,7 @@ export function AppShell() {
               {renderSessionStatsButton(false)}
             </>
           )}
+          {!isMobile && renderActivityToggle()}
           {!isMobile && renderMainFileToggle(false)}
           {isMobile && sessionHasBranches && (
             <BranchNavigator
@@ -2479,6 +2491,13 @@ export function AppShell() {
         </div>
       </div>
 
+      {activityRailOpen && <>
+        <div className="agent-activity-backdrop" onClick={() => setActivityRailOpen(false)} />
+        <aside id="agent-activity-rail" className="agent-activity-rail" style={{ background: "var(--bg-panel)", borderLeft: "1px solid var(--border)" }}>
+          <AgentActivityRail sessions={sessionsWithSelection} selectedSessionId={selectedSession?.id} runningSessionIds={runningSessionIds}
+            onSelectSession={(session) => { handleSelectSession(session); if (isMobile) setActivityRailOpen(false); }} onClose={() => setActivityRailOpen(false)} />
+        </aside>
+      </>}
       <div
         aria-hidden="true"
         className={`right-panel-overlay-backdrop${rightPanelOpen ? " is-open" : ""}`}

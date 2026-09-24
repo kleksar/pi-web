@@ -13,6 +13,7 @@ import {
   getRunningRpcSessionIds,
 } from "@/lib/rpc-manager";
 import { startServerPerf } from "@/lib/perf";
+import { isSessionArchived } from "@/lib/session-archive";
 
 export const dynamic = "force-dynamic";
 
@@ -35,7 +36,9 @@ export async function GET(req: Request) {
       attachSessionProjectInfo(getRpcSessionInfos()),
     ]);
     perf?.span("scan+projects");
-    const sessions = mergeSessionLists(persistedSessions, runtimeSessions);
+    const archiveView = searchParams.get("archive") === "1";
+    const sessions = mergeSessionLists(persistedSessions, runtimeSessions)
+      .filter((session) => isSessionArchived(session) === archiveView);
     return perf?.attach(jsonResponse(
       req,
       {
