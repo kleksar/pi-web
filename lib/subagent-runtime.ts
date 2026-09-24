@@ -145,6 +145,7 @@ const SUBAGENT_CONTEXT_LIMIT = 50_000;
 const PARENT_IDLE_POLL_MS = 200;
 const MAX_SUBAGENT_DEPTH = 3;
 const MAX_ROOT_ACTIVE_DESCENDANTS = 32;
+const TURN_LIMIT_ERROR = "Subagent exceeded its turn limit without finishing";
 const THINKING_LEVELS = new Set<ThinkingLevel>(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
 
 function rootAdmissions(): Map<string, number> {
@@ -393,6 +394,29 @@ function lastAssistantError(sessionManager: { getEntries?: () => unknown }): str
     return typeof entry.message.errorMessage === "string" && entry.message.errorMessage ? entry.message.errorMessage : "Provider returned an error";
   }
   return undefined;
+}
+
+/** Count turns from this invocation only; a reopened session retains its cap but not its old counter. */
+function monitorSubagentTurns(inner: AgentSessionLike, turnLimit: number | undefined) {
+  let count = 0;
+  let reached = false;
+  const unsubscribe = turnLimit === undefined ? () => {} : inner.subscribe((event) => {
+    // SDK emits turn_end before agent_end even on a complete final answer.
+    // A finished Nth turn is valid; abort only if an (N+1)th turn actually starts.
+    if (event.type === "turn_start" && !reached && count >= turnLimit) {
+      reached = true;
+      void inner.abort().catch((error) => console.error("[pi-web] failed to stop subagent at turn limit:", error));
+    } else if (event.type === "turn_end") {
+      count += 1;
+      const needsAnotherTurn = event.message.role === "assistant"
+        && event.message.content.some((part) => part.type === "toolCall");
+      if (count === turnLimit - 1 && needsAnotherTurn) {
+        void inner.steer("One turn remains. Wrap up and provide your final answer on the next turn.")
+          .catch((error) => console.error("[pi-web] failed to steer subagent at turn limit:", error));
+      }
+    }
+  });
+  return { get reached() { return reached; }, unsubscribe };
 }
 
 /** Fields shared by the start and resume result records. Their extra fields differ. */
@@ -672,6 +696,7 @@ export function createSubagentController(
     let isolatedWorktree: { path: string; branch: string } | undefined;
     let releaseAdmission: (() => void) | undefined;
     let releaseDependencyClaim: (() => void) | undefined;
+    let stopTurnMonitoring: (() => void) | undefined;
     let registeredSessionId: string | undefined;
     let dependencyAdmission: DependencyAdmission | undefined;
     let pendingDependencyInputs: Awaited<ReturnType<typeof resolveDependencyInputs>> | undefined;
@@ -786,8 +811,10 @@ export function createSubagentController(
       const childCwd = isolatedWorktree?.path ?? parent.cwd;
       const inheritContext = request.inheritContext ?? profile.inheritContext;
       const maxTurns = request.maxTurns ?? profile.maxTurns;
-      if (maxTurns !== undefined && (!Number.isFinite(maxTurns) || maxTurns < 0)) {
-        throw new Error("max_turns must be a non-negative number");
+      if (maxTurns !== undefined && (!Number.isFinite(maxTurns) || maxTurns < 0
+        || (maxTurns > 0 && maxTurns < 1)
+        || !Number.isSafeInteger(Math.floor(maxTurns)))) {
+        throw new Error("max_turns must be 0 (unlimited) or at least one safe turn");
       }
       const turnLimit = maxTurns && maxTurns > 0 ? Math.floor(maxTurns) : undefined;
       const thinking = request.thinking ?? profile.thinking ?? parent.inner.agent.state?.thinkingLevel;
@@ -971,6 +998,7 @@ export function createSubagentController(
           loadSkills,
           loadExtensions,
           fastMode: profile.fastMode,
+          ...(turnLimit !== undefined ? { maxTurns: turnLimit } : {}),
           ...(profile.selectedSkills !== undefined ? { selectedSkills: pinnedSkills ?? [] } : {}),
           ...(profile.selectedExtensionTools !== undefined ? { selectedExtensionTools: pinnedExtensionTools ?? [] } : {}),
           ...(promptPlan.exactSystemPrompt !== undefined ? { exactSystemPrompt: profile.selectedSkills?.length
@@ -1032,22 +1060,8 @@ export function createSubagentController(
         ...(isolatedWorktree ? { worktreePath: isolatedWorktree.path, worktreeBranch: isolatedWorktree.branch } : {}),
       };
 
-      let turnCount = 0;
-      let maxTurnsReached = false;
-      let softLimitReached = false;
-      const unsubscribeTurns = turnLimit
-        ? inner.subscribe((event) => {
-            if (event.type !== "turn_end") return;
-            turnCount += 1;
-            if (!softLimitReached && turnCount >= turnLimit) {
-              softLimitReached = true;
-              void inner.steer("You have reached your turn limit. Wrap up immediately and provide your final answer now.");
-            } else if (softLimitReached && turnCount >= turnLimit + 1) {
-              maxTurnsReached = true;
-              void inner.abort();
-            }
-          })
-        : () => {};
+      const turns = monitorSubagentTurns(inner, turnLimit);
+      stopTurnMonitoring = turns.unsubscribe;
       let resolveCompletion!: (run: SubagentRunInfo) => void;
       const completion = new Promise<SubagentRunInfo>((resolve) => { resolveCompletion = resolve; });
       const stored: StoredSubagentExecution = {
@@ -1083,6 +1097,7 @@ export function createSubagentController(
 
       const execute = async (): Promise<SubagentRunInfo> => {
         if (stored.abortRequested) {
+          turns.unsubscribe();
           const cleanupError = await cleanupBranchWorktree();
           const result: SubagentRunInfo = {
             ...initialRun, status: "aborted", completedAt: new Date().toISOString(),
@@ -1137,31 +1152,31 @@ export function createSubagentController(
               })) throw new Error("Dependency results changed before the agent loop; launch this subagent again");
             },
           });
-          const text = inner.getLastAssistantText()?.trim();
-          const aborted = stored.abortRequested && !maxTurnsReached;
-          const providerError = aborted ? undefined : lastAssistantError(sessionManager);
+          const text = turns.reached ? undefined : inner.getLastAssistantText()?.trim();
+          const aborted = stored.abortRequested;
+          const providerError = aborted || turns.reached ? undefined : lastAssistantError(sessionManager);
           result = {
             ...initialRun,
-            status: aborted ? "aborted" : providerError ? "failed" : "completed",
+            status: aborted ? "aborted" : turns.reached || providerError ? "failed" : "completed",
             completedAt: new Date().toISOString(),
             ...(text ? { result: text } : {}),
-            ...(providerError ? { error: providerError } : {}),
+            ...(turns.reached && !aborted ? { error: TURN_LIMIT_ERROR } : providerError ? { error: providerError } : {}),
           };
           result = classifyContextResult(result, parent, parentSessionId, contextEpoch);
         } catch (error) {
-          const text = inner.getLastAssistantText()?.trim();
+          const text = turns.reached ? undefined : inner.getLastAssistantText()?.trim();
           const aborted = stored.abortRequested || request.signal?.aborted;
           result = {
             ...initialRun,
-            status: aborted ? "aborted" : maxTurnsReached ? "completed" : "failed",
+            status: aborted ? "aborted" : "failed",
             completedAt: new Date().toISOString(),
             ...(text ? { result: text } : {}),
-            ...(!aborted && !maxTurnsReached
-              ? { error: error instanceof Error ? error.message : String(error) }
+            ...(!aborted
+              ? { error: turns.reached ? TURN_LIMIT_ERROR : error instanceof Error ? error.message : String(error) }
               : {}),
           };
         } finally {
-          unsubscribeTurns();
+          turns.unsubscribe();
           request.signal?.removeEventListener("abort", handleParentAbort);
         }
 
@@ -1205,6 +1220,7 @@ export function createSubagentController(
 
       const finishQueuedAbort = async () => {
         if (stored.run.status !== "queued") return;
+        turns.unsubscribe();
         const result: SubagentRunInfo = { ...initialRun, status: "aborted", completedAt: new Date().toISOString() };
         const cleanupError = await cleanupBranchWorktree();
         const finalResult = cleanupError ? { ...result, worktreeCleanupError: cleanupError } : result;
@@ -1233,7 +1249,7 @@ export function createSubagentController(
       stored.cancelQueued = queued.cancel;
       if (stored.abortRequested) stored.cancelQueued();
       void queued.promise.then(resolveCompletion, async (error) => {
-        unsubscribeTurns();
+        turns.unsubscribe();
         request.signal?.removeEventListener("abort", handleParentAbort);
         const cleanupError = await cleanupBranchWorktree();
         const result: SubagentRunInfo = {
@@ -1262,6 +1278,7 @@ export function createSubagentController(
 
       return { run: stored.run, completion: stored.completion };
     } catch (error) {
+      stopTurnMonitoring?.();
       if (registeredSessionId) getSubagentRuns().delete(registeredSessionId);
       if (registeredSessionId) pendingNotifications().delete(notificationKey({ sessionId: registeredSessionId, parentToolCallId: request.parentToolCallId }));
       releaseAdmission?.();
@@ -1450,6 +1467,7 @@ export function createSubagentController(
       manager.appendCustomEntry(SUBAGENT_STATUS_TYPE, { version: 1, status: "running", ...resumeFields });
       reportSubagentUpdate(request.onUpdate, stored.run);
       let result: SubagentRunInfo;
+      let turns: ReturnType<typeof monitorSubagentTurns> | undefined;
       try {
         if (stored.abortRequested || !parentMayContinue(parent, parentSessionId, parentGeneration)) {
           stored.abortRequested = true;
@@ -1464,6 +1482,7 @@ export function createSubagentController(
           assertDependencyProvidersPinned(parent.cwd, existing.profile,
             readSubagentSessionResources(parent.inner.sessionManager.getEntries() as unknown as SessionEntry[])?.orchestration);
         }
+        turns = monitorSubagentTurns(wrapper!.inner, childResources?.maxTurns);
         await wrapper!.inner.prompt(request.task + contextSuffix + (dependencyAdmission?.taskSuffix ?? ""), {
           source: "rpc",
           expandPromptTemplates: false,
@@ -1522,14 +1541,16 @@ export function createSubagentController(
             }
           },
         });
-        const text = wrapper!.inner.getLastAssistantText()?.trim();
-        const providerError = stored.abortRequested ? undefined : lastAssistantError(manager);
+        const text = turns.reached ? undefined : wrapper!.inner.getLastAssistantText()?.trim();
+        const providerError = stored.abortRequested || turns.reached ? undefined : lastAssistantError(manager);
         result = {
           ...initialRun,
-          status: stored.abortRequested ? "aborted" : providerError ? "failed" : "completed",
+          status: stored.abortRequested ? "aborted" : turns.reached || providerError ? "failed" : "completed",
           completedAt: new Date().toISOString(),
           ...(text ? { result: text } : {}),
-          ...(providerError ? { error: providerError } : {}),
+          ...(turns.reached && !stored.abortRequested
+            ? { error: TURN_LIMIT_ERROR }
+            : providerError ? { error: providerError } : {}),
         };
         result = classifyContextResult(result, parent, parentSessionId, contextEpoch);
       } catch (error) {
@@ -1537,9 +1558,12 @@ export function createSubagentController(
           ...initialRun,
           status: stored.abortRequested || request.signal?.aborted ? "aborted" : "failed",
           completedAt: new Date().toISOString(),
-          ...(!stored.abortRequested && !request.signal?.aborted ? { error: error instanceof Error ? error.message : String(error) } : {}),
+          ...(!stored.abortRequested && !request.signal?.aborted ? { error: turns?.reached
+            ? TURN_LIMIT_ERROR
+            : error instanceof Error ? error.message : String(error) } : {}),
         };
       } finally {
+        turns?.unsubscribe();
         request.signal?.removeEventListener("abort", handleParentAbort);
       }
       result = validateDependencyCompletion(result, dependencyAdmission, dependencyGraph,

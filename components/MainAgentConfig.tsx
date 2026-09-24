@@ -13,6 +13,7 @@ import { ConfigButton, ConfigFooter, ConfigPanelShell } from "./SettingsUi";
 
 interface Props {
   cwd: string;
+  projectSelected?: boolean;
   sessionId?: string | null;
   onClose: () => void;
   onReloaded?: () => void;
@@ -38,10 +39,11 @@ function dependencyIssue(orchestration: SubagentOrchestration): string | null {
   return "Dependency cycle. Remove a link before saving.";
 }
 
-export function MainAgentConfig({ cwd, sessionId = null, onClose, onReloaded, embedded = false, onOpenMap }: Props) {
+export function MainAgentConfig({ cwd, projectSelected = true, sessionId = null, onClose, onReloaded, embedded = false, onOpenMap }: Props) {
   const { t } = useI18n();
   const [tab, setTab] = useState<Tab>("resources");
-  const [scope, setScope] = useState<"project" | "global" | "roster">("project");
+  const [scope, setScope] = useState<"project" | "global" | "roster">(projectSelected ? "project" : "global");
+  const initialRosterSelection = useRef(false);
   const [rosterAvailable, setRosterAvailable] = useState(false);
   const [refresh, setRefresh] = useState(0);
   const [saved, setSaved] = useState<MainAgentConfig | null>(null);
@@ -64,6 +66,10 @@ export function MainAgentConfig({ cwd, sessionId = null, onClose, onReloaded, em
   const [childSearch, setChildSearch] = useState("");
 
   const dirty = saved !== null && JSON.stringify(saved) !== JSON.stringify(draft);
+
+  useEffect(() => {
+    if (!projectSelected && scope === "project") setScope(rosterAvailable ? "roster" : "global");
+  }, [projectSelected, rosterAvailable, scope]);
 
   useEffect(() => {
     const onUpdated = (event: Event) => {
@@ -118,12 +124,17 @@ export function MainAgentConfig({ cwd, sessionId = null, onClose, onReloaded, em
       setProjectPath(main.projectPath ?? "");
       setRosterPath(main.rosterPath ?? "");
       setRosterAvailable(Boolean(agents.rosterAvailable));
-      if (profileRequest === profileRequestId.current) setProfiles(agents.profiles);
+      if (!projectSelected && agents.rosterAvailable && scope === "global" && !initialRosterSelection.current) {
+        initialRosterSelection.current = true;
+        setScope("roster");
+      }
+      if (profileRequest === profileRequestId.current) setProfiles(agents.profiles.filter((profile) => projectSelected
+        || (profile.scope !== "project" && profile.scope !== "workspace")));
     }).catch((cause) => {
       if (!controller.signal.aborted) setError(cause instanceof Error ? cause.message : String(cause));
     }).finally(() => { if (!controller.signal.aborted) setLoading(false); });
     return () => controller.abort();
-  }, [cwd, scope, refresh]);
+  }, [cwd, projectSelected, scope, refresh]);
 
   // Settings keeps visited tabs mounted. Refresh the roster after a profile edit
   // without discarding unsaved Main assignments or its compare-and-swap revision.
@@ -143,7 +154,8 @@ export function MainAgentConfig({ cwd, sessionId = null, onClose, onReloaded, em
           throw new Error(data.error ?? `HTTP ${response.status}`);
         }
         if (controller.signal.aborted || generation !== profileRequestId.current) return;
-        setProfiles(data.profiles);
+        setProfiles(data.profiles.filter((profile) => projectSelected
+          || (profile.scope !== "project" && profile.scope !== "workspace")));
         setProfilesError(null);
       }).catch((cause) => {
         if (controller.signal.aborted || generation !== profileRequestId.current) return;
@@ -155,7 +167,7 @@ export function MainAgentConfig({ cwd, sessionId = null, onClose, onReloaded, em
       window.removeEventListener("pi-web:subagent-profiles-updated", refreshProfiles);
       request?.abort();
     };
-  }, [cwd]);
+  }, [cwd, projectSelected]);
 
   const effectiveProfiles = useMemo(() => profiles.filter((profile) =>
     profile.enabled && !profile.configurationError && !isSubagentProfileOverridden(profile, profiles)
@@ -200,7 +212,8 @@ export function MainAgentConfig({ cwd, sessionId = null, onClose, onReloaded, em
   });
 
   const save = async () => {
-    if (!saved || !dirty || saving || missingChildren.length || currentDependencyIssue) return;
+    if (!saved || !dirty || saving || missingChildren.length || currentDependencyIssue
+      || (!projectSelected && scope === "project")) return;
     setSaving(true);
     setError(null);
     try {
@@ -258,7 +271,7 @@ export function MainAgentConfig({ cwd, sessionId = null, onClose, onReloaded, em
           }}>{t("main.openMap")}</ConfigButton>}
         </div>
         <div className="main-agent-config-scope" role="group" aria-label={t("main.configScope")}>
-          <button type="button" aria-pressed={scope === "project"} disabled={saving} onClick={() => { if (!dirty || window.confirm(t("agents.discardChanges"))) setScope("project"); }}>{t("main.projectScope")}</button>
+          {projectSelected && <button type="button" aria-pressed={scope === "project"} disabled={saving} onClick={() => { if (!dirty || window.confirm(t("agents.discardChanges"))) setScope("project"); }}>{t("main.projectScope")}</button>}
           {rosterAvailable && <button type="button" aria-pressed={scope === "roster"} disabled={saving} onClick={() => { if (!dirty || window.confirm(t("agents.discardChanges"))) setScope("roster"); }}>{t("main.rosterScope")}</button>}
           <button type="button" aria-pressed={scope === "global"} disabled={saving} onClick={() => { if (!dirty || window.confirm(t("agents.discardChanges"))) setScope("global"); }}>{t("main.globalScope")}</button>
           {scope === "project" && <code title={projectPath}>{projectPath}</code>}
@@ -294,6 +307,7 @@ export function MainAgentConfig({ cwd, sessionId = null, onClose, onReloaded, em
                 cwd={cwd}
                 allowedSkillRoot={scope === "roster" ? `${rosterPath.replace(/[/\\]main-agent-config\.json$/, "")}/skills` : undefined}
                 selectedSkills={draft.selectedSkills}
+                excludeProjectResources={!projectSelected}
                 selectedExtensionTools={draft.selectedExtensionTools}
                 legacySkills={draft.selectedSkills === undefined}
                 legacyExtensions={draft.selectedExtensionTools === undefined}
@@ -378,7 +392,7 @@ export function MainAgentConfig({ cwd, sessionId = null, onClose, onReloaded, em
             {profilesError && <p role="alert" className="main-agent-config-error">{profilesError} <ConfigButton size="small" onClick={() => window.dispatchEvent(new Event("pi-web:subagent-profiles-updated"))}>{t("main.retryProfiles")}</ConfigButton></p>}
           </div>
           <div hidden={tab !== "instructions"}>
-            <MainPromptEditor cwd={cwd} sessionId={sessionId} onReloaded={onReloaded} />
+            <MainPromptEditor cwd={cwd} projectSelected={projectSelected} sessionId={sessionId} onReloaded={onReloaded} />
           </div>
           {loading && tab !== "instructions" && <p role="status" className="main-agent-config-section">{t("main.loading")}</p>}
         </div>
@@ -405,7 +419,7 @@ export function MainAgentConfig({ cwd, sessionId = null, onClose, onReloaded, em
               }}>{t("main.keepEdits")}</ConfigButton>
             </div>
           )}
-          <ConfigButton variant="primary" onClick={() => void save()} disabled={loading || saving || conflicted || Boolean(profilesError) || !dirty || (scope === "project" && !projectTrusted) || missingChildren.length > 0 || Boolean(currentDependencyIssue)}>
+          <ConfigButton variant="primary" onClick={() => void save()} disabled={loading || saving || conflicted || Boolean(profilesError) || !dirty || (scope === "project" && (!projectSelected || !projectTrusted)) || missingChildren.length > 0 || Boolean(currentDependencyIssue)}>
             {saving ? t("agents.saving") : t("agents.save")}
           </ConfigButton>
         </ConfigFooter>}

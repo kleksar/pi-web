@@ -5,6 +5,7 @@ import type {
   AgentExtensionToolResource,
   AgentResourceCatalog,
   AgentSkillResource,
+  AgentResourceSource,
 } from "@/lib/agent-resource-catalog";
 import {
   explicitExtensionToolSelection,
@@ -34,10 +35,19 @@ export interface AgentResourceSelectorProps {
   hideExtensionTools?: boolean;
   /** A Git-owned policy can only store skill references inside its own catalog. */
   allowedSkillRoot?: string;
+  /** Shared settings without a selected project must not expose the scratch cwd's resources. */
+  excludeProjectResources?: boolean;
 }
 
 const EMPTY_SKILLS: string[] = [];
 const EMPTY_TOOLS: SelectedExtensionTool[] = [];
+
+function outsideProject(source: AgentResourceSource, logical: string, real: string | null, cwd: string): boolean {
+  if (source.scope === "project" || source.source === "project"
+    || source.scope === "workspace" || source.source === "workspace") return false;
+  const root = `${cwd.replaceAll("\\", "/").replace(/\/$/, "")}/`;
+  return ![logical, real].some((path) => path?.replaceAll("\\", "/").startsWith(root));
+}
 
 function ResourcePath({ logical, real }: { logical: string; real: string | null }) {
   const { t } = useI18n();
@@ -112,6 +122,7 @@ export function AgentResourceSelector({
   legacyExtensions = false,
   hideExtensionTools = false,
   allowedSkillRoot,
+  excludeProjectResources = false,
 }: AgentResourceSelectorProps) {
   const { t } = useI18n();
   const [catalog, setCatalog] = useState<AgentResourceCatalog | null>(null);
@@ -144,18 +155,23 @@ export function AgentResourceSelector({
   const tools = selectedExtensionTools ?? EMPTY_TOOLS;
   const assignableSkills = useMemo(() => {
     if (!catalog) return [];
-    if (!allowedSkillRoot) return catalog.skills;
+    const eligible = excludeProjectResources ? catalog.skills.filter((skill) =>
+      outsideProject(skill.sourceInfo, skill.filePath, skill.realPath, cwd)) : catalog.skills;
+    if (!allowedSkillRoot) return eligible;
     const root = `${allowedSkillRoot.replaceAll("\\", "/").replace(/\/$/, "")}/`;
-    return catalog.skills.filter((skill) => (skill.realPath ?? skill.filePath).replaceAll("\\", "/").startsWith(root));
-  }, [catalog, allowedSkillRoot]);
+    return eligible.filter((skill) => (skill.realPath ?? skill.filePath).replaceAll("\\", "/").startsWith(root));
+  }, [catalog, allowedSkillRoot, cwd, excludeProjectResources]);
+  const assignableTools = useMemo(() => catalog?.extensionTools.filter((tool) => !excludeProjectResources
+    || outsideProject(tool.sourceInfo, tool.extensionPath, tool.realPath, cwd)) ?? [],
+    [catalog, cwd, excludeProjectResources]);
   const visibleSkills = useMemo(() => catalog
     ? currentSkillList({ ...catalog, skills: assignableSkills }, skillSearch, skills) : [], [catalog, assignableSkills, skillSearch, skills]);
-  const visibleTools = useMemo(() => catalog ? currentToolList(catalog, toolSearch, tools) : [], [catalog, toolSearch, tools]);
+  const visibleTools = useMemo(() => catalog ? currentToolList({ ...catalog, extensionTools: assignableTools }, toolSearch, tools) : [], [catalog, assignableTools, toolSearch, tools]);
   const selectedToolKeys = useMemo(() => new Set(tools.map(extensionToolKey)), [tools]);
   const missingSkills = catalog ? missingSelectedSkills(skills, assignableSkills) : [];
-  const missingTools = catalog ? missingSelectedExtensionTools(tools, catalog.extensionTools) : [];
+  const missingTools = catalog ? missingSelectedExtensionTools(tools, assignableTools) : [];
   const unavailableSkills = assignableSkills.some((skill) => skill.unavailableReason);
-  const unavailableTools = catalog?.extensionTools.some((tool) => tool.unavailableReason) ?? false;
+  const unavailableTools = assignableTools.some((tool) => tool.unavailableReason);
 
   return (
     <div className="agent-resource-selector">
@@ -210,14 +226,14 @@ export function AgentResourceSelector({
                 : t("agentResources.toolsCount", { count: tools.length })}</strong>
               {legacyAllExtensions && (
                 <span className="agent-resource-section-actions">
-                  <button type="button" disabled={disabled || unavailableTools} title={unavailableTools ? t("agentResources.resolveTools") : undefined} onClick={() => onChangeExtensionTools(explicitExtensionToolSelection(selectedExtensionTools, catalog.extensionTools, true))}>
+                <button type="button" disabled={disabled || unavailableTools} title={unavailableTools ? t("agentResources.resolveTools") : undefined} onClick={() => onChangeExtensionTools(explicitExtensionToolSelection(selectedExtensionTools, assignableTools, true))}>
                     {t("agentResources.chooseTools")}
                   </button>
                   {unavailableTools && <button type="button" disabled={disabled} onClick={() => onChangeExtensionTools([])}>{t("agentResources.startEmpty")}</button>}
                 </span>
               )}
             </div>
-            {(catalog.extensionTools.length > 5 || toolSearch) && <input className="agent-resource-search" type="search" aria-label={t("agentResources.searchTools")} value={toolSearch} onChange={(event) => setToolSearch(event.target.value)} placeholder={t("agentResources.searchToolsPlaceholder")} />}
+            {(assignableTools.length > 5 || toolSearch) && <input className="agent-resource-search" type="search" aria-label={t("agentResources.searchTools")} value={toolSearch} onChange={(event) => setToolSearch(event.target.value)} placeholder={t("agentResources.searchToolsPlaceholder")} />}
             <div className="agent-resource-list">
               {visibleTools.map((tool) => (
                 <ResourceRow key={extensionToolKey(tool)} title={tool.toolName}

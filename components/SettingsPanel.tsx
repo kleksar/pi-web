@@ -356,15 +356,40 @@ export function SettingsPanel({ cwd, sessionId, initialSection, onClose, onSessi
   const { t } = useI18n();
   const [section, setSection] = useState<SettingsSection>(initialSection);
   const [openMainMapRequest, setOpenMainMapRequest] = useState(0);
+  const [settingsCwd, setSettingsCwd] = useState<string | null>(null);
+  const [settingsCwdError, setSettingsCwdError] = useState<string | null>(null);
+  const [settingsCwdRetry, setSettingsCwdRetry] = useState(0);
+  const [settingsCwdLoading, setSettingsCwdLoading] = useState(false);
   const [mountedSections, setMountedSections] = useState<ReadonlySet<SettingsSection>>(
     () => new Set([section]),
   );
+  const resourceCwd = cwd ?? settingsCwd;
+
+  useEffect(() => {
+    if (cwd) return;
+    const controller = new AbortController();
+    setSettingsCwdLoading(true);
+    setSettingsCwdError(null);
+    // The existing default-cwd endpoint creates an isolated, explicitly allowed
+    // context for resource discovery. It does not select or trust a user project.
+    void fetch("/api/default-cwd", { method: "POST", signal: controller.signal })
+      .then(async (response) => {
+        const data = await response.json() as { cwd?: string; error?: string };
+        if (!response.ok || data.error || !data.cwd) throw new Error(data.error ?? `HTTP ${response.status}`);
+        if (!controller.signal.aborted) setSettingsCwd(data.cwd);
+      })
+      .catch((cause) => {
+        if (!controller.signal.aborted) setSettingsCwdError(cause instanceof Error ? cause.message : String(cause));
+      })
+      .finally(() => { if (!controller.signal.aborted) setSettingsCwdLoading(false); });
+    return () => controller.abort();
+  }, [cwd, settingsCwdRetry]);
   const sections: { id: SettingsSection; label: string; requiresProject: boolean }[] = [
     { id: "general", label: t("settings.general"), requiresProject: false },
     { id: "models", label: t("common.models"), requiresProject: false },
-    { id: "skills", label: t("common.skills"), requiresProject: true },
-    { id: "main", label: t("common.main"), requiresProject: true },
-    { id: "agents", label: t("common.agents"), requiresProject: true },
+    { id: "skills", label: t("common.skills"), requiresProject: false },
+    { id: "main", label: t("common.main"), requiresProject: false },
+    { id: "agents", label: t("common.agents"), requiresProject: false },
     { id: "plugins", label: t("common.plugins"), requiresProject: true },
   ];
 
@@ -381,7 +406,7 @@ export function SettingsPanel({ cwd, sessionId, initialSection, onClose, onSessi
   }, [onClose]);
 
   useEffect(() => {
-    if (cwd || (section !== "skills" && section !== "main" && section !== "agents" && section !== "plugins")) return;
+    if (cwd || section !== "plugins") return;
     setSection("general");
     setMountedSections((current) => new Set(current).add("general"));
     setLastSettingsSection("general");
@@ -449,12 +474,22 @@ export function SettingsPanel({ cwd, sessionId, initialSection, onClose, onSessi
           <button type="button" onClick={onClose} title={t("i18n.close")} aria-label={t("i18n.close")} className="config-close-button settings-dialog-close">×</button>
         </div>
 
+        {section !== "general" && section !== "models" && section !== "plugins" && !cwd && (
+            <div className="settings-shared-context" role={settingsCwdError ? "alert" : "status"}>
+              {settingsCwdError ? <>
+                <span>{t("settings.sharedContextFailed", { error: settingsCwdError })}</span>
+                <ConfigButton size="small" onClick={() => setSettingsCwdRetry((value) => value + 1)}>{t("settings.retry")}</ConfigButton>
+              </> : resourceCwd
+                ? t("settings.sharedContext")
+                : settingsCwdLoading ? t("agents.loading") : null}
+            </div>
+        )}
         <main className="settings-dialog-main">
           {sectionHost("general", <GeneralSettings sessionId={sessionId} onSessionReloaded={onSessionReloaded} quoteSelectionEnabled={quoteSelectionEnabled} onQuoteSelectionChange={onQuoteSelectionChange} />)}
           {sectionHost("models", <ModelsConfig embedded cwd={cwd} onClose={onClose} />)}
-          {cwd && sectionHost("skills", <SkillsConfig embedded key={cwd} cwd={cwd} onClose={onClose} />)}
-          {cwd && sectionHost("main", <MainAgentConfig embedded key={cwd} cwd={cwd} sessionId={sessionId} onClose={onClose} onReloaded={onSessionReloaded} onOpenMap={() => { setOpenMainMapRequest((current) => current + 1); activateSection("agents"); }} />)}
-          {cwd && sectionHost("agents", <AgentsConfig embedded key={cwd} cwd={cwd} sessionId={sessionId} onClose={onClose} onReloaded={onSessionReloaded} openMainMapRequest={openMainMapRequest} />)}
+          {resourceCwd && sectionHost("skills", <SkillsConfig embedded key={resourceCwd} cwd={resourceCwd} projectSelected={Boolean(cwd)} onClose={onClose} />)}
+          {resourceCwd && sectionHost("main", <MainAgentConfig embedded key={resourceCwd} cwd={resourceCwd} projectSelected={Boolean(cwd)} sessionId={sessionId} onClose={onClose} onReloaded={onSessionReloaded} onOpenMap={() => { setOpenMainMapRequest((current) => current + 1); activateSection("agents"); }} />)}
+          {resourceCwd && sectionHost("agents", <AgentsConfig embedded key={resourceCwd} cwd={resourceCwd} projectSelected={Boolean(cwd)} sessionId={sessionId} onClose={onClose} onReloaded={onSessionReloaded} openMainMapRequest={openMainMapRequest} />)}
           {cwd && sectionHost("plugins", <PluginsConfig embedded key={cwd} cwd={cwd} sessionId={sessionId} onClose={onClose} onReloaded={onSessionReloaded} />)}
         </main>
       </div>

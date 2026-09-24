@@ -79,6 +79,8 @@ tool list limits model-visible tools, not operating-system permissions. No
 model or Fast setting is hard-coded: test an authenticated model/effort/fast
 combination for each role against [evaluation scenarios](../docs/orchestration-evaluation.md)
 before committing defaults.
+Use the [local release smoke guide](../docs/orchestration-release-smoke.md)
+to check new-session behavior, persistence, and cost on the target machine.
 
 ## Before removing historical local resources
 
@@ -91,6 +93,8 @@ with the repository root alone does not prove that an older local override or
 another application's skill directory can be removed. Existing sessions pin
 their old resources; use new sessions to validate the Git defaults.
 
-Physical links inside `skills/` must remain inside the trusted roster root.
-Separate external skill repositories need a reviewed reference mechanism
-before their symlinks can replace a versioned catalog entry.
+Linked skill files must remain inside the trusted roster root. Directory links
+inside `skills/` are rejected because the SDK recursively follows them and
+even an in-root cycle can stall discovery. Keep separately maintained skills
+as reviewed files under this catalog until there is a pinned, safe reference
+mechanism for external repositories.

@@ -246,9 +246,26 @@ export function buildOrchestrationGraph({ profiles: sources, main, ownerId, draf
     visibleIds.add(ownerId ?? MAIN_NODE_ID);
     if (layer !== "dependencies" && layer !== "contextProviders" && ownerId === null) {
       // Keep the shortest delegation path from Main so a found agent still has visible lineage.
+      // Traverse once: searching for many matching profiles must not repeat the
+      // same breadth-first search for every matching node.
+      const parents = new Map<string, string | null>([[MAIN_NODE_ID, null]]);
+      const queue = [MAIN_NODE_ID];
+      for (let index = 0; index < queue.length; index++) {
+        const owner = queue[index];
+        const orchestration = owner === MAIN_NODE_ID
+          ? mainPolicyForMap(profiles, main) : byName.get(key(owner))?.orchestration;
+        for (const child of orchestration?.allowedChildren ?? []) {
+          const normalized = key(child);
+          if (parents.has(normalized)) continue;
+          parents.set(normalized, owner);
+          queue.push(child);
+        }
+      }
       for (const node of matches) {
-        for (const id of mapPathFromMain(node.id, profiles, main)) {
-          visibleIds.add(findMapProfile(profiles, id)?.name ?? id);
+        let current: string | null = key(node.id);
+        while (current !== null && parents.has(current)) {
+          visibleIds.add(current === MAIN_NODE_ID ? MAIN_NODE_ID : byName.get(current)?.name ?? current);
+          current = parents.get(current) ?? null;
         }
       }
     }

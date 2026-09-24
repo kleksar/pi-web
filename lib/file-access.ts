@@ -1,4 +1,4 @@
-import { readdirSync } from "fs";
+import { lstatSync, readdirSync } from "fs";
 import { homedir } from "os";
 import path from "path";
 import { getAdditionalAllowedRoots, normalizeSlashes } from "./allowed-roots";
@@ -16,6 +16,20 @@ declare global {
 }
 
 const ALLOWED_ROOTS_TTL_MS = 5_000;
+
+function isRealDefaultWorkspace(root: string): boolean {
+  if (path.dirname(path.resolve(root)) !== path.resolve(homedir())
+    || !/^pi-cwd-\d{8}$/.test(path.basename(root))) return true;
+  try {
+    return lstatSync(root).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+function validRoots(roots: Set<string>): Set<string> {
+  return new Set([...roots].filter(isRealDefaultWorkspace));
+}
 
 export async function getAllowedFileRoots(): Promise<Set<string>> {
   const now = Date.now();
@@ -35,7 +49,8 @@ export async function getAllowedFileRoots(): Promise<Set<string>> {
   try {
     for (const name of readdirSync(homedir())) {
       if (/^pi-cwd-\d{8}$/.test(name)) {
-        roots.add(normalizeSlashes(path.join(homedir(), name)));
+        const candidate = path.join(homedir(), name);
+        if (isRealDefaultWorkspace(candidate)) roots.add(normalizeSlashes(candidate));
       }
     }
   } catch {
@@ -50,10 +65,10 @@ export async function getAllowedFileRoots(): Promise<Set<string>> {
 
 /** Authorize a path lexically, without touching the filesystem. */
 export function isFilePathAllowed(target: string, allowedRoots: Set<string>): boolean {
-  return isPathWithinRoots(target, allowedRoots);
+  return isPathWithinRoots(target, validRoots(allowedRoots));
 }
 
 /** Authorize an existing path after resolving symbolic links. */
 export function isExistingFilePathAllowed(target: string, allowedRoots: Set<string>): boolean {
-  return isExistingPathWithinRoots(target, allowedRoots);
+  return isExistingPathWithinRoots(target, validRoots(allowedRoots));
 }

@@ -239,11 +239,13 @@ function SkillDetail({
 
 function AddSkillPanel({
   cwd,
+  projectSelected,
   installedPackages,
   projectResourcesLoaded,
   onInstalled,
 }: {
   cwd: string;
+  projectSelected: boolean;
   installedPackages: Record<SkillInstallScope, ReadonlySet<string>>;
   projectResourcesLoaded: boolean;
   onInstalled: () => void;
@@ -260,6 +262,10 @@ function AddSkillPanel({
   );
   const [scope, setScope] = useState<"global" | "project">("global");
   const inputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (!projectSelected && scope === "project") setScope("global");
+  }, [projectSelected, scope]);
 
   useEffect(() => {
     inputRef.current?.focus();
@@ -295,6 +301,7 @@ function AddSkillPanel({
 
   const install = useCallback(
     async (pkg: string) => {
+      if (!projectSelected && scope !== "global") return;
       setInstalling(pkg);
       setInstallError(null);
       try {
@@ -318,7 +325,7 @@ function AddSkillPanel({
         setInstalling(null);
       }
     },
-    [onInstalled, scope, cwd],
+    [onInstalled, projectSelected, scope, cwd],
   );
 
   const installPath =
@@ -381,7 +388,7 @@ function AddSkillPanel({
               flexShrink: 0,
             }}
           >
-            {(["global", "project"] as const).map((s) => (
+            {(["global", ...(projectSelected ? ["project" as const] : [])] as const).map((s) => (
               <button
                 key={s}
                 onClick={() => {
@@ -561,10 +568,12 @@ function AddSkillPanel({
 
 export function SkillsConfig({
   cwd,
+  projectSelected = true,
   onClose,
   embedded = false,
 }: {
   cwd: string;
+  projectSelected?: boolean;
   onClose: () => void;
   embedded?: boolean;
 }) {
@@ -582,6 +591,9 @@ export function SkillsConfig({
   const [updatingSkill, setUpdatingSkill] = useState<string | null>(null);
   const [updateError, setUpdateError] = useState<string | null>(null);
   const [projectResourcesLoaded, setProjectResourcesLoaded] = useState(true);
+  const [skillQuery, setSkillQuery] = useState("");
+  const visibleSkills = skills.filter((skill) => `${skill.name} ${skill.description}`.toLowerCase()
+    .includes(skillQuery.trim().toLowerCase()));
 
   const loadSkills = useCallback(async () => {
     setLoading(true);
@@ -590,7 +602,7 @@ export function SkillsConfig({
       const res = await fetch(`/api/skills?cwd=${encodeURIComponent(cwd)}`);
       const d = (await res.json()) as Partial<SkillsResponse> & { error?: string };
       if (!res.ok || d.error) throw new Error(d.error ?? `HTTP ${res.status}`);
-      const list = d.skills ?? [];
+      const list = (d.skills ?? []).filter((skill) => projectSelected || sourceLabel(skill) !== "project");
       setSkills(list);
       setProjectResourcesLoaded(d.projectResourcesLoaded ?? true);
       setSelected((current) => {
@@ -605,7 +617,7 @@ export function SkillsConfig({
     } finally {
       setLoading(false);
     }
-  }, [cwd]);
+  }, [cwd, projectSelected]);
 
   useEffect(() => {
     setUpdateStatuses({});
@@ -757,6 +769,9 @@ export function SkillsConfig({
         <ConfigSplitView>
           {/* Left: skill list */}
           <ConfigSidebar>
+            <input className="config-sidebar-search" type="search" aria-label={t("skills.searchInstalled")}
+              placeholder={t("skills.searchInstalled")} value={skillQuery}
+              onChange={(event) => setSkillQuery(event.target.value)} />
             <ConfigSidebarList>
               {loading ? (
                 <div className="config-sidebar-message">
@@ -764,12 +779,14 @@ export function SkillsConfig({
                 </div>
               ) : error ? (
                 <div className="config-sidebar-message is-error">
-                  {error}
+                  {error}<ConfigButton size="small" onClick={() => void loadSkills()}>{t("settings.retry")}</ConfigButton>
                 </div>
               ) : skills.length === 0 ? (
                 <div className="config-sidebar-message is-empty">
                    {t("i18n.noSkills")}
                 </div>
+              ) : visibleSkills.length === 0 ? (
+                <div className="config-sidebar-message is-empty">{t("skills.noMatches")}</div>
               ) : (
                 (() => {
                   const groups: { label: string; skills: typeof skills }[] = [];
@@ -814,7 +831,7 @@ export function SkillsConfig({
                     },
                   ];
                   for (const { label, matches } of groupDefinitions) {
-                    const grpSkills = skills.filter(matches);
+                    const grpSkills = visibleSkills.filter(matches);
                     if (grpSkills.length > 0)
                       groups.push({ label, skills: grpSkills });
                   }
@@ -878,6 +895,7 @@ export function SkillsConfig({
               {addMode ? (
               <AddSkillPanel
                 cwd={cwd}
+                projectSelected={projectSelected}
                 projectResourcesLoaded={projectResourcesLoaded}
                 installedPackages={{
                   global: new Set(

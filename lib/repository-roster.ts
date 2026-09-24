@@ -36,7 +36,12 @@ function assertSkillTreeContained(root: string, skillsDir: string): void {
       if (entry.isSymbolicLink()) {
         const physical = realpathSync(path);
         if (!within(root, physical)) throw new Error(`Repository skill symlink escapes its root: ${path}`);
-        if (statSync(physical).isDirectory()) remaining.push(path);
+        // The SDK follows directory links without a visited set. A pair of
+        // in-root links can make skill discovery recurse exponentially, even
+        // though the physical targets stay within the trusted roster.
+        if (statSync(physical).isDirectory()) {
+          throw new Error(`Repository skill directory symlinks are not supported: ${path}`);
+        }
       } else if (entry.isDirectory()) {
         remaining.push(path);
       }
