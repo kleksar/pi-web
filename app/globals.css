@@ -1722,6 +1722,19 @@ span.token.table {
 .right-panel-overlay-backdrop {
   display: none;
 }
+.agent-activity-rail {
+  width: 300px;
+  flex: 0 0 300px;
+  min-width: 0;
+  height: 100%;
+  overflow: hidden;
+}
+.agent-activity-content { height: 100%; display: flex; flex-direction: column; min-width: 0; }
+.agent-activity-backdrop { display: none; }
+@media (max-width: 959px) {
+  .agent-activity-backdrop { display: block; position: fixed; inset: 0; z-index: 260; background: rgba(0, 0, 0, 0.3); }
+  .agent-activity-rail { position: fixed; right: 0; top: 0; bottom: 0; z-index: 261; width: min(340px, 90vw); height: var(--app-viewport-height, 100dvh); box-shadow: -10px 0 28px rgba(0,0,0,0.2); }
+}
 
 /* Desktop sidebar: animate width */
 @media (min-width: 641px) {

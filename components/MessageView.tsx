@@ -18,6 +18,8 @@ import { TurnWrittenFiles } from "./TurnWrittenFiles";
 import type { WrittenFile } from "@/lib/turn-written-files";
 import { skillExpansionToCommand } from "@/lib/slash-display";
 import type { SubagentToolDetails } from "@/lib/subagent-extension";
+import { agentName, agentStatus, agentTree, useAgentProfileNames } from "./AgentSessionPanel";
+import type { SessionInfo } from "@/lib/types";
 import type {
   AgentMessage,
   UserMessage,
@@ -1043,6 +1045,41 @@ function isSubagentToolDetails(value: unknown): value is SubagentToolDetails {
   return details.kind === "pi-web-subagent" && typeof details.sessionId === "string";
 }
 
+function AgentToolDescendants({ rootId, toolCallId, onOpenSession }: { rootId: string; toolCallId: string; onOpenSession: (id: string) => void }) {
+  const [sessions, setSessions] = useState<SessionInfo[]>([]);
+  useEffect(() => {
+    let active = true;
+    const load = async () => {
+      if (document.visibilityState !== "visible") return;
+      try {
+        const response = await fetch("/api/sessions");
+        if (!response.ok) return;
+        const data = await response.json() as { sessions?: SessionInfo[] };
+        if (active) setSessions(data.sessions ?? []);
+      } catch { /* Keep the last known tree. */ }
+    };
+    void load();
+    const timer = window.setInterval(() => { void load(); }, 10000);
+    return () => { active = false; window.clearInterval(timer); };
+  }, []);
+  const root = sessions.find((session) => session.id === rootId);
+  const rows = root ? [{ session: root, depth: 0 }, ...agentTree(root, sessions)] : [];
+  const names = useAgentProfileNames(rows.map(({ session }) => session));
+  if (!root) return null;
+  const relation = root.relation?.kind === "subagent" ? root.relation as typeof root.relation & { parentToolCallId?: string } : null;
+  if (relation?.parentToolCallId && relation.parentToolCallId !== toolCallId) return null;
+  return <div aria-label="Agent descendants" style={{ borderTop: "1px solid var(--border)", padding: "4px 8px" }}>
+    {rows.map(({ session, depth }) => {
+      const status = agentStatus(session, new Set());
+      const label = agentName(session, names);
+      return <button key={session.id} type="button" onClick={() => onOpenSession(session.id)} title={`${label} · ${session.id}`} style={{ display: "flex", width: "100%", gap: 8, alignItems: "center", padding: "4px 6px", paddingLeft: 6 + depth * 16, border: 0, background: "none", color: "var(--text)", cursor: "pointer", textAlign: "left", fontSize: 11 }}>
+        <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1 }}>{label}</span>
+        <span style={{ color: "var(--text-dim)" }}>{status === "unknown" ? "—" : status}</span>
+      </button>;
+    })}
+  </div>;
+}
+
 function ToolCallBlock({ block, result, duration, onOpenSession }: { block: ToolCallContent; result?: ToolResultMessage; duration?: number; onOpenSession?: (sessionId: string) => void }) {
   const { t } = useI18n();
   const [expanded, setExpanded] = useState(() => isToolCallExpanded(block.toolCallId));
@@ -1124,6 +1161,8 @@ function ToolCallBlock({ block, result, duration, onOpenSession }: { block: Tool
           </button>
         )}
       </div>
+
+      {subagent && onOpenSession && <AgentToolDescendants rootId={subagent.sessionId} toolCallId={block.toolCallId} onOpenSession={onOpenSession} />}
 
       {/* ── Expanded: input args (only when no richer view exists) ── */}
       {expanded && (isStreamingInput || !isEditTool) && !patchFiles && (
