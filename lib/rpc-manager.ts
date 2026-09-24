@@ -34,7 +34,6 @@ import {
 } from "./subagent-extension";
 import {
   listSubagentProfiles,
-  ORCHESTRATION_MAIN_ROLE,
   readSubagentRun,
   readSubagentSessionResources,
   SUBAGENT_CONTROL_TOOL_NAMES,
@@ -46,6 +45,13 @@ import { readTaskEnvelope } from "./orchestration-task";
 import { resolveWorktreeRoot } from "./project-context";
 import { createOrchestrationToolsExtension } from "./orchestration-tools";
 import { isBuiltInSubagentsEnabled } from "./subagent-settings";
+import {
+  DEFAULT_MAIN_DISPATCHER_CONFIG,
+  mainDispatcherPrompt,
+  readMainDispatcherConfig,
+  validateMainDispatcherConfig,
+  type MainDispatcherConfig,
+} from "./main-dispatcher-config";
 import { resolveShellTools } from "./powershell-settings";
 import { CHAT_ONLY_RESOURCE_LOADER_OPTIONS, contextFilesSystemPrompt } from "./chat-only";
 import { createExactSystemPromptExtension } from "./exact-system-prompt";
@@ -180,6 +186,17 @@ export function readMainDispatcherSession(entries: readonly SessionEntry[]): boo
   return entries.some((entry) => entry.type === "custom" && entry.customType === MAIN_DISPATCHER_ENTRY_TYPE
     && (entry.data as { version?: number; enabled?: boolean } | undefined)?.version === 1
     && (entry.data as { enabled?: boolean } | undefined)?.enabled === true);
+}
+
+/** A dispatcher keeps its creation-time bindings even when the Git configuration changes. */
+export function readMainDispatcherSessionConfig(entries: readonly SessionEntry[]): MainDispatcherConfig | null {
+  const entry = entries.find((candidate) => candidate.type === "custom" && candidate.customType === MAIN_DISPATCHER_ENTRY_TYPE
+    && (candidate.data as { version?: number; enabled?: boolean } | undefined)?.version === 1
+    && (candidate.data as { enabled?: boolean } | undefined)?.enabled === true);
+  if (!entry || entry.type !== "custom") return null;
+  const saved = (entry.data as { config?: unknown } | undefined)?.config;
+  // Existing sessions without a snapshot were created with the original fixed bindings.
+  return saved === undefined ? DEFAULT_MAIN_DISPATCHER_CONFIG : validateMainDispatcherConfig(saved);
 }
 
 const CODING_TOOL_NAMES = ["read", "bash", "powershell", "edit", "write", "grep", "find", "ls"];
@@ -2013,8 +2030,13 @@ export async function startRpcSession(
   if (sessionFile && options.mainDispatcher && !mainDispatcher) {
     throw new Error("Dispatcher mode can only be enabled when creating a new session");
   }
+  const dispatcherConfig = mainDispatcher
+    ? sessionFile
+      ? readMainDispatcherSessionConfig(existingEntries)
+      : readMainDispatcherConfig().config
+    : null;
   if (!sessionFile && mainDispatcher) {
-    sessionManager.appendCustomEntry(MAIN_DISPATCHER_ENTRY_TYPE, { version: 1, enabled: true });
+    sessionManager.appendCustomEntry(MAIN_DISPATCHER_ENTRY_TYPE, { version: 1, enabled: true, config: dispatcherConfig });
   }
   const sessionCwd = sessionManager.getCwd();
   const subagentMeta = existingEntries.find((entry) => entry.type === "custom" && entry.customType === "pi-web:subagent");
@@ -2208,17 +2230,17 @@ export async function startRpcSession(
     const startupModel = restoredModel && services.modelRuntime.hasConfiguredAuth(restoredModel.provider)
       ? restoredModel
       : initial?.model;
-    const [dispatcherProvider, ...dispatcherIdParts] = ORCHESTRATION_MAIN_ROLE.model.split("/");
+    const [dispatcherProvider, ...dispatcherIdParts] = (dispatcherConfig ?? DEFAULT_MAIN_DISPATCHER_CONFIG).model.split("/");
     const dispatcherModel = mainDispatcher
       ? services.modelRuntime.getModel(dispatcherProvider, dispatcherIdParts.join("/"))
       : undefined;
     if (mainDispatcher && (!dispatcherModel || !services.modelRuntime.hasConfiguredAuth(dispatcherProvider))) {
-      throw new Error(`Dispatcher requires available ${ORCHESTRATION_MAIN_ROLE.model} with configured authentication`);
+      throw new Error(`Dispatcher requires available ${dispatcherConfig?.model} with configured authentication`);
     }
     const { session: inner } = await createAgentSessionFromServices({
       services,
       sessionManager,
-      ...(mainDispatcher ? { model: dispatcherModel, thinkingLevel: ORCHESTRATION_MAIN_ROLE.thinking }
+      ...(mainDispatcher ? { model: dispatcherModel, thinkingLevel: dispatcherConfig!.thinking }
         : {
             ...(startupModel ? { model: startupModel } : {}),
             ...(initial?.thinkingLevel ? { thinkingLevel: initial.thinkingLevel } : {}),
@@ -2250,13 +2272,13 @@ export async function startRpcSession(
     // extensions stay usable in Pi Web just like in the `pi` CLI.
     if (mainDispatcher) {
       inner.setActiveToolsByName([...SUBAGENT_CONTROL_TOOL_NAMES]);
-      applyFastMode(inner, ORCHESTRATION_MAIN_ROLE.fastMode);
+      applyFastMode(inner, dispatcherConfig!.fastMode);
     } else if (!subagentResources && !chatOnly) {
       inner.setActiveToolsByName(withExtensionTools(inner, selectedToolNames ?? inner.getActiveToolNames()));
     }
 
     const exactSystemPrompt = mainDispatcher
-      ? () => ORCHESTRATION_MAIN_ROLE.systemPrompt
+      ? () => mainDispatcherPrompt(dispatcherConfig!)
       : subagentResources?.exactSystemPrompt !== undefined
       ? () => subagentResources.exactSystemPrompt!
       : chatOnly

@@ -1,12 +1,14 @@
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { dump as stringifyYaml } from "js-yaml";
-import { existsSync, mkdirSync, readdirSync, readFileSync, unlinkSync } from "fs";
+import { existsSync, lstatSync, mkdirSync, readdirSync, unlinkSync } from "fs";
 import { basename, dirname, join, resolve } from "path";
 import { parseFrontmatter } from "./frontmatter";
 import { writePrivateFileAtomicSync } from "./atomic-file";
 import { isExistingPathWithinRoots } from "./path-security";
 import { disabledBuiltInSubagents } from "./subagent-settings";
+import { getRepositoryRosterRoot } from "./repository-roster";
+import { readBoundedRegularFile } from "./bounded-file";
 import { PRESET_READ_ONLY } from "./tool-presets";
 import type { SessionEntry, SubagentSessionStatus } from "./types";
 
@@ -16,8 +18,8 @@ export const SUBAGENT_RESULT_TYPE = "pi-web:subagent-result";
 export const SUBAGENT_CONTROL_TOOL_NAMES = ["Agent", "get_subagent_result", "get_subagent_results", "steer_subagent"] as const;
 
 export type SubagentStatus = SubagentSessionStatus;
-export type SubagentScope = "builtin" | "global" | "workspace" | "project";
-export type SubagentWritableScope = Extract<SubagentScope, "global" | "project">;
+export type SubagentScope = "builtin" | "roster" | "global" | "workspace" | "project";
+export type SubagentWritableScope = Extract<SubagentScope, "roster" | "global" | "project">;
 
 export interface SubagentProfile {
   name: string;
@@ -138,6 +140,11 @@ const BUILTIN_TOOLS = new Set(DEFAULT_TOOLS);
 const SUBAGENT_CONTROL_TOOLS = new Set<string>(SUBAGENT_CONTROL_TOOL_NAMES);
 const THINKING_LEVELS = new Set<ThinkingLevel>(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
 const PROFILE_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+const MAX_ROSTER_PROFILE_BYTES = 512 * 1024;
+
+function readProfileText(path: string): string {
+  return readBoundedRegularFile(path, MAX_ROSTER_PROFILE_BYTES, "Agent profile").toString("utf8");
+}
 const WRITER_HOST_TOOLS = new Set(["apply_exact_patch"]);
 const OWNER_HOST_TOOLS = new Set([
   "read_evidence", "read_source_range", "search_source", "project_context",
@@ -418,7 +425,7 @@ function parseExtensionToolSelectors(value: unknown): string[] {
 /** Read existing frontmatter without allowing malformed metadata to be overwritten. */
 function readStoredFrontmatter(filePath: string): Record<string, unknown> {
   if (!existsSync(filePath)) return {};
-  const source = readFileSync(filePath, "utf8");
+  const source = readProfileText(filePath);
   const { data } = parseFrontmatter(source);
   if (data) return data;
   if (FRONTMATTER_OPEN_RE.test(source)) {
@@ -464,10 +471,16 @@ function syncFlagAlias(
 }
 function parseProfileFile(filePath: string, scope: SubagentScope): SubagentProfile | null {
   try {
-    const source = readFileSync(filePath, "utf8");
+    const source = readProfileText(filePath);
     const { data, rest } = parseFrontmatter(source);
+    if (scope === "roster" && data === null && FRONTMATTER_OPEN_RE.test(source)) {
+      throw new Error(`Invalid repository agent profile frontmatter: ${filePath}`);
+    }
     const name = stringValue(data?.name) ?? basename(filePath, ".md");
-    if (!PROFILE_NAME_RE.test(name)) return null;
+    if (!PROFILE_NAME_RE.test(name)) {
+      if (scope === "roster") throw new Error(`Invalid repository agent name in ${filePath}`);
+      return null;
+    }
     const thinkingValue = stringValue(data?.thinking) as ThinkingLevel | undefined;
     const maxTurnsValue = typeof data?.max_turns === "number" ? Math.floor(data.max_turns) : undefined;
     const tools = parseTools(data?.tools, DEFAULT_TOOLS);
@@ -500,7 +513,8 @@ function parseProfileFile(filePath: string, scope: SubagentScope): SubagentProfi
       scope,
       filePath,
     };
-  } catch {
+  } catch (error) {
+    if (scope === "roster") throw error;
     return null;
   }
 }
@@ -511,7 +525,11 @@ function isProjectProfilePathAllowed(cwd: string, target: string): boolean {
 
 function readProfileDirectory(dir: string, scope: SubagentScope, cwd: string): SubagentProfile[] {
   if (!existsSync(dir)) return [];
-  if (scope !== "global" && !isProjectProfilePathAllowed(cwd, dir)) return [];
+  if (scope === "roster") {
+    const root = getRepositoryRosterRoot();
+    if (!root || !isExistingPathWithinRoots(dir, new Set([root]))) return [];
+  }
+  if (scope !== "roster" && scope !== "global" && !isProjectProfilePathAllowed(cwd, dir)) return [];
   return readdirSync(dir, { withFileTypes: true })
     .filter((entry) => entry.isFile() && entry.name.endsWith(".md"))
     .map((entry) => parseProfileFile(join(dir, entry.name), scope))
@@ -519,11 +537,28 @@ function readProfileDirectory(dir: string, scope: SubagentScope, cwd: string): S
 }
 
 function profileDirectories(cwd: string): Array<[string, Exclude<SubagentScope, "builtin">]> {
+  const rosterRoot = getRepositoryRosterRoot();
   return [
+    ...(rosterRoot ? [[join(rosterRoot, "agents"), "roster"] as [string, "roster"]] : []),
     [join(getAgentDir(), "agents"), "global"],
     [join(resolve(cwd), ".agents", "agents"), "workspace"],
     [join(resolve(cwd), ".pi", "agents"), "project"],
   ];
+}
+
+function configuredProfiles(cwd: string): SubagentProfile[] {
+  const profiles: SubagentProfile[] = [];
+  const rosterIds = new Set<string>();
+  for (const [dir, scope] of profileDirectories(cwd)) {
+    for (const profile of readProfileDirectory(dir, scope, cwd)) {
+      const id = profile.name.toLowerCase();
+      if (scope === "roster") rosterIds.add(id);
+      // Project input cannot replace the operator's shared agent policy.
+      if ((scope === "workspace" || scope === "project") && rosterIds.has(id)) continue;
+      profiles.push(profile);
+    }
+  }
+  return profiles;
 }
 
 /**
@@ -545,18 +580,14 @@ function builtInProfiles(orchestrationEnabled = false): SubagentProfile[] {
 /** Every configured source, including profiles shadowed by a higher-precedence scope. */
 export function listSubagentProfileSources(cwd: string, options: { orchestrationEnabled?: boolean } = {}): SubagentProfile[] {
   const profiles = builtInProfiles(options.orchestrationEnabled);
-  for (const [dir, scope] of profileDirectories(cwd)) {
-    profiles.push(...readProfileDirectory(dir, scope, cwd));
-  }
+  profiles.push(...configuredProfiles(cwd));
   return profiles.sort((a, b) => a.displayName.localeCompare(b.displayName));
 }
 
 export function listSubagentProfiles(cwd: string, options: { orchestrationEnabled?: boolean } = {}): SubagentProfile[] {
   // A same-name file replaces the built-in outright, its own `enabled` included.
   const byName = new Map(builtInProfiles().map((profile) => [profile.name.toLowerCase(), profile]));
-  for (const [dir, scope] of profileDirectories(cwd)) {
-    for (const profile of readProfileDirectory(dir, scope, cwd)) byName.set(profile.name.toLowerCase(), profile);
-  }
+  for (const profile of configuredProfiles(cwd)) byName.set(profile.name.toLowerCase(), profile);
   // The opt-in orchestration contract is owned by the host. A project profile
   // with the same name cannot silently replace its model, prompt or permissions.
   if (options.orchestrationEnabled) {
@@ -580,9 +611,14 @@ function assertProfileName(name: string): string {
 }
 
 function writableProfileDirectory(cwd: string, scope: SubagentWritableScope): string {
+  if (scope === "roster") {
+    const root = getRepositoryRosterRoot();
+    if (!root) throw new Error("Repository roster is unavailable");
+    return join(root, "agents");
+  }
   if (scope === "global") return join(getAgentDir(), "agents");
   if (scope === "project") return join(resolve(cwd), ".pi", "agents");
-  throw new Error("Agent scope must be global or project");
+  throw new Error("Agent scope must be roster, global, or project");
 }
 
 function assertWritableProfileDirectory(cwd: string, scope: SubagentWritableScope): string {
@@ -592,13 +628,22 @@ function assertWritableProfileDirectory(cwd: string, scope: SubagentWritableScop
   let existingAncestor = dir;
   while (!existsSync(existingAncestor)) {
     const parent = dirname(existingAncestor);
-    if (parent === existingAncestor) throw new Error("Agent profile directory is outside the project root");
+    if (parent === existingAncestor) throw new Error(`Agent profile directory is outside the ${scope === "roster" ? "repository roster" : "project root"}`);
     existingAncestor = parent;
   }
-  if (!isProjectProfilePathAllowed(cwd, existingAncestor)) {
-    throw new Error("Agent profile directory is outside the project root");
+  const allowedRoot = scope === "roster" ? getRepositoryRosterRoot()! : cwd;
+  if (!isExistingPathWithinRoots(existingAncestor, new Set([allowedRoot]))) {
+    throw new Error(`Agent profile directory is outside the ${scope === "roster" ? "repository roster" : "project root"}`);
   }
   return dir;
+}
+
+function assertRegularRosterProfile(filePath: string): void {
+  try {
+    if (!lstatSync(filePath).isFile()) throw new Error("Repository roster profile must be a regular file");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
 }
 
 export function saveSubagentProfile(
@@ -607,6 +652,13 @@ export function saveSubagentProfile(
   profile: Omit<SubagentProfile, "scope" | "filePath">,
 ): SubagentProfile {
   const name = assertProfileName(profile.name);
+  if (scope === "project") {
+    const root = getRepositoryRosterRoot();
+    if (root && readProfileDirectory(join(root, "agents"), "roster", cwd)
+        .some((candidate) => candidate.name.toLowerCase() === name.toLowerCase())) {
+      throw new Error(`Project agent ${name} cannot override a repository agent; edit the Repository profile or use a different name`);
+    }
+  }
   const tools = [...new Set(profile.tools.filter((tool) => BUILTIN_TOOLS.has(tool)))];
   const extensionTools = [...new Set(profile.extensionTools ?? [])];
   if (profile.thinking && !THINKING_LEVELS.has(profile.thinking)) {
@@ -637,10 +689,12 @@ export function saveSubagentProfile(
   const promptMode = profile.promptMode === "replace" ? "replace" : "append";
   const dir = assertWritableProfileDirectory(cwd, scope);
   mkdirSync(dir, { recursive: true });
-  if (scope === "project" && !isProjectProfilePathAllowed(cwd, dir)) {
-    throw new Error("Agent profile directory is outside the project root");
+  const allowedRoot = scope === "roster" ? getRepositoryRosterRoot() : cwd;
+  if (scope !== "global" && (!allowedRoot || !isExistingPathWithinRoots(dir, new Set([allowedRoot])))) {
+    throw new Error(`Agent profile directory is outside the ${scope === "roster" ? "repository roster" : "project root"}`);
   }
   const filePath = join(dir, `${name}.md`);
+  if (scope === "roster") assertRegularRosterProfile(filePath);
   const stored = readStoredFrontmatter(filePath);
   const managed: Record<string, unknown> = {
     description,
@@ -669,6 +723,10 @@ export function saveSubagentProfile(
     if (!(key in frontmatter)) frontmatter[key] = value;
   }
   const yaml = stringifyYaml(frontmatter, { noRefs: true, lineWidth: 1000 }).trimEnd();
+  if (scope === "roster" && Buffer.byteLength(`---\n${yaml}\n---\n\n${systemPrompt}\n`) > MAX_ROSTER_PROFILE_BYTES) {
+    throw new Error(`Repository agent profile exceeds ${MAX_ROSTER_PROFILE_BYTES} bytes`);
+  }
+  if (scope === "roster") assertRegularRosterProfile(filePath);
   writePrivateFileAtomicSync(filePath, `---\n${yaml}\n---\n\n${systemPrompt}\n`);
   return {
     ...profile,
@@ -696,6 +754,7 @@ export function saveSubagentProfile(
 export function deleteSubagentProfile(cwd: string, scope: SubagentWritableScope, name: string): void {
   const safeName = assertProfileName(name);
   const filePath = join(assertWritableProfileDirectory(cwd, scope), `${safeName}.md`);
+  if (scope === "roster") assertRegularRosterProfile(filePath);
   if (existsSync(filePath)) unlinkSync(filePath);
 }
 

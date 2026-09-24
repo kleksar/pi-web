@@ -33,18 +33,28 @@ function request(body, contentType = "application/json") {
 test("settings route defaults off and persists both switch states", async () => {
   let response = await GET();
   assert.equal(response.status, 200);
-  assert.deepEqual(await response.json(), { enabled: false, maxConcurrent: 10 });
+  let body = await response.json();
+  assert.equal(body.enabled, false);
+  assert.equal(body.maxConcurrent, 10);
+  assert.equal(body.defaultEditScope, "local");
+  assert.equal(body.sources.builtInEnabled, "default");
 
   response = await PUT(request({ enabled: true }));
   assert.equal(response.status, 200);
-  assert.deepEqual(await response.json(), { enabled: true, maxConcurrent: 10 });
+  body = await response.json();
+  assert.equal(body.enabled, true);
+  assert.equal(body.maxConcurrent, 10);
+  assert.equal(body.sources.builtInEnabled, "local");
+  assert.equal(body.savedScope, "local");
   assert.deepEqual(
     JSON.parse(await readFile(join(testAgentDir, "agents", "settings.json"), "utf8")),
     { version: 1, builtInEnabled: true },
   );
 
   response = await PUT(request({ enabled: false }));
-  assert.deepEqual(await response.json(), { enabled: false, maxConcurrent: 10 });
+  body = await response.json();
+  assert.equal(body.enabled, false);
+  assert.equal(body.maxConcurrent, 10);
 });
 
 test("settings route validates mutations", async () => {
@@ -60,7 +70,10 @@ test("settings route validates mutations", async () => {
 test("settings route validates and persists concurrency", async () => {
   let response = await PUT(request({ maxConcurrent: 2 }));
   assert.equal(response.status, 200);
-  assert.deepEqual(await response.json(), { enabled: false, maxConcurrent: 2 });
+  const body = await response.json();
+  assert.equal(body.enabled, false);
+  assert.equal(body.maxConcurrent, 2);
+  assert.equal(body.sources.maxConcurrent, "local");
   response = await PUT(request({ maxConcurrent: 0 }));
   assert.equal(response.status, 400);
   assert.match((await response.json()).error, /between 1 and 32/);

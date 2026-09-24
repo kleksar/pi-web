@@ -4,6 +4,8 @@ import { dirname, join } from "path";
 import { fileURLToPath } from "url";
 
 const configDir = dirname(fileURLToPath(import.meta.url));
+// A task extension can change process.cwd(); keep the app's own checkout fixed.
+process.env.PI_WEB_PACKAGE_ROOT = configDir;
 const { version } = JSON.parse(readFileSync(join(configDir, "package.json"), "utf8")) as { version: string };
 let piVersion = "unknown";
 try {

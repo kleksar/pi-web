@@ -1,7 +1,7 @@
 /**
  * In-memory session store: the demo's equivalent of ~/.pi/agent/sessions.
- * Sessions are expanded from the tutorial scripts on first use (in the UI
- * language) and then mutated by prompts, forks, renames and deletes.
+ * Sessions are expanded from the English tutorial scripts on first use and
+ * then mutated by prompts, forks, renames and deletes.
  */
 import type { AgentMessage, SessionContext, SessionEntry, SessionInfo } from "@/lib/types";
 import { normalizeToolCalls } from "@/lib/normalize";
@@ -68,13 +68,13 @@ export function markTouched(): void {
 async function build(locale: DemoLocale): Promise<void> {
   const sessions = new Map<string, MockSession>();
   for (const script of SESSION_SCRIPTS) {
-    const built = await buildSession(script, locale, PAGE_LOADED_AT, projectRootFor);
+    const built = await buildSession(script, PAGE_LOADED_AT, projectRootFor);
     const created = new Date(PAGE_LOADED_AT - script.startedMinutesAgo * 60_000).toISOString();
     sessions.set(script.id, {
       id: script.id,
       cwd: script.cwd,
       created,
-      name: script.name ? (typeof script.name === "string" ? script.name : script.name[locale]) : undefined,
+      name: script.name,
       relation: script.relation,
       parentSessionId: script.parentSessionId,
       entries: built.entries,
@@ -87,7 +87,7 @@ async function build(locale: DemoLocale): Promise<void> {
   state.locale = locale;
 }
 
-/** Build (or rebuild after a language switch) the tutorial sessions. */
+/** Build the tutorial sessions on first use. */
 export async function ensureSessions(): Promise<void> {
   const locale = currentDemoLocale();
   if (state.building) await state.building;

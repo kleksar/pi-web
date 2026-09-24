@@ -4,7 +4,6 @@ import { dirname, join } from "path";
 import webpush from "web-push";
 import { writePrivateFileAtomicSync } from "./atomic-file";
 import { enLocale } from "./i18n/messages/en";
-import { zhCNLocale } from "./i18n/messages/zh-CN";
 import { getAgentDir } from "./session-reader";
 
 export interface PushSubscriptionRecord {
@@ -109,15 +108,8 @@ function pushStatusCode(error: unknown): number | undefined {
   return typeof statusCode === "number" ? statusCode : undefined;
 }
 
-/**
- * Locale lookup for push payloads. The browser reports its UI locale when it
- * subscribes; unknown locales fall back to English.
- */
-export function localeText(locale: string, key: "sessionComplete" | "taskFinished"): string {
-  if (locale === "zh-CN") {
-    const message = zhCNLocale.messages[key === "sessionComplete" ? "i18n.sessionComplete" : "i18n.taskFinished"];
-    if (message) return message;
-  }
+/** English push payloads, including subscriptions created before the locale change. */
+export function localeText(key: "sessionComplete" | "taskFinished"): string {
   const message = enLocale.messages[key === "sessionComplete" ? "i18n.sessionComplete" : "i18n.taskFinished"];
   return message ?? (key === "sessionComplete" ? "Session complete" : "Task finished.");
 }
@@ -147,9 +139,9 @@ export function createWebPushNotifier(environment: WebPushEnvironment): WebPushN
     async notifySessionComplete(sessionId) {
       if (state.subscriptions.length === 0) return;
       const sessionName = (await environment.listSessionNames()).get(sessionId);
-      const payloadFor = (locale: string) => ({
-        title: sessionName ?? localeText(locale, "sessionComplete"),
-        body: localeText(locale, "taskFinished"),
+      const payload = JSON.stringify({
+        title: sessionName ?? localeText("sessionComplete"),
+        body: localeText("taskFinished"),
         url: `/?session=${encodeURIComponent(sessionId)}`,
         tag: `pi-session-complete:${sessionId}`,
       });
@@ -159,7 +151,7 @@ export function createWebPushNotifier(environment: WebPushEnvironment): WebPushN
         try {
           await environment.send(
             subscription,
-            JSON.stringify(payloadFor(subscription.locale)),
+            payload,
             state.vapidKeys,
           );
         } catch (error) {

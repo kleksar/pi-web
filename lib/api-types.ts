@@ -4,11 +4,20 @@ import type { SubagentProfile } from "./subagents";
 export interface SubagentProfilesResponse {
   profiles: SubagentProfile[];
   orchestrationProfileNames?: string[];
+  rosterAvailable?: boolean;
+  rosterRoot?: string;
 }
 
 export interface SubagentSettingsResponse {
   enabled: boolean;
   maxConcurrent: number;
+  sources?: {
+    builtInEnabled: "roster" | "local" | "default";
+    disabledBuiltIns: "roster" | "local" | "default";
+    maxConcurrent: "roster" | "local" | "default";
+  };
+  defaultEditScope?: "roster" | "local";
+  savedScope?: "roster" | "local";
 }
 
 export interface ShellToolSettingsResponse {

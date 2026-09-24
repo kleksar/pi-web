@@ -1,7 +1,6 @@
-import type { Localized } from "../locale";
 import type { SessionInfo } from "@/lib/types";
 
-export type Text = Localized | string;
+export type Text = string;
 
 /** One tool invocation inside an assistant round, with its (authored) result. */
 export interface ToolUse {
