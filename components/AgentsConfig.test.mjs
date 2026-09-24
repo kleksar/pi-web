@@ -8,14 +8,15 @@ const chatInputSource = await readFile(new URL("./ChatInput.tsx", import.meta.ur
 const modelSelectorSource = await readFile(new URL("./ModelSelector.tsx", import.meta.url), "utf8");
 const mapSource = await readFile(new URL("./OrchestrationMap.tsx", import.meta.url), "utf8");
 
-test("opens the Main branch from the top button, focuses profiles without filtering siblings, and handles a first Main request", () => {
+test("opens the complete overview from Sub-agents, focuses profiles, and handles a separate Main request", () => {
   assert.match(source, /const lastMainMapRequest = useRef\(0\)/);
   assert.match(source, /if \(openMainMapRequest === lastMainMapRequest\.current\) return;/);
   const topMapButton = source.slice(source.indexOf('{t("agents.profiles")}'), source.indexOf('{view === "map" && <span'));
   assert.match(topMapButton, /setMapFocusNode\(null\)/);
-  assert.match(topMapButton, /selectMapOwner\(MAIN_NODE_ID\)/);
-  assert.match(topMapButton, /setMapOwner\(MAIN_NODE_ID\)/);
+  assert.match(topMapButton, /selectMapOwner\(null\)/);
+  assert.match(topMapButton, /setMapOwner\(null\)/);
   assert.match(topMapButton, /t\("agents\.openMap"\)/);
+  assert.match(source, /if \(openMainMapRequest === lastMainMapRequest\.current\) return;[\s\S]*?setMapOwner\(MAIN_NODE_ID\)/);
   assert.match(source, /const openSelectedOnMap = \(\) => \{[\s\S]*?setMapFocusNode\(selected\.name\)/);
   assert.match(mapSource, /const \[query, setQuery\] = useState\(""\)/);
   assert.doesNotMatch(mapSource, /setQuery\(focusNodeId\)/);

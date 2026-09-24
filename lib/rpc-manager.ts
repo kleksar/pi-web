@@ -63,6 +63,7 @@ import { repositoryMainPromptFallback } from "./main-prompt";
 import { resolveShellTools } from "./powershell-settings";
 import { CHAT_ONLY_RESOURCE_LOADER_OPTIONS, contextFilesSystemPrompt } from "./chat-only";
 import { createExactSystemPromptExtension } from "./exact-system-prompt";
+import { createGitHubReadExtension } from "./github-read-extension";
 import {
   appendClearedSessionToolSelection,
   appendSessionToolSelection,
@@ -2306,11 +2307,12 @@ export async function startRpcSession(
               skills: import("@earendil-works/pi-coding-agent").Skill[];
               diagnostics: import("@earendil-works/pi-coding-agent").ResourceDiagnostic[];
             }) => ({ ...base, skills: filterPinnedSkills(base.skills, subagentResources.selectedSkills!) }) } : {}),
-            ...(usesExactSystemPrompt || childOrchestratorExtension
+            ...(usesExactSystemPrompt || childOrchestratorExtension || subagentResources.tools.includes("github_read")
               || subagentResources.selectedSkills !== undefined || subagentResources.selectedExtensionTools !== undefined
               ? { extensionFactories: [
                   ...(usesExactSystemPrompt ? [exactSystemPromptExtension] : []),
                   ...(childOrchestratorExtension ? [childOrchestratorExtension] : []),
+                  ...(subagentResources.tools.includes("github_read") ? [createGitHubReadExtension(sessionCwd)] : []),
                   ...(subagentResources.selectedSkills !== undefined || subagentResources.selectedExtensionTools !== undefined
                     ? [pinnedResourceIntegrityExtension(
                       () => subagentResources.selectedSkills,

@@ -41,6 +41,7 @@ import { buildSubagentPromptPlan } from "./subagent-prompt";
 import { applyFastMode, isFastSupported } from "./subagent-fast-mode";
 import { readMainSessionResources } from "./main-agent-snapshot";
 import { createExactSystemPromptExtension } from "./exact-system-prompt";
+import { createGitHubReadExtension } from "./github-read-extension";
 import {
   filterPinnedSkills,
   pinSelectedSkills,
@@ -885,7 +886,7 @@ export function createSubagentController(
               ] }
             : {}),
           // The exact prompt is sent through before_agent_start; see lib/exact-system-prompt.ts.
-          ...((promptPlan.exactSystemPrompt !== undefined || canDelegate
+          ...((promptPlan.exactSystemPrompt !== undefined || canDelegate || profile.tools.includes("github_read")
               || profile.selectedSkills !== undefined || profile.selectedExtensionTools !== undefined)
             ? { extensionFactories: [
                 ...(promptPlan.exactSystemPrompt !== undefined
@@ -893,6 +894,7 @@ export function createSubagentController(
                     && !profile.tools.includes("read") && !profile.tools.includes("bash")
                       ? `${promptPlan.exactSystemPrompt}\n\n${pinnedSkillsPrompt(pinnedSkills ?? [])}`
                       : promptPlan.exactSystemPrompt)] : []),
+                ...(profile.tools.includes("github_read") ? [createGitHubReadExtension(childCwd)] : []),
                 ...(canDelegate
                   ? [createSubagentExtension(
                       extensionRuntime,

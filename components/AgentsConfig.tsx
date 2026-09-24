@@ -40,7 +40,7 @@ import { ModelSelector } from "./ModelSelector";
 import { AgentResourceSelector } from "./AgentResourceSelector";
 import { OrchestrationMap } from "./OrchestrationMap";
 
-const TOOL_OPTIONS = ["read", "bash", "edit", "write", "grep", "find", "ls"];
+const TOOL_OPTIONS = ["read", "bash", "edit", "write", "grep", "find", "ls", "github_read"];
 const THINKING_OPTIONS = ["", "off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 
 type EditableProfile = SubagentProfileInput;
@@ -906,10 +906,10 @@ export function AgentsConfig({
       <div role="group" aria-label={t("common.agents")} style={{ display: "flex", gap: 4, padding: "7px 16px", borderBottom: "1px solid var(--border)" }}>
         <ConfigButton size="small" variant={view === "profiles" ? "primary" : undefined} onClick={() => setView("profiles")}>{t("agents.profiles")}</ConfigButton>
         <ConfigButton size="small" variant={view === "map" ? "primary" : undefined} onClick={() => {
-          if (!selectMapOwner(MAIN_NODE_ID)) return;
+          if (!selectMapOwner(null)) return;
           setMapFocusNode(null);
           setPendingMapAgent(null);
-          setMapOwner(MAIN_NODE_ID);
+          setMapOwner(null);
           setView("map");
         }}>{t("agents.openMap")}</ConfigButton>
         {view === "map" && <span style={{ marginLeft: "auto", alignSelf: "center", color: "var(--text-dim)", fontSize: 11 }}>

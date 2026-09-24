@@ -34,12 +34,12 @@ source. Trusted project-specific policies can override shared settings.
 | Project questions | `evidence-coordinator` | Main asks for a cited overview or another bounded answer; evidence delegates reading to docs and code readers. |
 | Task coordination | `small-task-coordinator`, `task-coordinator`, `complex-task-coordinator` | Main selects one by impact, uncertainty, and reversibility, never by line count alone. |
 | Complex subteams | `evidence-coordinator`, `implementation-coordinator`, `verification-coordinator` | The complex coordinator requests targeted findings, a bounded implementation, then an independent check. |
-| Source retrieval | `project-policy-reader`, `project-requirements-reader`, `project-docs-reader`, `project-code-reader` | Read only the project files or supplied issue/design artifacts needed for a concrete question. |
+| Source retrieval | `project-policy-reader`, `project-requirements-reader`, `project-docs-reader`, `project-code-reader`, `github-reader` | Read local project evidence or current issues and PRs from the project's GitHub origin. |
 | Analysis | `technical-analyst`, `architecture-reviewer`, `test-planner` | Analyze supplied evidence without file or shell tools; request missing evidence through a permitted provider where configured. |
 | Edits | `bounded-writer`, `documentation-writer` | Receive a settled change order and relevant project constraints, then edit within assigned files. |
 | Checks | `change-verifier` | Inspect diff and run targeted, non-destructive checks independently of the writer. |
 
-All 16 profiles are **available**, not automatically launched. For a narrow
+All 17 profiles are **available**, not automatically launched. For a narrow
 reversible fix the small coordinator can use just a policy reader, one code
 reader, a writer, and a verifier. If requirements, design sources, or
 architecture are uncertain, Main can use the medium or complex coordinator.
@@ -56,8 +56,8 @@ Even a small code change can have a large blast radius. The reusable skills
 
 ## Model and effort defaults
 
-All 16 repository profiles pin an `openai-codex` model and a reasoning level.
-The 11 Luna profiles have Fast mode enabled by default; the three Sol and two
+All 17 repository profiles pin an `openai-codex` model and a reasoning level.
+The 12 Luna profiles have Fast mode enabled by default; the three Sol and two
 Astra profiles have it disabled. Main uses its own session Fast mode setting.
 The Main coordinator uses the model selected for its own session; this table
 configures its **children**. These are initial allocations by role, not a
@@ -76,6 +76,7 @@ cannot change a child's pinned model or effort through `Agent`.
 | `project-requirements-reader` | Luna | medium | on | Preserve exact acceptance criteria and source limits. |
 | `project-docs-reader` | Luna | low | on | Retrieve named documentation without broad analysis. |
 | `project-code-reader` | Luna | medium | on | Find specific symbols and cite observed behavior. |
+| `github-reader` | Luna | medium | on | Retrieve current GitHub issues and PRs without write operations. |
 | `technical-analyst` | Astra | medium | off | Analyze options and consequences from supplied evidence. |
 | `architecture-reviewer` | Astra | high | off | Review consequential architecture and contract decisions. |
 | `bounded-writer` | Sol | medium | off | Implement a change order with codebase-specific judgment. |
@@ -110,7 +111,7 @@ flowchart TD
 ```
 
 In the complex path, Evidence can delegate to the policy, requirements, docs,
-and code readers. Implementation can delegate to bounded code and documentation
+code, and GitHub readers. Implementation can delegate to bounded code and documentation
 writers. Verification has a test planner and a change verifier. The Analyst
 and architecture reviewer can start with a small brief, then ask the parent
 for a later handoff from Evidence. A solid delegation edge permits a call; a
@@ -120,11 +121,21 @@ child by themselves. The verified graph fits the runtime limit of three agent
 levels below Main, with at most 32 active descendants per root and the shared
 concurrency setting initially set to 10.
 
+The `github_read` tool is implemented by Pi Web, assigned only to profiles that
+select it, and constrained to read the current project's GitHub `origin`. It
+supports listing and fetching issues and PRs, never writes. Public repositories
+can be read without authentication (subject to GitHub API limits); for private
+repositories, authenticate the `gh` CLI used by Pi Web or provide `GH_TOKEN`
+to the Pi Web process. Existing sessions retain their tool snapshot, so start
+a new Main session to use the new reader. A GitLab origin is reported as
+unsupported rather than treated as GitHub.
+
 Project-specific approval rules and knowledge belong with their project.
 `project-policy-reader` retrieves applicable boundaries, and the coordinator
-passes a compact change order to the writer. A remotely hosted issue, pull
-request, or Figma design is not accessible to these file-only readers unless
-an artifact or verified excerpt is supplied. Architecture review flags choices
+passes a compact change order to the writer. A current issue or pull request
+from the project's GitHub origin goes to `github-reader`; other remote sources
+and Figma designs still require a supplied artifact or suitable reader.
+Architecture review flags choices
 for the user; prompts alone are **not** a technical approval gate. The runtime
 tool list limits model-visible tools, not operating-system permissions. Model
 and effort assignments above need validation against

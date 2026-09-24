@@ -68,6 +68,14 @@ export function routeOrchestrationEdges(nodes: readonly MapNode[], edges: readon
   const valid = edges.filter((edge) => byId.has(edge.source) && byId.has(edge.target));
   const top = Math.min(0, ...nodes.map((node) => node.y)) - 48;
   const right = Math.max(0, ...nodes.map((node) => node.x + MAP_NODE_WIDTH));
+  const sameColumnGutter = (node: MapNode, lane: number) => {
+    const firstRight = Math.min(...nodes.filter((other) => other.x > node.x).map((other) => other.x));
+    if (!Number.isFinite(firstRight)) return right + 36 + lane * 16;
+    // A return path from a same-column edge must stay in the next empty gap.
+    // Routing it around the entire graph would cross cards in later columns.
+    const gap = firstRight - node.x - MAP_NODE_WIDTH;
+    return node.x + MAP_NODE_WIDTH + Math.min(gap - 12, 24 + lane * 10);
+  };
   const direct: MapEdge[] = [];
   const sameColumn: MapEdge[] = [];
   const outer: MapEdge[] = [];
@@ -102,14 +110,14 @@ export function routeOrchestrationEdges(nodes: readonly MapNode[], edges: readon
     let points: MapPoint[];
     if (source.id === target.id) {
       // Old hand-authored policies can contain a self-link; keep it visible for inspection.
-      const gutter = right + 36 + (sameLanes.get(edgeKey(edge)) ?? 0) * 16;
+      const gutter = sameColumnGutter(source, sameLanes.get(edgeKey(edge)) ?? 0);
       const below = source.y + MAP_NODE_HEIGHT + 18;
       points = [{ x: source.x + MAP_NODE_WIDTH, y: source.y + 32 }, { x: gutter, y: source.y + 32 },
         { x: gutter, y: below }, { x: source.x - 24, y: below },
         { x: source.x - 24, y: source.y + 68 }, { x: source.x, y: source.y + 68 }];
     } else if (source.x === target.x) {
       // Both ports face right. A return arrow points left into the consumer.
-      const gutter = right + 36 + (sameLanes.get(edgeKey(edge)) ?? 0) * 16;
+      const gutter = sameColumnGutter(source, sameLanes.get(edgeKey(edge)) ?? 0);
       points = [{ x: source.x + MAP_NODE_WIDTH, y: a }, { x: gutter, y: a },
         { x: gutter, y: b }, { x: target.x + MAP_NODE_WIDTH, y: b }];
     } else if (directSet.has(edge)) {

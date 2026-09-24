@@ -18,14 +18,13 @@ import {
   fitOrchestrationMap,
   mapOwnersForAgent,
   mapPathFromMain,
-  mainPolicyForMap,
-  navigationOrchestrationGraph,
   orchestrationLayoutFingerprint,
   orchestrationForOwner,
   readableOrchestrationMap,
   type MapEdge,
   type MapProfile,
   type OrchestrationMapEdgeKind,
+  type OrchestrationMapLayer,
   windowOrchestrationBranch,
 } from "@/lib/orchestration-map";
 import { applyManualMapPositions, canPlaceMapNode, routeOrchestrationEdges } from "@/lib/orchestration-map-routing";
@@ -77,9 +76,9 @@ const ERROR_KEYS: Record<string, string> = {
   "This link creates a dependency cycle.": "map.errorCycle",
 };
 
-function layoutStorageKey(cwd: string, ownerId: string | null, layer: OrchestrationMapEdgeKind): string {
+function layoutStorageKey(cwd: string, ownerId: string | null, layer: OrchestrationMapLayer): string {
   // v3 ignores coordinates saved for the former column layout.
-  return `pi-web:orchestration-map-layout:v3:${cwd}:${ownerId ?? "overview"}:${layer}`;
+  return `pi-web:orchestration-map-layout:${ownerId === null ? "v4" : "v3"}:${cwd}:${ownerId ?? "overview"}:${layer}`;
 }
 
 function readLayout(storageKey: string): Record<string, Point> {
@@ -134,20 +133,17 @@ export function OrchestrationMap({
   const profiles = useMemo(() => effectiveMapProfiles(sources), [sources]);
   const policy = ownerId === null ? null : orchestrationForOwner(ownerId, profiles, main.orchestration ?? null, ownerId, draftOrchestration);
   const fullGraph = useMemo(() => buildOrchestrationGraph({ profiles, main: main.orchestration ?? null, ownerId, draft: draftOrchestration,
-    layer: ownerId === null ? "delegation" : "all", query, exactQuery, connectedOnly: true }),
+    layer: "all", query, exactQuery, connectedOnly: false }),
     [profiles, main.orchestration, ownerId, draftOrchestration, query, exactQuery]);
-  const visibleLayer: OrchestrationMapEdgeKind = ownerId === null ? "delegation" : layer;
-  const navigationGraph = useMemo(() => ownerId === null && !query.trim()
-    ? navigationOrchestrationGraph(fullGraph, mainPolicyForMap(profiles, main.orchestration ?? null).allowedChildren)
-    : null, [ownerId, query, fullGraph, profiles, main.orchestration]);
+  const visibleLayer: OrchestrationMapLayer = ownerId === null ? "all" : layer;
   const pinnedEdge = fullGraph.edges.find((edge) => edgeId(edge) === selectedEdge);
   const branchWindow = useMemo(() => ownerId !== null && !query.trim()
-    ? windowOrchestrationBranch(fullGraph, ownerId, visibleLayer, visibleLimit, { edge: pinnedEdge, nodeId: selectedNode })
-    : null, [ownerId, query, fullGraph, visibleLayer, visibleLimit, pinnedEdge, selectedNode]);
-  const graph = navigationGraph ?? branchWindow ?? fullGraph;
-  const hiddenDirectCount = (navigationGraph ?? branchWindow)?.hiddenDirectCount ?? 0;
-  // Requirements and on-demand data belong to a particular coordinator. A roster-wide
-  // overlay combines unrelated policies and implies a global dependency that does not exist.
+    ? windowOrchestrationBranch(fullGraph, ownerId, layer, visibleLimit, { edge: pinnedEdge, nodeId: selectedNode })
+    : null, [ownerId, query, fullGraph, layer, visibleLimit, pinnedEdge, selectedNode]);
+  const graph = branchWindow ?? fullGraph;
+  const hiddenDirectCount = branchWindow?.hiddenDirectCount ?? 0;
+  // The full map preserves every ownerId: a sibling link still belongs to the
+  // coordinator named in its edge, even when several branches share an agent.
   const visibleEdges = useMemo(() => filterOrchestrationEdges(graph.edges, visibleLayer), [graph.edges, visibleLayer]);
   const layoutNodes = useMemo(() => branchWindow ? graph.nodes : autoLayoutGraph(graph.nodes, visibleEdges, ownerId),
     [branchWindow, graph.nodes, visibleEdges, ownerId]);
@@ -178,7 +174,8 @@ export function OrchestrationMap({
   const legacyExtensions = selectedNode === MAIN_NODE_ID ? main.loadExtensions ?? true : selected?.loadExtensions;
   const selectedLink = visibleEdges.find((edge) => edgeId(edge) === selectedEdge);
   // During search the visible path and every matched card must remain readable.
-  const focusRelations = !query.trim() && nodeById.has(selectedNode) && (ownerId === null || selectedNode !== ownerId);
+  const focusRelations = userSelectedNode && !query.trim() && nodeById.has(selectedNode)
+    && selectedNode !== MAIN_NODE_ID && (ownerId === null || selectedNode !== ownerId);
   const highlightedEdges = useMemo(() => new Set(focusRelations
     ? visibleEdges.filter((edge) => edge.source === selectedNode || edge.target === selectedNode).map(edgeId)
     : visibleEdges.map(edgeId)), [focusRelations, visibleEdges, selectedNode]);
@@ -217,11 +214,11 @@ export function OrchestrationMap({
     const rectangle = stage.current?.getBoundingClientRect();
     if (focusNode && rectangle) {
       setViewport(centerOrchestrationMapNode(focusNode, rectangle.width, rectangle.height, 0.9));
-    } else fit(currentNodes, true);
+    } else fit(currentNodes, ownerId !== null);
     setSelectedEdge((current) => current && visibleEdges.some((edge) => edgeId(edge) === current) ? current : null);
     setConnectionSource(null);
     setError(null);
-  }, [storageKey, layoutFingerprint, fit, layoutNodes, positions, focusNodeId, visibleEdges]);
+  }, [storageKey, layoutFingerprint, fit, layoutNodes, positions, focusNodeId, visibleEdges, ownerId]);
 
   useEffect(() => {
     if (focusNodeId) {
@@ -373,6 +370,8 @@ export function OrchestrationMap({
     setQuery("");
     setExactQuery(false);
     setSelectedEdge(null);
+    setSelectedNode(nextOwner ?? MAIN_NODE_ID);
+    setUserSelectedNode(false);
     setConnectionSource(null);
   };
 
@@ -390,6 +389,9 @@ export function OrchestrationMap({
         <div className="orchestration-map-controls">
           <input type="search" value={query} onChange={(event) => { setQuery(event.target.value); setExactQuery(false); }} aria-label={t("map.search")} placeholder={t("map.searchPlaceholder")} />
           {query && <button type="button" onClick={() => { setQuery(""); setExactQuery(false); }}>{t("map.showAllDirectAgents")}</button>}
+          {ownerId === null && userSelectedNode && !query.trim() && <button type="button" onClick={() => {
+            setSelectedNode(MAIN_NODE_ID); setSelectedEdge(null); setUserSelectedNode(false);
+          }}>{t("map.showAllConnections")}</button>}
           <button type="button" onClick={() => zoom(1.15)} aria-label={t("map.zoomIn")}>＋</button>
           <button type="button" onClick={() => zoom(1 / 1.15)} aria-label={t("map.zoomOut")}>−</button>
           <button type="button" onClick={centerSelected} disabled={!nodeById.has(selectedNode)}>{t("map.focusSelection")}</button>
@@ -404,22 +406,21 @@ export function OrchestrationMap({
         <span>{t(ownerId === null ? "map.overviewHint" : "map.branchHint")}</span>
       </div>
       <div className="orchestration-map-layers" role="group" aria-label={t("map.layers")}>
-        {(["delegation", ...(ownerId === null ? [] : ["dependencies", "contextProviders"])] as OrchestrationMapEdgeKind[]).map((kind) => <button key={kind} type="button"
+        {ownerId === null ? (["delegation", "dependencies", "contextProviders"] as const).map((kind) => <span key={kind} className="orchestration-map-legend is-static"
+          ><i className={`is-${kind}`} aria-hidden="true" />{t(kind === "delegation" ? "map.delegationMeaning" : kind === "dependencies" ? "map.dependenciesMeaning" : "map.contextProvidersMeaning")}</span>)
+          : (["delegation", "dependencies", "contextProviders"] as OrchestrationMapEdgeKind[]).map((kind) => <button key={kind} type="button"
           className="orchestration-map-legend" aria-pressed={visibleLayer === kind}
           onClick={() => { setLayer(kind); if (kind === "dependencies" || kind === "contextProviders") setConnectionKind(kind); setConnectionSource(null); setSelectedEdge(null); }}>
           <i className={`is-${kind}`} aria-hidden="true" />{t(kind === "delegation" ? "map.delegationMeaning" : kind === "dependencies" ? "map.dependenciesMeaning" : "map.contextProvidersMeaning")}
         </button>)}
         <span className="orchestration-map-count">{query.trim() ? t("map.searchResults", { count: graph.matchCount })
-          : ownerId === null ? t("map.directAgents", { count: mainPolicyForMap(profiles, main.orchestration ?? null).allowedChildren.length })
+          : ownerId === null ? t("map.graphCount", { agents: graph.nodes.length - 1, links: visibleEdges.length })
             : t("map.directAgents", { count: policy?.allowedChildren.length ?? 0 })}</span>
       </div>
-      {ownerId === null && hiddenDirectCount > 0 && <div className="orchestration-map-collapsed">
-        <span>{t("map.hiddenDirectAgents", { count: hiddenDirectCount })}</span>
-        <button type="button" onClick={() => switchOwner(MAIN_NODE_ID)}>{t("map.openMainBranch")}</button>
-      </div>}
       {ownerId !== null && hiddenDirectCount > 0 && <div className="orchestration-map-collapsed">
         <span>{t("map.hiddenBranchAgents", { count: hiddenDirectCount })}</span>
         <button type="button" onClick={() => setVisibleLimit((limit) => limit + 24)}>{t("map.showMoreAgents")}</button>
+        <button type="button" onClick={() => setVisibleLimit(policy?.allowedChildren.length ?? visibleLimit)}>{t("map.showAllBranchAgents")}</button>
       </div>}
       <div className="orchestration-map-pan-hint">{t("map.panHint")}</div>
       <div className="orchestration-map-body">
@@ -438,6 +439,7 @@ export function OrchestrationMap({
               </defs>
               {routes.map(({ edge, path: d }) => {
                 return <g key={edgeId(edge)}>
+                  <title>{`${edge.source === MAIN_NODE_ID ? t("common.main") : findMapProfile(profiles, edge.source)?.displayName ?? edge.source} → ${findMapProfile(profiles, edge.target)?.displayName ?? edge.target} · ${t(edge.kind === "delegation" ? "map.delegationMeaning" : edge.kind === "dependencies" ? "map.dependenciesMeaning" : "map.contextProvidersMeaning")} · ${t("map.overviewOwner", { name: edge.ownerId === MAIN_NODE_ID ? t("common.main") : findMapProfile(profiles, edge.ownerId)?.displayName ?? edge.ownerId })}`}</title>
                   <path className={`orchestration-map-edge is-${edge.kind}${highlightedEdges.has(edgeId(edge)) ? "" : " is-muted"}${selectedEdge === edgeId(edge) ? " is-selected" : ""}`}
                     d={d} markerEnd={`url(#orchestration-map-arrow-${edge.kind})`} />
                   <path className="orchestration-map-edge-target" d={d} onClick={() => { setSelectedEdge(edgeId(edge)); setSelectedNode(edge.target); setUserSelectedNode(true); }} />
