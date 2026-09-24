@@ -8,6 +8,12 @@ export interface SubagentProfilesResponse {
 export interface SubagentSettingsResponse {
   enabled: boolean;
   maxConcurrent: number;
+  sources?: {
+    builtInEnabled: "local" | "roster" | "default";
+    disabledBuiltIns: "local" | "roster" | "default";
+    maxConcurrent: "local" | "roster" | "default";
+  };
+  defaultEditScope?: "local" | "roster";
 }
 
 export interface ShellToolSettingsResponse {
@@ -56,6 +62,8 @@ export interface SkillInfo {
   filePath: string;
   baseDir: string;
   disableModelInvocation: boolean;
+  /** Repository skills are assigned in Pi Web but authored and tracked in Git. */
+  readOnly?: boolean;
   sourceInfo: {
     source?: string;
     scope?: string;

@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { mkdirSync } from "fs";
+import { lstatSync, mkdirSync } from "fs";
 import { homedir } from "os";
 import { join } from "path";
 import { allowFileRoot } from "@/lib/file-access";
@@ -11,6 +11,9 @@ export async function POST() {
     const date = new Date().toISOString().slice(0, 10).replace(/-/g, "");
     const dir = join(homedir(), `pi-cwd-${date}`);
     mkdirSync(dir, { recursive: true });
+    if (!lstatSync(dir).isDirectory()) {
+      throw new Error("Default workspace must be a real directory");
+    }
     allowFileRoot(dir);
     return NextResponse.json({ cwd: dir });
   } catch (error) {

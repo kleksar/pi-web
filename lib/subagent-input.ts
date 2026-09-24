@@ -1,4 +1,4 @@
-import { readFileSync, realpathSync, statSync } from "fs";
+import { closeSync, constants, fstatSync, openSync, readSync, realpathSync, statSync, type Stats } from "fs";
 import { relative, resolve } from "path";
 import { isPathWithinRoots } from "./path-security";
 import { toSlashPath } from "./paths";
@@ -9,6 +9,35 @@ export const MAX_SUBAGENT_INPUT_BYTES = 512 * 1024;
 export interface SubagentInputFile {
   path: string;
   content: string;
+}
+
+/** Read at most one byte past the remaining allowance, even if a file grows after stat. */
+function readBoundedInput(filePath: string, expected: Stats, remainingBytes: number): Buffer {
+  if (typeof constants.O_NOFOLLOW !== "number" || typeof constants.O_NONBLOCK !== "number") {
+    throw new Error("Secure Agent input_files reading is not available on this platform");
+  }
+  const file = openSync(filePath, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  try {
+    // The path can change between realpath/stat and open. Verify the opened
+    // inode rather than trusting a pathname that an agent can modify.
+    const opened = fstatSync(file);
+    if (!opened.isFile() || opened.dev !== expected.dev || opened.ino !== expected.ino) {
+      throw new Error("Agent input file changed during loading");
+    }
+    if (opened.size > remainingBytes) {
+      throw new Error(`Agent input_files exceeds the ${MAX_SUBAGENT_INPUT_BYTES}-byte total limit`);
+    }
+    const buffer = Buffer.allocUnsafe(remainingBytes + 1);
+    let length = 0;
+    while (length < buffer.length) {
+      const count = readSync(file, buffer, length, buffer.length - length, null);
+      if (count === 0) break;
+      length += count;
+    }
+    return buffer.subarray(0, length);
+  } finally {
+    closeSync(file);
+  }
 }
 
 export function loadSubagentInputFiles(cwd: string, requestedPaths: readonly string[]): SubagentInputFile[] {
@@ -35,15 +64,20 @@ export function loadSubagentInputFiles(cwd: string, requestedPaths: readonly str
     if (!isPathWithinRoots(filePath, allowedRoots)) {
       throw new Error(`Agent input file is outside the session cwd: ${requestedPath}`);
     }
-    if (!statSync(filePath).isFile()) {
+    const stat = statSync(filePath);
+    if (!stat.isFile()) {
       throw new Error(`Agent input path is not a file: ${requestedPath}`);
     }
     if (seen.has(filePath)) continue;
     seen.add(filePath);
 
-    const buffer = readFileSync(filePath);
+    const remainingBytes = MAX_SUBAGENT_INPUT_BYTES - totalBytes;
+    if (stat.size > remainingBytes) {
+      throw new Error(`Agent input_files exceeds the ${MAX_SUBAGENT_INPUT_BYTES}-byte total limit`);
+    }
+    const buffer = readBoundedInput(filePath, stat, remainingBytes);
     totalBytes += buffer.byteLength;
-    if (totalBytes > MAX_SUBAGENT_INPUT_BYTES) {
+    if (buffer.byteLength > remainingBytes) {
       throw new Error(`Agent input_files exceeds the ${MAX_SUBAGENT_INPUT_BYTES}-byte total limit`);
     }
 

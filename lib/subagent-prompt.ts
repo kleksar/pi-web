@@ -10,11 +10,12 @@ export function buildSubagentPromptPlan(options: {
   tools: readonly string[];
   loadSkills?: boolean;
   loadExtensions?: boolean;
+  canDelegate?: boolean;
   promptMode?: "replace" | "append";
   task: string;
   inheritedParentContext?: string;
 }): SubagentPromptPlan {
-  const chatOnly = options.tools.length === 0 && !options.loadSkills && !options.loadExtensions;
+  const chatOnly = options.tools.length === 0 && !options.loadSkills && !options.loadExtensions && !options.canDelegate;
   const replacePrompt = options.promptMode === "replace";
   const appendSystemPrompt = [options.profileSystemPrompt];
   if (options.inheritedParentContext && !chatOnly) {

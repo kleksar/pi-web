@@ -8,7 +8,6 @@ import skillsResponse from "./captured/skills.json";
 import subagentProfilesResponse from "./captured/subagent-profiles.json";
 import type { MockRequest } from "./http";
 import { delay, error, json } from "./http";
-import { currentDemoLocale } from "./locale";
 import { AUTH_PROVIDERS_RESPONSE, ENABLED_MODELS_RESPONSE, MODELS_CONFIG, MODELS_RESPONSE, MODEL_PRICING } from "./data/models";
 import { PLUGINS_RESPONSE, SKILL_SEARCH_RESULTS } from "./data/extensions";
 import { settings } from "./settings-state";
@@ -143,7 +142,7 @@ async function modelsConfigRoute(request: MockRequest): Promise<Response> {
     await delay(900 + Math.random() * 600);
     const known = body.providerName && modelsConfig.providers[body.providerName];
     if (!known) return json({ ok: false, error: demoOnlyMessage() });
-    return json({ ok: true, latencyMs: 640 + Math.round(Math.random() * 500), status: 200, responseText: currentDemoLocale() === "zh" ? "你好！连接正常。" : "Hello! The connection works." });
+    return json({ ok: true, latencyMs: 640 + Math.round(Math.random() * 500), status: 200, responseText: "Hello! The connection works." });
   }
   if (sub === "discover") {
     await delay(900);

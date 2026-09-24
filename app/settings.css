@@ -111,6 +111,25 @@
   background: var(--bg-panel);
 }
 
+.config-sidebar-search {
+  flex-shrink: 0;
+  width: calc(100% - 16px);
+  min-width: 0;
+  margin: 10px 8px 2px;
+  padding: 7px 9px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+}
+
+.config-sidebar-search:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
 .config-sidebar-list {
   flex: 1;
   min-height: 0;
@@ -410,6 +429,27 @@
   color: #d97706;
 }
 
+.agents-roster-info {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  padding: 8px 18px;
+  border-bottom: 1px solid var(--border);
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.agents-roster-info strong {
+  color: var(--text);
+}
+
+.agents-roster-info.is-disconnected {
+  border-left: 3px solid #d97706;
+  padding-left: 15px;
+}
+
 .agents-feature-actions {
   display: flex;
   flex-shrink: 0;
@@ -438,6 +478,16 @@
   text-align: center;
 }
 
+.agents-concurrency-control select {
+  height: 28px;
+  padding: 0 6px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+}
+
 .config-sidebar-message {
   padding: 10px 8px;
   color: var(--text-muted);
@@ -450,6 +500,11 @@
 
 .config-sidebar-message.is-empty {
   color: var(--text-dim);
+}
+
+.config-sidebar-message .config-button {
+  display: block;
+  margin-top: 8px;
 }
 
 .config-detail {
@@ -1077,6 +1132,24 @@
   min-width: 0;
   min-height: 0;
   overflow: hidden;
+}
+
+.settings-shared-context {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 7px 16px;
+  border-bottom: 1px solid var(--border);
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.settings-shared-context[role="alert"] {
+  color: #ef4444;
 }
 
 .settings-section-host {

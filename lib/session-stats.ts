@@ -14,6 +14,8 @@ export interface SessionFileStats {
     total: number;
   };
   cost: number;
+  /** False when an old fork's copied spend cannot be separated from new usage. */
+  costKnown?: boolean;
 }
 
 function emptyStats(): SessionFileStats {
@@ -94,6 +96,7 @@ export function mergeSessionStats(
     totalMessages: fileStats.totalMessages + delta(current.totalMessages, loaded.totalMessages),
     tokens,
     cost: fileStats.cost + delta(current.cost, loaded.cost),
+    ...(fileStats.costKnown === false ? { costKnown: false } : {}),
   };
 }
 

@@ -43,10 +43,34 @@ function profile(overrides = {}) {
 function jsonRequest(method, body) {
   return new Request("http://localhost/api/subagents/profiles", {
     method,
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", Host: "localhost" },
     body: JSON.stringify(body),
   });
 }
+
+test("profile mutations reject cross-origin JSON and form posts before changing files", async (t) => {
+  const cwd = await mkdtemp(join(tmpdir(), "pi-web-subagent-route-security-"));
+  allowFileRoot(cwd);
+  t.after(() => rm(cwd, { recursive: true, force: true }));
+  const methods = [
+    ["PUT", PUT, { cwd, scope: "project", profile: profile() }],
+    ["PATCH", PATCH, { cwd, scope: "project", name: "api-test-agent", enabled: false }],
+    ["DELETE", DELETE, { cwd, scope: "project", name: "api-test-agent" }],
+  ];
+  for (const [method, handler, body] of methods) {
+    const crossOrigin = new Request("http://localhost/api/subagents/profiles", {
+      method,
+      headers: { "Content-Type": "application/json", Host: "localhost", Origin: "https://other.example" },
+      body: JSON.stringify(body),
+    });
+    assert.equal((await handler(crossOrigin)).status, 403);
+    const form = new Request("http://localhost/api/subagents/profiles", {
+      method, headers: { "Content-Type": "application/x-www-form-urlencoded", Host: "localhost" }, body: "x=y",
+    });
+    assert.equal((await handler(form)).status, 415);
+  }
+  assert.equal(existsSync(join(cwd, ".pi", "agents", "api-test-agent.md")), false);
+});
 
 test("profiles route creates, lists, and deletes a project profile", async (t) => {
   const cwd = await mkdtemp(join(tmpdir(), "pi-web-subagent-route-"));
@@ -138,6 +162,49 @@ test("profiles route keeps same-name global and project profiles independently e
   assert.equal(response.status, 200);
 });
 
+test("orchestrator allow-list survives profile toggles and rejects unavailable children", async (t) => {
+  const cwd = await mkdtemp(join(tmpdir(), "pi-web-subagent-route-orchestrator-"));
+  allowFileRoot(cwd);
+  t.after(() => rm(cwd, { recursive: true, force: true }));
+
+  let response = await PUT(jsonRequest("PUT", {
+    cwd,
+    scope: "project",
+    profile: profile({ name: "reader", tools: [], loadSkills: false, loadExtensions: false }),
+  }));
+  assert.equal(response.status, 200);
+
+  const coordinator = profile({
+    name: "coordinator",
+    tools: [],
+    loadSkills: false,
+    loadExtensions: false,
+    orchestration: { allowedChildren: ["reader"] },
+  });
+  response = await PUT(jsonRequest("PUT", { cwd, scope: "project", profile: coordinator }));
+  assert.equal(response.status, 200);
+  assert.deepEqual((await response.json()).profile.orchestration, { allowedChildren: ["reader"] });
+
+  response = await PATCH(jsonRequest("PATCH", { cwd, scope: "project", name: "coordinator", enabled: false }));
+  assert.equal(response.status, 200);
+  assert.deepEqual((await response.json()).profile.orchestration, { allowedChildren: ["reader"] });
+  response = await GET(new Request(`http://localhost/api/subagents/profiles?cwd=${encodeURIComponent(cwd)}`));
+  assert.deepEqual((await response.json()).profiles.find((item) => item.name === "coordinator").orchestration, { allowedChildren: ["reader"] });
+
+  response = await PATCH(jsonRequest("PATCH", { cwd, scope: "project", name: "reader", enabled: false }));
+  assert.equal(response.status, 200);
+  response = await PUT(jsonRequest("PUT", { cwd, scope: "project", profile: coordinator }));
+  assert.equal(response.status, 400);
+  assert.match((await response.json()).error, /Allowed child agent is missing or disabled: reader/);
+  response = await GET(new Request(`http://localhost/api/subagents/profiles?cwd=${encodeURIComponent(cwd)}`));
+  assert.equal((await response.json()).profiles.find((item) => item.name === "coordinator").enabled, false);
+
+  response = await PUT(jsonRequest("PUT", { cwd, scope: "project", profile: { ...coordinator, orchestration: null } }));
+  assert.equal(response.status, 200);
+  assert.equal((await response.json()).profile.orchestration, undefined);
+  assert.doesNotMatch(await readFile(join(cwd, ".pi", "agents", "coordinator.md"), "utf8"), /pi_web_orchestration/);
+});
+
 test("profiles route toggles a built-in through settings.json without writing a profile file", async (t) => {
   const cwd = await mkdtemp(join(tmpdir(), "pi-web-subagent-route-"));
   allowFileRoot(cwd);
@@ -203,19 +270,19 @@ test("profiles route rejects missing paths, malformed profiles, and unsafe names
 
   response = await PUT(jsonRequest("PUT", { cwd, scope: "workspace", profile: profile() }));
   assert.equal(response.status, 400);
-  assert.deepEqual(await response.json(), { error: "scope must be global or project" });
+  assert.deepEqual(await response.json(), { error: "scope must be roster, global, or project" });
 
   response = await PUT(jsonRequest("PUT", { cwd, scope: "builtin", profile: profile() }));
   assert.equal(response.status, 400);
-  assert.deepEqual(await response.json(), { error: "scope must be global or project" });
+  assert.deepEqual(await response.json(), { error: "scope must be roster, global, or project" });
 
   response = await PATCH(jsonRequest("PATCH", { cwd, scope: "workspace", name: "explore", enabled: false }));
   assert.equal(response.status, 400);
-  assert.deepEqual(await response.json(), { error: "scope must be global, project, or builtin" });
+  assert.deepEqual(await response.json(), { error: "scope must be roster, global, project, or builtin" });
 
   response = await DELETE(jsonRequest("DELETE", { cwd, scope: "builtin", name: "Explore" }));
   assert.equal(response.status, 400);
-  assert.deepEqual(await response.json(), { error: "scope must be global or project" });
+  assert.deepEqual(await response.json(), { error: "scope must be roster, global, or project" });
 
   response = await PATCH(jsonRequest("PATCH", { cwd, scope: "project", name: "missing", enabled: false }));
   assert.equal(response.status, 404);

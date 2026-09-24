@@ -1,17 +1,76 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createJiti } from "jiti";
+import React from "react";
+import { renderToStaticMarkup } from "react-dom/server";
+import { projectTreeForResponse, toSummaryTree } from "../lib/project-tree.ts";
 
 const jiti = createJiti(import.meta.url, {
   jsx: { runtime: "automatic" },
   tsconfigPaths: true,
 });
-const { buildActivePath, compressChain, hasSessionBranches, selectTopLevelBranches } = await jiti.import("./BranchNavigator.tsx");
+const { BranchNavigator, buildActivePath, compressChain, hasSessionBranches, selectTopLevelBranches } = await jiti.import("./BranchNavigator.tsx");
+const { I18nProvider } = await jiti.import("../hooks/useI18n.tsx");
 
 const msg = (id, role, text) => ({ type: "message", id, parentId: null, timestamp: "t", message: { role, content: text } });
 const info = (id) => ({ type: "session_info", id, parentId: null, timestamp: "t", name: "x" });
 const model = (id) => ({ type: "model_change", id, parentId: null, timestamp: "t", provider: "test", modelId: "test" });
 const node = (entry, children = []) => ({ entry, children });
+
+test("branch navigation hides terminal fork-cost markers but keeps their SDK lineage", () => {
+  const baseline = (id, parentId) => ({
+    type: "custom", customType: "pi-web:fork-cost-baseline", id, parentId, timestamp: "t", data: {},
+  });
+  const marker = node(baseline("baseline", "a1"));
+  const root = node(msg("root", "user", "root"), [
+    node(msg("a1", "assistant", "first"), [marker, node(msg("u2", "user", "continuation"))]),
+    node(msg("u3", "user", "separate branch")),
+  ]);
+  const summary = toSummaryTree(projectTreeForResponse([root]));
+  assert.equal(summary[0].children[0].children[0].entry.id, "baseline", "the SDK marker remains in the tree");
+  assert.equal(buildActivePath(summary, "baseline").has("a1"), true, "its parent remains on the active path");
+  assert.equal(hasSessionBranches(summary), true);
+  assert.deepEqual(selectTopLevelBranches(summary).map((branch) => branch.entry.id), ["a1", "u3"]);
+  assert.equal(compressChain(selectTopLevelBranches(summary)[0]).node.entry.id, "u2");
+  const html = renderToStaticMarkup(React.createElement(I18nProvider, null,
+    React.createElement(BranchNavigator, {
+      tree: summary, activeLeafId: "baseline", onLeafChange: () => {}, open: true, hasSession: true,
+    }),
+  ));
+  assert.equal(html.includes(">custom<"), false, "no empty internal-marker row is rendered");
+  assert.equal(html.includes("first"), true);
+  assert.equal(html.includes("separate branch"), true);
+
+  const loneFork = toSummaryTree(projectTreeForResponse([node(msg("root", "user", "root"), [
+    marker, node(msg("u2", "user", "continuation")),
+  ])]));
+  assert.equal(hasSessionBranches(loneFork), false, "marker is not a second dialogue branch");
+  assert.deepEqual(selectTopLevelBranches(loneFork), []);
+
+  const markerWithChildren = node(baseline("internal-marker", "root"), [
+    node(msg("u4", "user", "child one")), node(msg("u5", "user", "child two")),
+  ]);
+  const navigable = toSummaryTree(projectTreeForResponse([node(msg("root", "user", "root"), [
+    markerWithChildren, node(msg("u3", "user", "separate branch")),
+  ])]));
+  assert.deepEqual(selectTopLevelBranches(navigable).map((branch) => branch.entry.id), ["internal-marker", "u3"],
+    "a marker with descendants must retain its navigation structure");
+});
+
+test("terminal cost marker does not block a later branch point", () => {
+  const marker = node({
+    type: "custom", customType: "pi-web:fork-cost-baseline", id: "baseline", parentId: "A", timestamp: "t", data: {},
+  });
+  const tree = toSummaryTree(projectTreeForResponse([node(msg("A", "assistant", "answer"), [
+    marker,
+    node(msg("B", "user", "follow-up"), [
+      node(msg("C", "assistant", "first branch")),
+      node(msg("D", "assistant", "second branch")),
+    ]),
+  ])]));
+  assert.equal(hasSessionBranches(tree), true);
+  assert.deepEqual(selectTopLevelBranches(tree).map((branch) => branch.entry.id), ["C", "D"]);
+});
 
 test("compressChain labels a chain by its first message entry", () => {
   const chain = node(msg("u1", "user", "原问题"), [node(msg("a1", "assistant", "回答"))]);

@@ -10,7 +10,6 @@ const sidebarSource = await readFile(new URL("./SessionSidebar.tsx", import.meta
 const themeSource = await readFile(new URL("../hooks/useTheme.ts", import.meta.url), "utf8");
 const themeOptionsSource = await readFile(new URL("../lib/theme.ts", import.meta.url), "utf8");
 const enSource = await readFile(new URL("../lib/i18n/messages/en.ts", import.meta.url), "utf8");
-const zhSource = await readFile(new URL("../lib/i18n/messages/zh-CN.ts", import.meta.url), "utf8");
 const loginSource = await readFile(new URL("../app/login/page.tsx", import.meta.url), "utf8");
 
 test("opens one settings panel from direct sidebar shortcuts", () => {
@@ -25,12 +24,47 @@ test("opens one settings panel from direct sidebar shortcuts", () => {
 });
 
 test("keeps every requested configuration surface inside the settings panel", () => {
-  for (const section of ["general", "models", "skills", "agents", "plugins"]) {
+  for (const section of ["general", "models", "skills", "main", "agents", "plugins"]) {
     assert.match(panelSource, new RegExp(`id: "${section}"`));
   }
-  for (const component of ["ModelsConfig", "SkillsConfig", "AgentsConfig", "PluginsConfig"]) {
+  for (const component of ["ModelsConfig", "SkillsConfig", "MainAgentConfig", "AgentsConfig", "PluginsConfig"]) {
     assert.match(panelSource, new RegExp(`<${component} embedded`));
   }
+});
+
+test("shows Git and global resources when there are no sessions without treating the scratch cwd as a project", async () => {
+  const agents = await readFile(new URL("./AgentsConfig.tsx", import.meta.url), "utf8");
+  const main = await readFile(new URL("./MainAgentConfig.tsx", import.meta.url), "utf8");
+  const prompt = await readFile(new URL("./MainPromptEditor.tsx", import.meta.url), "utf8");
+  const skills = await readFile(new URL("./SkillsConfig.tsx", import.meta.url), "utf8");
+  const selector = await readFile(new URL("./AgentResourceSelector.tsx", import.meta.url), "utf8");
+  assert.match(panelSource, /if \(cwd\) return;[\s\S]*?fetch\("\/api\/default-cwd", \{ method: "POST", signal: controller\.signal \}\)/);
+  assert.match(panelSource, /!response\.ok \|\| data\.error \|\| !data\.cwd/);
+  assert.match(panelSource, /setSettingsCwd\(data\.cwd\)/);
+  assert.match(panelSource, /setSettingsCwdError\(cause instanceof Error/);
+  assert.match(panelSource, /settingsCwdError \? <>[\s\S]*?setSettingsCwdRetry\(\(value\) => value \+ 1\)/);
+  assert.match(panelSource, /const resourceCwd = cwd \?\? settingsCwd/);
+  for (const section of ["skills", "main", "agents"]) {
+    assert.match(panelSource, new RegExp(`\\{ id: "${section}", label: [^,]+, requiresProject: false \\}`));
+    assert.match(panelSource, new RegExp(`<${section === "skills" ? "SkillsConfig" : section === "main" ? "MainAgentConfig" : "AgentsConfig"} embedded key=\\{resourceCwd\\} cwd=\\{resourceCwd\\} projectSelected=\\{Boolean\\(cwd\\)\\}`));
+  }
+  assert.match(panelSource, /\{ id: "plugins", label: t\("common\.plugins"\), requiresProject: true \}/);
+  assert.match(prompt, /item !== "project" \|\| projectSelected/);
+  assert.match(prompt, /if \(!projectSelected && scope === "project"\) setScope\(state\?\.roster \? "roster" : "global"\)/);
+  assert.match(prompt, /\(!projectSelected && scope === "project"\)\) return;/);
+  assert.match(main, /projectSelected && <button type="button" aria-pressed=\{scope === "project"\}/);
+  assert.match(main, /if \(!projectSelected && scope === "project"\) setScope\(rosterAvailable \? "roster" : "global"\)/);
+  assert.match(main, /\|\| \(!projectSelected && scope === "project"\)\) return;/);
+  assert.match(agents, /rosterAvailable \? "roster" : projectSelected \? "project" : "global"/);
+  assert.match(agents, /if \(!projectSelected && \(targetScope === "project" \|\| selected\?\.scope === "project"\)\) \{/);
+  assert.match(agents, /loadedMainSource !== wantedMainSource/);
+  assert.match(skills, /\["global", \.\.\.\(projectSelected \? \["project" as const\] : \[\]\)\]/);
+  assert.match(skills, /if \(!projectSelected && scope === "project"\) setScope\("global"\)/);
+  assert.match(skills, /if \(!projectSelected && scope !== "global"\) return;/);
+  assert.match(skills, /sourceLabel\(skill\) !== "project"/);
+  assert.match(selector, /excludeProjectResources \? catalog\.skills\.filter/);
+  assert.match(selector, /outsideProject\(skill\.sourceInfo, skill\.filePath, skill\.realPath, cwd\)/);
+  assert.match(selector, /outsideProject\(tool\.sourceInfo, tool\.extensionPath, tool\.realPath, cwd\)/);
 });
 
 test("restores the settings section and each list detail selection", async () => {
@@ -63,8 +97,9 @@ test("offers five palettes and system theme selection with native radios", () =>
   assert.match(themeSource, /const setThemePreference = useCallback/);
 });
 
-test("keeps language selection in General settings", () => {
+test("shows language selection only when multiple locales are registered", () => {
   assert.match(panelSource, /t\("common\.language"\)/);
+  assert.match(panelSource, /supportedLocales\.length > 1/);
   assert.match(panelSource, /className="settings-language-options"/);
   assert.match(panelSource, /setLocale\(plugin\.id/);
 });
@@ -121,8 +156,6 @@ test("uses top navigation on desktop and one compact section picker on mobile", 
 test("labels agent profiles as sub-agents", () => {
   assert.match(enSource, /"common\.agents": "Sub-agents"/);
   assert.match(enSource, /"agents\.new": "New sub-agent"/);
-  assert.match(zhSource, /"common\.agents": "子代理"/);
-  assert.match(zhSource, /"agents\.new": "新建子代理"/);
 });
 
 test("uses the child-session robot glyph for the sub-agents tab", () => {

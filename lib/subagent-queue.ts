@@ -40,7 +40,15 @@ export class SubagentQueue<T> {
     });
     parent.items.push(item);
     this.parents.set(parentId, parent);
-    onState("queued");
+    try {
+      onState("queued");
+    } catch (error) {
+      // The caller never receives this item when enqueue throws. Remove it so a
+      // later enqueue cannot accidentally start work the caller already rejected.
+      parent.items.splice(parent.items.indexOf(item), 1);
+      if (parent.active === 0 && parent.items.length === 0) this.parents.delete(parentId);
+      throw error;
+    }
     this.pump(parentId, parent);
     return {
       promise,
@@ -62,13 +70,18 @@ export class SubagentQueue<T> {
       const item = parent.items.shift()!;
       if (item.cancelled) continue;
       item.state = "running";
-      item.onState("running");
+      try {
+        item.onState("running");
+      } catch (error) {
+        item.reject(error);
+        continue;
+      }
       parent.active += 1;
       void item.run().then(item.resolve, item.reject).finally(() => {
         parent.active -= 1;
         this.pump(parentId, parent);
-        if (parent.active === 0 && parent.items.length === 0) this.parents.delete(parentId);
       });
     }
+    if (parent.active === 0 && parent.items.length === 0) this.parents.delete(parentId);
   }
 }

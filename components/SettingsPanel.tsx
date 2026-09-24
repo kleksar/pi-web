@@ -28,6 +28,7 @@ import { ModelsConfig } from "./ModelsConfig";
 import { setupPushSubscription } from "@/lib/push-client";
 import { SkillsConfig } from "./SkillsConfig";
 import { AgentsConfig } from "./AgentsConfig";
+import { MainAgentConfig } from "./MainAgentConfig";
 import { PluginsConfig } from "./PluginsConfig";
 import { ConfigButton, ConfigSwitch } from "./SettingsUi";
 
@@ -58,6 +59,7 @@ export function SettingsSectionIcon({ section, size = 16, strokeWidth = 1.8 }: {
   if (section === "general") return <svg {...common}><path d="M20 7h-9M14 17H5" /><circle cx="7" cy="7" r="3" /><circle cx="17" cy="17" r="3" /></svg>;
   if (section === "models") return <svg {...common}><rect x="4" y="4" width="16" height="16" rx="2" /><rect x="9" y="9" width="6" height="6" /><path d="M9 1v3M15 1v3M9 20v3M15 20v3M20 9h3M20 15h3M1 9h3M1 15h3" /></svg>;
   if (section === "skills") return <svg {...common}><path d="m12 2-10 5 10 5 10-5-10-5Z" /><path d="m2 12 10 5 10-5M2 17l10 5 10-5" /></svg>;
+  if (section === "main") return <svg {...common}><circle cx="12" cy="6" r="3" /><path d="M12 9v5M12 14l-7 4M12 14l7 4" /><circle cx="5" cy="19" r="2" /><circle cx="19" cy="19" r="2" /></svg>;
   if (section === "agents") return <svg {...common} className="settings-section-icon is-agent"><rect x="5" y="7" width="14" height="11" rx="2" /><path d="M9 11h.01M15 11h.01M9 15h6M12 7V4M10 4h4" /></svg>;
   return <svg {...common}><path d="M9 7V2M15 7V2M6 13V8a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v5a6 6 0 0 1-12 0ZM12 19v3" /></svg>;
 }
@@ -310,7 +312,7 @@ function GeneralSettings({ sessionId, onSessionReloaded, quoteSelectionEnabled, 
         )}
       </section>
 
-      <section className="settings-general-section">
+      {supportedLocales.length > 1 && <section className="settings-general-section">
         <h3 className="settings-general-heading">{t("common.language")}</h3>
         <div role="radiogroup" aria-label={t("common.language")} className="settings-language-options">
           {supportedLocales.map((plugin) => {
@@ -333,7 +335,7 @@ function GeneralSettings({ sessionId, onSessionReloaded, quoteSelectionEnabled, 
             );
           })}
         </div>
-      </section>
+      </section>}
 
       {webAuthEnabled && (
         <section className="settings-general-section">
@@ -353,14 +355,41 @@ function GeneralSettings({ sessionId, onSessionReloaded, quoteSelectionEnabled, 
 export function SettingsPanel({ cwd, sessionId, initialSection, onClose, onSessionReloaded, quoteSelectionEnabled, onQuoteSelectionChange }: Props) {
   const { t } = useI18n();
   const [section, setSection] = useState<SettingsSection>(initialSection);
+  const [openMainMapRequest, setOpenMainMapRequest] = useState(0);
+  const [settingsCwd, setSettingsCwd] = useState<string | null>(null);
+  const [settingsCwdError, setSettingsCwdError] = useState<string | null>(null);
+  const [settingsCwdRetry, setSettingsCwdRetry] = useState(0);
+  const [settingsCwdLoading, setSettingsCwdLoading] = useState(false);
   const [mountedSections, setMountedSections] = useState<ReadonlySet<SettingsSection>>(
     () => new Set([section]),
   );
+  const resourceCwd = cwd ?? settingsCwd;
+
+  useEffect(() => {
+    if (cwd) return;
+    const controller = new AbortController();
+    setSettingsCwdLoading(true);
+    setSettingsCwdError(null);
+    // The existing default-cwd endpoint creates an isolated, explicitly allowed
+    // context for resource discovery. It does not select or trust a user project.
+    void fetch("/api/default-cwd", { method: "POST", signal: controller.signal })
+      .then(async (response) => {
+        const data = await response.json() as { cwd?: string; error?: string };
+        if (!response.ok || data.error || !data.cwd) throw new Error(data.error ?? `HTTP ${response.status}`);
+        if (!controller.signal.aborted) setSettingsCwd(data.cwd);
+      })
+      .catch((cause) => {
+        if (!controller.signal.aborted) setSettingsCwdError(cause instanceof Error ? cause.message : String(cause));
+      })
+      .finally(() => { if (!controller.signal.aborted) setSettingsCwdLoading(false); });
+    return () => controller.abort();
+  }, [cwd, settingsCwdRetry]);
   const sections: { id: SettingsSection; label: string; requiresProject: boolean }[] = [
     { id: "general", label: t("settings.general"), requiresProject: false },
     { id: "models", label: t("common.models"), requiresProject: false },
-    { id: "skills", label: t("common.skills"), requiresProject: true },
-    { id: "agents", label: t("common.agents"), requiresProject: true },
+    { id: "skills", label: t("common.skills"), requiresProject: false },
+    { id: "main", label: t("common.main"), requiresProject: false },
+    { id: "agents", label: t("common.agents"), requiresProject: false },
     { id: "plugins", label: t("common.plugins"), requiresProject: true },
   ];
 
@@ -377,7 +406,7 @@ export function SettingsPanel({ cwd, sessionId, initialSection, onClose, onSessi
   }, [onClose]);
 
   useEffect(() => {
-    if (cwd || (section !== "skills" && section !== "agents" && section !== "plugins")) return;
+    if (cwd || section !== "plugins") return;
     setSection("general");
     setMountedSections((current) => new Set(current).add("general"));
     setLastSettingsSection("general");
@@ -445,11 +474,22 @@ export function SettingsPanel({ cwd, sessionId, initialSection, onClose, onSessi
           <button type="button" onClick={onClose} title={t("i18n.close")} aria-label={t("i18n.close")} className="config-close-button settings-dialog-close">×</button>
         </div>
 
+        {section !== "general" && section !== "models" && section !== "plugins" && !cwd && (
+            <div className="settings-shared-context" role={settingsCwdError ? "alert" : "status"}>
+              {settingsCwdError ? <>
+                <span>{t("settings.sharedContextFailed", { error: settingsCwdError })}</span>
+                <ConfigButton size="small" onClick={() => setSettingsCwdRetry((value) => value + 1)}>{t("settings.retry")}</ConfigButton>
+              </> : resourceCwd
+                ? t("settings.sharedContext")
+                : settingsCwdLoading ? t("agents.loading") : null}
+            </div>
+        )}
         <main className="settings-dialog-main">
           {sectionHost("general", <GeneralSettings sessionId={sessionId} onSessionReloaded={onSessionReloaded} quoteSelectionEnabled={quoteSelectionEnabled} onQuoteSelectionChange={onQuoteSelectionChange} />)}
           {sectionHost("models", <ModelsConfig embedded cwd={cwd} onClose={onClose} />)}
-          {cwd && sectionHost("skills", <SkillsConfig embedded key={cwd} cwd={cwd} onClose={onClose} />)}
-          {cwd && sectionHost("agents", <AgentsConfig embedded key={cwd} cwd={cwd} sessionId={sessionId} onClose={onClose} onReloaded={onSessionReloaded} />)}
+          {resourceCwd && sectionHost("skills", <SkillsConfig embedded key={resourceCwd} cwd={resourceCwd} projectSelected={Boolean(cwd)} onClose={onClose} />)}
+          {resourceCwd && sectionHost("main", <MainAgentConfig embedded key={resourceCwd} cwd={resourceCwd} projectSelected={Boolean(cwd)} sessionId={sessionId} onClose={onClose} onReloaded={onSessionReloaded} onOpenMap={() => { setOpenMainMapRequest((current) => current + 1); activateSection("agents"); }} />)}
+          {resourceCwd && sectionHost("agents", <AgentsConfig embedded key={resourceCwd} cwd={resourceCwd} projectSelected={Boolean(cwd)} sessionId={sessionId} onClose={onClose} onReloaded={onSessionReloaded} openMainMapRequest={openMainMapRequest} />)}
           {cwd && sectionHost("plugins", <PluginsConfig embedded key={cwd} cwd={cwd} sessionId={sessionId} onClose={onClose} onReloaded={onSessionReloaded} />)}
         </main>
       </div>

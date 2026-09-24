@@ -1,0 +1,89 @@
+.agent-resource-selector {
+  display: grid;
+  gap: 18px;
+  min-width: 0;
+  align-content: start;
+}
+
+.agent-resource-selector-header,
+.agent-resource-section-heading,
+.agent-resource-section-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.agent-resource-selector-header,
+.agent-resource-section-heading { justify-content: space-between; }
+.agent-resource-selector-header { color: var(--text-muted); font-size: 12px; }
+.agent-resource-section { display: grid; gap: 8px; min-width: 0; }
+.agent-resource-section-heading strong { font-size: 12px; }
+.agent-resource-selector button { cursor: pointer; }
+.agent-resource-selector button:disabled { cursor: default; }
+
+.agent-resource-search {
+  width: 100%;
+  min-width: 0;
+  height: 34px;
+  padding: 0 9px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+}
+
+.agent-resource-list {
+  display: grid;
+  gap: 5px;
+  max-height: 320px;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
+.agent-resource-row {
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--bg-panel);
+}
+.agent-resource-row.is-selected { border-color: color-mix(in srgb, var(--border) 55%, var(--accent)); }
+.agent-resource-row.is-unavailable { border-style: dashed; }
+.agent-resource-row label {
+  display: flex;
+  gap: 9px;
+  align-items: flex-start;
+  min-width: 0;
+  padding: 7px 9px 3px;
+  cursor: pointer;
+}
+.agent-resource-row label:has(input:disabled) { cursor: default; }
+.agent-resource-row input { flex: 0 0 auto; margin: 2px 0 0; }
+.agent-resource-label { display: grid; gap: 2px; min-width: 0; }
+.agent-resource-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 600;
+}
+.agent-resource-scope { margin-left: 8px; color: var(--text-dim); font-weight: 400; }
+.agent-resource-description {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-muted);
+  font-size: 11px;
+}
+.agent-resource-path { margin: 0 9px 6px 34px; color: var(--text-dim); font-size: 11px; }
+.agent-resource-path summary { cursor: pointer; width: fit-content; }
+.agent-resource-path code,
+.agent-resource-path > span { display: block; overflow-wrap: anywhere; margin-top: 4px; }
+.agent-resource-path code { font-family: var(--font-mono); user-select: text; }
+.agent-resource-status { color: var(--text-dim); font-size: 12px; }
+.agent-resource-error { color: #f87171; font-size: 12px; }

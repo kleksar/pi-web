@@ -4,6 +4,9 @@ import { dirname, join } from "path";
 import { fileURLToPath } from "url";
 
 const configDir = dirname(fileURLToPath(import.meta.url));
+// Keep the installation root fixed if an extension later changes process.cwd().
+// This is server-only bootstrap state; never derive a roster from a task cwd.
+process.env.PI_WEB_PACKAGE_ROOT = configDir;
 const { version } = JSON.parse(readFileSync(join(configDir, "package.json"), "utf8")) as { version: string };
 let piVersion = "unknown";
 try {

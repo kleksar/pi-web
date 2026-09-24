@@ -16,7 +16,7 @@ export const HOST_SUBAGENT_EXTENSION_NAME = "pi-web-subagents";
 const HOST_SUBAGENT_EXTENSION_PATH = `<inline:${HOST_SUBAGENT_EXTENSION_NAME}>`;
 const SUBAGENT_TOOL_NAMES = new Set<string>(SUBAGENT_CONTROL_TOOL_NAMES);
 const LEGACY_SUBAGENT_PACKAGE_NAME = "pi-subagents";
-const TERMINAL_SUBAGENT_STATUSES = new Set<SubagentRunInfo["status"]>(["completed", "failed", "aborted", "interrupted"]);
+const TERMINAL_SUBAGENT_STATUSES = new Set<SubagentRunInfo["status"]>(["completed", "needs_context", "failed", "aborted", "interrupted"]);
 
 export interface SubagentToolDetails {
   kind: "pi-web-subagent";
@@ -28,6 +28,8 @@ export interface SubagentToolDetails {
   createdAt: string;
   completedAt?: string;
   error?: string;
+  contextRequest?: SubagentRunInfo["contextRequest"];
+  contextFor?: string;
   worktreePath?: string;
   worktreeBranch?: string;
   worktreeCleanupError?: string;
@@ -38,6 +40,7 @@ export interface StartSubagentRequest {
   parentToolCallId: string;
   profile: string;
   task: string;
+  contextFor?: string;
   inputFiles?: string[];
   description: string;
   runInBackground?: boolean;
@@ -69,14 +72,37 @@ export interface SubagentExecution {
 export interface SubagentExtensionRuntime {
   start(request: StartSubagentRequest): Promise<SubagentExecution>;
   resume(request: ResumeSubagentRequest): Promise<SubagentExecution>;
-  get(sessionId: string): Promise<SubagentRunInfo | null>;
-  steer(sessionId: string, message: string): Promise<void>;
+  get(sessionId: string, callerSessionId?: string): Promise<SubagentRunInfo | null>;
+  steer(sessionId: string, message: string, callerSessionId?: string): Promise<void>;
   notifyParent(run: SubagentRunInfo): Promise<void>;
-  markResultConsumed(sessionId: string): void;
+  markResultConsumed(sessionId: string, callerSessionId?: string): void;
 }
 
 export type SubagentProfileProvider = () => readonly SubagentProfile[];
 export type SubagentEnabledProvider = () => boolean;
+export interface SubagentExtensionOptions {
+  /** If present, expose and permit only these direct child profiles. Omit for the root catalog. */
+  allowedChildren?: readonly string[];
+  /** Consumer profile -> producer profiles, from the pinned orchestrator policy. */
+  dependencies?: Readonly<Record<string, readonly string[]>>;
+  /** Consumer -> siblings whose context can be requested after starting. */
+  contextProviders?: Readonly<Record<string, readonly string[]>>;
+}
+
+function dependencyDescription(dependencies: SubagentExtensionOptions["dependencies"]): string {
+  if (!dependencies) return "";
+  const edges = Object.entries(dependencies).filter(([, producers]) => producers.length > 0);
+  if (edges.length === 0) return "";
+  return `\n\nRequired results before dispatch (Pi Web checks these and passes their text to the consumer):\n${edges
+    .map(([consumer, producers]) => `- ${consumer} depends on ${producers.join(", ")}`)
+    .join("\n")}`;
+}
+
+function contextDescription(contextProviders: SubagentExtensionOptions["contextProviders"]): string {
+  const entries = Object.entries(contextProviders ?? {}).filter(([, providers]) => providers.length);
+  if (!entries.length) return "";
+  return `\n\nOn-demand context: ${entries.map(([consumer, providers]) => `${consumer} may request ${providers.join(", ")}`).join("; ")}. A specialist may return {"status":"needs_context","provider":"...","request":"..."}. Call the requested provider with context_for set to the requesting session ID, then resume the requester. Pi Web transfers provider output directly to the requester; no need to copy it into the resume prompt.`;
+}
 
 function agentTypeDescription(profiles: readonly SubagentProfile[]): string {
   const available = profiles.filter((profile) => profile.enabled);
@@ -99,6 +125,8 @@ export function subagentToolDetails(run: SubagentRunInfo): SubagentToolDetails {
     createdAt: run.createdAt,
     ...(run.completedAt ? { completedAt: run.completedAt } : {}),
     ...(run.error ? { error: run.error } : {}),
+    ...(run.contextRequest ? { contextRequest: run.contextRequest } : {}),
+    ...(run.contextFor ? { contextFor: run.contextFor } : {}),
     ...(run.worktreePath ? { worktreePath: run.worktreePath } : {}),
     ...(run.worktreeBranch ? { worktreeBranch: run.worktreeBranch } : {}),
     ...(run.worktreeCleanupError ? { worktreeCleanupError: run.worktreeCleanupError } : {}),
@@ -106,13 +134,20 @@ export function subagentToolDetails(run: SubagentRunInfo): SubagentToolDetails {
 }
 
 export function subagentFinalText(run: SubagentRunInfo): string {
-  if (run.status === "starting" || run.status === "running") {
+  if (run.status === "queued" || run.status === "starting" || run.status === "running") {
     return `Subagent ${run.sessionId} is ${run.status}.`;
   }
   // Keep the session ID in the text: the model only sees `content`, never `details`, and needs it for `resume` / `get_subagent_result`.
   if (run.status === "completed") {
+    if (run.contextFor) return `Subagent ${run.sessionId} completed context for ${run.contextFor}. Resume that requester using Agent(resume="${run.contextFor}", prompt="Continue").`;
     const result = run.result?.trim();
     return result ? `Subagent ${run.sessionId} completed.\n\n${result}` : `Subagent ${run.sessionId} completed without text output.`;
+  }
+  if (run.status === "needs_context") {
+    const requested = run.contextRequest;
+    return requested
+      ? `Subagent ${run.sessionId} needs context from ${requested.provider}: ${requested.request}${requested.missingFiles?.length ? ` (files: ${requested.missingFiles.join(", ")})` : ""}. Call Agent(subagent_type="${requested.provider}", context_for="${run.sessionId}", prompt=${JSON.stringify(requested.request)}) and then resume ${run.sessionId}.`
+      : `Subagent ${run.sessionId} needs context but its request is invalid.`;
   }
   if (run.status === "aborted") return `Subagent ${run.sessionId} was stopped.`;
   if (run.status === "interrupted") return `Subagent ${run.sessionId} was interrupted before completion.`;
@@ -137,45 +172,93 @@ export function createSubagentExtension(
   runtime: SubagentExtensionRuntime,
   getProfiles: SubagentProfileProvider,
   isEnabled: SubagentEnabledProvider = () => true,
+  options?: SubagentExtensionOptions,
 ): InlineExtension {
   return {
     name: HOST_SUBAGENT_EXTENSION_NAME,
     hidden: true,
     factory: (pi) => {
       if (!isEnabled()) return;
-      const profiles = getProfiles().filter((profile) => profile.enabled);
+      const allowedChildren = options?.allowedChildren === undefined
+        ? null
+        : new Set(options.allowedChildren.map((name) => name.toLowerCase()));
+      const profiles = getProfiles().filter((profile) =>
+        profile.enabled && (allowedChildren === null || allowedChildren.has(profile.name.toLowerCase()))
+      );
+      const availableNames = new Set(profiles.map((profile) => profile.name.toLowerCase()));
       const profileNames = profiles.map((profile) => profile.name);
       const availableTypes = profileNames.length > 0 ? profileNames.join(", ") : "none";
+      const rootOnlyParameters = {
+        input_files: Type.Optional(Type.Array(Type.String(), {
+          description: "UTF-8 text files under the session cwd to include with the task.",
+          maxItems: MAX_SUBAGENT_INPUT_FILES,
+        })),
+        run_in_background: Type.Optional(Type.Boolean({ description: "Return immediately and notify this session when complete." })),
+        model: Type.Optional(Type.String({ description: "Optional provider/modelId override." })),
+        thinking: Type.Optional(Type.String({ description: "Optional thinking level override." })),
+        max_turns: Type.Optional(Type.Number({ description: "Optional positive agent turn limit." })),
+        inherit_context: Type.Optional(Type.Boolean({ description: "Include the parent session's active conversation context." })),
+        isolation: Type.Optional(Type.String({ description: "Run the subagent in an isolated git worktree." })),
+      };
       pi.registerTool(defineTool({
         name: "Agent",
         label: "Agent",
-        description: `Delegate a focused task to a configured subagent. Each subagent runs as a full, inspectable Pi session. Use background mode for independent work and foreground mode when the result is needed immediately.\n\nAvailable agent types:\n${agentTypeDescription(profiles)}`,
+        description: `Delegate a focused task to a configured subagent. Each subagent runs as a full, inspectable Pi session.${allowedChildren === null ? " Use background mode for independent work and foreground mode when the result is needed immediately." : ""}\n\nAvailable agent types:\n${agentTypeDescription(profiles)}${allowedChildren === null ? "" : dependencyDescription(options?.dependencies)}${contextDescription(options?.contextProviders)}`,
         promptSnippet: "Delegate a focused task to an inspectable subagent session",
         promptGuidelines: [
           "Use Agent for a focused task that benefits from an isolated context.",
-          "Use multiple background Agent calls in the same response for independent parallel work.",
+          ...(allowedChildren === null ? ["Use multiple background Agent calls in the same response for independent parallel work."] : []),
+          ...(allowedChildren !== null && dependencyDescription(options?.dependencies)
+            ? ["Call required producer agents first. Pi Web blocks a dependent agent until the required producers have completed in this orchestrator run; their results are passed by the host."]
+            : []),
           "Do not duplicate work already delegated to a running subagent.",
         ],
         executionMode: "parallel",
         parameters: Type.Object({
-          subagent_type: Type.Optional(Type.String({ description: `Configured agent profile. Available types: ${availableTypes}. Default: general-purpose.` })),
+          subagent_type: Type.Optional(Type.String({ description: `Configured agent profile. Available types: ${availableTypes}.${allowedChildren === null ? " Default: general-purpose." : ""}` })),
           prompt: Type.String({ description: "The complete task for the subagent." }),
           resume: Type.Optional(Type.String({ description: "Existing subagent session ID to continue instead of creating a new session." })),
-          input_files: Type.Optional(Type.Array(Type.String(), {
-            description: "UTF-8 text files under the session cwd to include with the task.",
-            maxItems: MAX_SUBAGENT_INPUT_FILES,
-          })),
+          context_for: Type.Optional(Type.String({ description: "For an on-demand context request, the requesting sibling's session ID. The provider's full result is transferred by Pi Web and is hidden from this coordinator's tool result." })),
           description: Type.String({ description: "Short activity label shown in the UI." }),
-          run_in_background: Type.Optional(Type.Boolean({ description: "Return immediately and notify this session when complete." })),
-          model: Type.Optional(Type.String({ description: "Optional provider/modelId override." })),
-          thinking: Type.Optional(Type.String({ description: "Optional thinking level override." })),
-          max_turns: Type.Optional(Type.Number({ description: "Optional positive agent turn limit." })),
-          inherit_context: Type.Optional(Type.Boolean({ description: "Include the parent session's active conversation context." })),
-          isolation: Type.Optional(Type.String({ description: "Run the subagent in an isolated git worktree." })),
+          ...(allowedChildren === null ? rootOnlyParameters : {}),
         }),
         async execute(toolCallId, params, signal, onUpdate, ctx) {
           try {
+            // Tool schemas guide the model; calls constructed elsewhere still need a host-side guard.
+            const overrides = params as typeof params & {
+              input_files?: string[];
+              run_in_background?: boolean;
+              model?: string;
+              thinking?: string;
+              max_turns?: number;
+              inherit_context?: boolean;
+              isolation?: string;
+              context_for?: string;
+            };
+            if (allowedChildren !== null) {
+              if (overrides.input_files !== undefined && (!Array.isArray(overrides.input_files) || overrides.input_files.length > 0)) {
+                throw new Error("Nested orchestrators cannot pass input_files");
+              }
+              for (const key of ["run_in_background", "model", "thinking", "max_turns", "inherit_context", "isolation"] as const) {
+                if (overrides[key] !== undefined) throw new Error(`Nested orchestrators cannot override ${key}`);
+              }
+            }
             const resume = params.resume?.trim();
+            const contextFor = overrides.context_for?.trim();
+            if (overrides.context_for !== undefined && (!contextFor || resume)) throw new Error("context_for requires a new provider run and a requester session ID");
+            const callerSessionId = ctx.sessionManager.getSessionId();
+            if (!callerSessionId) throw new Error("Parent session is unavailable");
+            const profile = params.subagent_type?.trim() || "general-purpose";
+            if (allowedChildren !== null && !resume && !availableNames.has(profile.toLowerCase())) {
+              throw new Error(`Subagent profile is not allowed: ${profile}`);
+            }
+            if (allowedChildren !== null && resume) {
+              const previous = await runtime.get(resume, callerSessionId);
+              if (!previous) throw new Error(`Subagent not found: ${resume}`);
+              if (!availableNames.has(previous.profile.toLowerCase())) {
+                throw new Error(`Subagent profile is not allowed: ${previous.profile}`);
+              }
+            }
             const execution = resume
               ? await runtime.resume({
                   parentContext: ctx,
@@ -183,7 +266,7 @@ export function createSubagentExtension(
                   sessionId: resume,
                   task: params.prompt,
                   description: params.description,
-                  ...(params.run_in_background !== undefined ? { runInBackground: params.run_in_background } : {}),
+                  ...(overrides.run_in_background !== undefined ? { runInBackground: overrides.run_in_background } : {}),
                   signal,
                   onUpdate: (run) => onUpdate?.({
                     content: [{ type: "text", text: `${run.profile}: ${run.description} (${run.status})` }],
@@ -193,16 +276,17 @@ export function createSubagentExtension(
               : await runtime.start({
               parentContext: ctx,
               parentToolCallId: toolCallId,
-              profile: params.subagent_type ?? "general-purpose",
+              profile,
               task: params.prompt,
-              ...(params.input_files ? { inputFiles: params.input_files } : {}),
+              ...(contextFor ? { contextFor } : {}),
+              ...(allowedChildren === null && overrides.input_files ? { inputFiles: overrides.input_files } : {}),
               description: params.description,
-              ...(params.run_in_background !== undefined ? { runInBackground: params.run_in_background } : {}),
-              ...(params.model ? { model: params.model } : {}),
-              ...(params.thinking ? { thinking: params.thinking } : {}),
-              ...(params.max_turns ? { maxTurns: params.max_turns } : {}),
-              ...(params.inherit_context !== undefined ? { inheritContext: params.inherit_context } : {}),
-              ...(params.isolation === "worktree" ? { isolation: "worktree" as const } : {}),
+              ...(overrides.run_in_background !== undefined ? { runInBackground: overrides.run_in_background } : {}),
+              ...(overrides.model ? { model: overrides.model } : {}),
+              ...(overrides.thinking ? { thinking: overrides.thinking } : {}),
+              ...(overrides.max_turns ? { maxTurns: overrides.max_turns } : {}),
+              ...(overrides.inherit_context !== undefined ? { inheritContext: overrides.inherit_context } : {}),
+              ...(overrides.isolation === "worktree" ? { isolation: "worktree" as const } : {}),
               signal,
               onUpdate: (run) => onUpdate?.({
                 content: [{ type: "text", text: `${run.profile}: ${run.description} (${run.status})` }],
@@ -249,10 +333,12 @@ export function createSubagentExtension(
           agent_id: Type.String({ description: "Subagent session ID." }),
           wait: Type.Optional(Type.Boolean({ description: "Wait until the subagent finishes." })),
         }),
-        async execute(_toolCallId, params, signal) {
-          let run = await runtime.get(params.agent_id);
+        async execute(_toolCallId, params, signal, _onUpdate, ctx) {
+          const callerSessionId = ctx.sessionManager.getSessionId();
+          if (!callerSessionId) return { content: [{ type: "text", text: "Parent session is unavailable" }], details: undefined, isError: true };
+          let run = await runtime.get(params.agent_id, callerSessionId);
           if (!run) return { content: [{ type: "text", text: `Subagent not found: ${params.agent_id}` }], details: undefined, isError: true };
-          while (params.wait && (run.status === "starting" || run.status === "running")) {
+          while (params.wait && (run.status === "queued" || run.status === "starting" || run.status === "running")) {
             await new Promise<void>((resolve, reject) => {
               const onAbort = () => {
                 clearTimeout(timer);
@@ -265,12 +351,12 @@ export function createSubagentExtension(
               if (signal?.aborted) onAbort();
               else signal?.addEventListener("abort", onAbort, { once: true });
             });
-            run = await runtime.get(params.agent_id);
+            run = await runtime.get(params.agent_id, callerSessionId);
             if (!run) return { content: [{ type: "text", text: `Subagent not found: ${params.agent_id}` }], details: undefined, isError: true };
           }
           // The parent now holds this result, so the background completion notification must not
           // deliver the same text again and wake a duplicate turn.
-          if (run.runInBackground && TERMINAL_SUBAGENT_STATUSES.has(run.status)) runtime.markResultConsumed(run.sessionId);
+          if (run.runInBackground && TERMINAL_SUBAGENT_STATUSES.has(run.status)) runtime.markResultConsumed(run.sessionId, callerSessionId);
           return {
             content: [{ type: "text", text: subagentFinalText(run) }],
             details: subagentToolDetails(run),
@@ -287,9 +373,11 @@ export function createSubagentExtension(
           agent_id: Type.String({ description: "Subagent session ID." }),
           message: Type.String({ description: "Instruction to inject after the current tool execution." }),
         }),
-        async execute(_toolCallId, params) {
+        async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
           try {
-            await runtime.steer(params.agent_id, params.message);
+            const callerSessionId = ctx.sessionManager.getSessionId();
+            if (!callerSessionId) throw new Error("Parent session is unavailable");
+            await runtime.steer(params.agent_id, params.message, callerSessionId);
             return { content: [{ type: "text", text: `Steering message sent to ${params.agent_id}.` }], details: undefined };
           } catch (error) {
             return { content: [{ type: "text", text: error instanceof Error ? error.message : String(error) }], details: undefined, isError: true };

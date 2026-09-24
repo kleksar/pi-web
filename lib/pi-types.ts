@@ -51,6 +51,7 @@ export interface SessionStatsInfo {
     total: number;
   };
   cost: number;
+  costKnown?: boolean;
   contextUsage?: ContextUsage;
   /** Estimated active time across all entries in the session file. */
   totalActiveMs?: number;
@@ -71,6 +72,7 @@ interface SkillLike {
 interface ResourceLoaderLike {
   getSkills(): { skills: SkillLike[] };
   getAgentsFiles(): { agentsFiles: Array<{ path: string; content: string }> };
+  getExtensions?(): { extensions: Array<{ path: string; tools: ReadonlyMap<string, unknown> }> };
 }
 
 interface ExtensionRunnerLike {
@@ -158,6 +160,7 @@ export interface AgentSessionLike {
     streamingBehavior?: "steer" | "followUp";
     source?: "interactive" | "rpc";
     preflightResult?: (success: boolean) => void;
+    expandPromptTemplates?: boolean;
   }): Promise<void>;
   sendCustomMessage<T = unknown>(message: {
     customType: string;

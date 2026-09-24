@@ -17,6 +17,8 @@ export interface SummaryTreeNode {
     parentId: string | null;
     type: string;
     timestamp: string;
+    /** Allows the branch navigator to hide only terminal internal cost markers. */
+    customType?: string;
   };
   children: SummaryTreeNode[];
   compressedEntryIds?: string[];
@@ -25,7 +27,7 @@ export interface SummaryTreeNode {
 
 /** Loose input shape: accepts the SDK tree as well as the projected tree. */
 interface SummaryInputNode {
-  entry: { id: string; type: string; parentId?: string | null; timestamp?: string };
+  entry: { id: string; type: string; parentId?: string | null; timestamp?: string; customType?: string };
   children: SummaryInputNode[];
   compressedEntryIds?: string[];
   branchPreview?: BranchPreview;
@@ -57,6 +59,8 @@ export function toSummaryTree(nodes: readonly SummaryInputNode[]): SummaryTreeNo
         parentId: input.entry.parentId ?? null,
         type: input.entry.type,
         timestamp: input.entry.timestamp ?? "",
+        ...(input.entry.type === "custom" && input.entry.customType === "pi-web:fork-cost-baseline"
+          ? { customType: input.entry.customType } : {}),
       },
       children: [],
       ...(input.compressedEntryIds?.length ? { compressedEntryIds: input.compressedEntryIds } : {}),

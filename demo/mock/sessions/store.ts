@@ -1,7 +1,7 @@
 /**
  * In-memory session store: the demo's equivalent of ~/.pi/agent/sessions.
  * Sessions are expanded from the tutorial scripts on first use (in the UI
- * language) and then mutated by prompts, forks, renames and deletes.
+ * then mutated by prompts, forks, renames and deletes.
  */
 import type { AgentMessage, SessionContext, SessionEntry, SessionInfo } from "@/lib/types";
 import { normalizeToolCalls } from "@/lib/normalize";
@@ -10,7 +10,6 @@ import { computeSessionStats } from "@/lib/session-stats";
 import { computeSessionTotalActiveMs } from "@/lib/session-timing";
 import { projectTreeForResponse, toSummaryTree } from "@/lib/project-tree";
 import { readSessionToolSelectionFromEntries } from "./tool-selection";
-import { currentDemoLocale, type DemoLocale } from "../locale";
 import { PROJECT_BRANCH, PROJECT_ROOT, SCRATCH_ROOT, WORKTREE_BRANCH, WORKTREE_ROOT, sessionFilePath } from "../paths";
 import { buildSession } from "./builder";
 import { SESSION_SCRIPTS } from "./scripts";
@@ -41,12 +40,10 @@ const PAGE_LOADED_AT = Date.now();
 
 const state: {
   sessions: Map<string, MockSession>;
-  locale: DemoLocale | null;
+  loaded: boolean;
   building: Promise<void> | null;
-  /** True once the visitor changed anything; stops locale rebuilds. */
-  touched: boolean;
   version: number;
-} = { sessions: new Map(), locale: null, building: null, touched: false, version: 1 };
+} = { sessions: new Map(), loaded: false, building: null, version: 1 };
 
 export function projectRootFor(cwd: string): string {
   if (cwd === SCRATCH_ROOT || cwd.startsWith(`${SCRATCH_ROOT}/`)) return SCRATCH_ROOT;
@@ -61,20 +58,16 @@ export function bumpSessionListVersion(): void {
   state.version += 1;
 }
 
-export function markTouched(): void {
-  state.touched = true;
-}
-
-async function build(locale: DemoLocale): Promise<void> {
+async function build(): Promise<void> {
   const sessions = new Map<string, MockSession>();
   for (const script of SESSION_SCRIPTS) {
-    const built = await buildSession(script, locale, PAGE_LOADED_AT, projectRootFor);
+    const built = await buildSession(script, PAGE_LOADED_AT, projectRootFor);
     const created = new Date(PAGE_LOADED_AT - script.startedMinutesAgo * 60_000).toISOString();
     sessions.set(script.id, {
       id: script.id,
       cwd: script.cwd,
       created,
-      name: script.name ? (typeof script.name === "string" ? script.name : script.name[locale]) : undefined,
+      name: script.name,
       relation: script.relation,
       parentSessionId: script.parentSessionId,
       entries: built.entries,
@@ -84,18 +77,15 @@ async function build(locale: DemoLocale): Promise<void> {
     });
   }
   state.sessions = sessions;
-  state.locale = locale;
+  state.loaded = true;
 }
 
-/** Build (or rebuild after a language switch) the tutorial sessions. */
+/** Build the tutorial sessions once on first use. */
 export async function ensureSessions(): Promise<void> {
-  const locale = currentDemoLocale();
   if (state.building) await state.building;
-  if (state.locale === locale || (state.locale && state.touched)) return;
-  const rebuilding = state.locale !== null;
-  state.building = build(locale).finally(() => { state.building = null; });
+  if (state.loaded) return;
+  state.building = build().finally(() => { state.building = null; });
   await state.building;
-  if (rebuilding) state.version += 1;
 }
 
 export function allSessions(): MockSession[] {
@@ -108,7 +98,6 @@ export function getSession(id: string): MockSession | undefined {
 
 export function addSession(session: MockSession): void {
   state.sessions.set(session.id, session);
-  state.touched = true;
   state.version += 1;
 }
 
@@ -120,7 +109,6 @@ export function deleteSession(id: string): void {
       state.sessions.delete(session.id);
     }
   }
-  state.touched = true;
   state.version += 1;
 }
 
@@ -140,7 +128,6 @@ export function appendEntry(session: MockSession, entry: Record<string, unknown>
   session.entries.push(full);
   session.leafId = full.id;
   session.transient = false;
-  state.touched = true;
   state.version += 1;
   return full;
 }

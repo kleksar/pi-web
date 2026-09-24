@@ -195,7 +195,7 @@ function resolveScannedSessionRelation(
   if (!scanned.parentSessionPath) return { originSessionId, subagent: null };
 
   try {
-    const subagent = readSubagentRun(readSessionRelationEntries(scanned.path), scanned.id, scanned.path);
+    const subagent = readSubagentRun(readSessionRelationEntries(scanned.path), scanned.id, scanned.path, scanned.parentSessionPath);
     return { originSessionId, subagent };
   } catch {
     // Malformed or concurrently removed session.

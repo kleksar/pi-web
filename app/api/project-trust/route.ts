@@ -4,7 +4,8 @@ import { NextResponse } from "next/server";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { getAllowedFileRoots, isExistingFilePathAllowed } from "@/lib/file-access";
 import { invalidateModelsCache } from "@/lib/models-cache";
-import { getProjectTrustStatus, trustProject } from "@/lib/project-trust";
+import { getProjectTrustStatus, trustProject, trustProjectForMainConfig } from "@/lib/project-trust";
+import { hasJsonContentType, isApiRequestAllowed } from "@/lib/request-security";
 import { destroyRpcSessionsForCwd, hasBusyRpcSessionForCwd } from "@/lib/rpc-manager";
 
 export const dynamic = "force-dynamic";
@@ -39,21 +40,27 @@ export async function GET(req: Request) {
 }
 
 export async function POST(req: Request) {
+  if (!isApiRequestAllowed(req)) return NextResponse.json({ error: "Untrusted API request" }, { status: 403 });
+  if (!hasJsonContentType(req)) return NextResponse.json({ error: "Content-Type must be application/json" }, { status: 415 });
   try {
-    const body = await req.json() as { cwd?: unknown };
+    const body = await req.json() as { cwd?: unknown; purpose?: unknown };
     const result = await validateCwd(body.cwd);
     if ("response" in result) return result.response;
 
     const agentDir = getAgentDir();
     const current = getProjectTrustStatus(result.cwd, agentDir);
-    if (!current.requiresTrust) {
+    if (!current.requiresTrust && body.purpose !== "main-config") {
       return NextResponse.json({ error: "This project has no resources that require trust" }, { status: 409 });
+    }
+    if (body.purpose !== undefined && body.purpose !== "main-config") {
+      return NextResponse.json({ error: "Unknown trust purpose" }, { status: 400 });
     }
     if (hasBusyRpcSessionForCwd(result.cwd)) {
       return NextResponse.json({ error: "Wait for the active session to finish before trusting this project" }, { status: 409 });
     }
 
-    const status = trustProject(result.cwd, agentDir);
+    const status = body.purpose === "main-config"
+      ? trustProjectForMainConfig(result.cwd, agentDir) : trustProject(result.cwd, agentDir);
     invalidateModelsCache();
     await destroyRpcSessionsForCwd(result.cwd);
     return NextResponse.json(status);
