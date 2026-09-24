@@ -8,6 +8,7 @@ import { ConfigButton } from "./SettingsUi";
 
 interface Props {
   cwd: string;
+  projectSelected?: boolean;
   sessionId?: string | null;
   onReloaded?: () => void;
 }
@@ -15,7 +16,7 @@ interface Props {
 type Drafts = Record<MainPromptScope, string>;
 type ErrorResponse = { error?: string; code?: string };
 
-export function MainPromptEditor({ cwd, sessionId, onReloaded }: Props) {
+export function MainPromptEditor({ cwd, projectSelected = true, sessionId, onReloaded }: Props) {
   const { t } = useI18n();
   const [state, setState] = useState<MainPromptState | null>(null);
   const [drafts, setDrafts] = useState<Drafts>({ roster: "", global: "", project: "" });
@@ -29,6 +30,10 @@ export function MainPromptEditor({ cwd, sessionId, onReloaded }: Props) {
   const [error, setError] = useState<string | null>(null);
   const cwdRef = useRef(cwd);
   cwdRef.current = cwd;
+
+  useEffect(() => {
+    if (!projectSelected && scope === "project") setScope(state?.roster ? "roster" : "global");
+  }, [projectSelected, scope, state?.roster]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -47,20 +52,20 @@ export function MainPromptEditor({ cwd, sessionId, onReloaded }: Props) {
         setState(data);
         setDrafts({ roster: data.roster?.content ?? "", global: data.global.content, project: data.project.content });
         setRevisions({ roster: data.roster?.revision ?? "absent", global: data.global.revision, project: data.project.revision });
-        setScope(data.effectiveScope ?? "global");
+        setScope(projectSelected ? data.effectiveScope ?? "global" : data.roster ? "roster" : "global");
       })
       .catch((cause) => {
         if (!controller.signal.aborted) setError(cause instanceof Error ? cause.message : String(cause));
       })
       .finally(() => { if (!controller.signal.aborted) setLoading(false); });
     return () => controller.abort();
-  }, [cwd]);
+  }, [cwd, projectSelected]);
 
   const selected = state?.[scope];
   const dirty = Boolean(selected && (drafts[scope] !== selected.content || !selected.exists));
 
   const save = async () => {
-    if (!state || !selected || saving || conflictedScope === scope) return;
+    if (!state || !selected || saving || conflictedScope === scope || (!projectSelected && scope === "project")) return;
     setSaving(true);
     setError(null);
     try {
@@ -119,7 +124,7 @@ export function MainPromptEditor({ cwd, sessionId, onReloaded }: Props) {
       {state && (
         <>
           <div className="main-prompt-scopes" role="tablist" aria-label={t("mainPrompt.scope")}>
-            {(["roster", "global", "project"] as const).filter((item) => item !== "roster" || state.roster).map((item) => (
+            {(["roster", "global", "project"] as const).filter((item) => (item !== "roster" || state.roster) && (item !== "project" || projectSelected)).map((item) => (
               <button
                 key={item}
                 type="button"

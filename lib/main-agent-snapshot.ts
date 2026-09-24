@@ -55,9 +55,10 @@ export function readMainSessionResources(entries: readonly SessionEntry[]): Main
       const pin = rawPins[child];
       if (!pin || typeof pin !== "object" || Array.isArray(pin)) throw new Error("Invalid Main child profile snapshot");
       const fields = pin as Record<string, unknown>;
-      if (!["builtin", "global", "workspace", "project"].includes(fields.scope as string)
+      if (!["builtin", "roster", "global", "workspace", "project"].includes(fields.scope as string)
         || typeof fields.sha256 !== "string" || !/^[0-9a-f]{64}$/.test(fields.sha256)
-        || (fields.scope !== "builtin" && (typeof fields.filePath !== "string" || !fields.filePath))) {
+        || (fields.scope === "builtin" ? fields.filePath !== undefined
+          : typeof fields.filePath !== "string" || !fields.filePath.trim())) {
         throw new Error("Invalid Main child profile snapshot");
       }
       childProfiles[child] = fields as unknown as SubagentChildProfileFingerprint;

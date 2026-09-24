@@ -1,7 +1,8 @@
-import { existsSync, lstatSync, mkdirSync, readFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { writePrivateFileAtomicSync } from "./atomic-file";
+import { readBoundedRegularFile } from "./bounded-file";
 import { getRepositoryRosterRoot } from "./repository-roster";
 
 export interface SubagentSettings {
@@ -27,6 +28,7 @@ type StoredSubagentSettings = Record<string, unknown> & {
 
 export const DEFAULT_SUBAGENT_MAX_CONCURRENT = 10;
 export const MAX_SUBAGENT_MAX_CONCURRENT = 32;
+const MAX_SUBAGENT_SETTINGS_BYTES = 64 * 1024;
 
 function readMaxConcurrent(value: unknown): number {
   return typeof value === "number" && Number.isInteger(value) && value >= 1 && value <= MAX_SUBAGENT_MAX_CONCURRENT
@@ -79,7 +81,8 @@ export function getRepositorySubagentSettingsPath(): string | undefined {
 function readStoredSettings(settingsPath: string): StoredSubagentSettings {
   if (settingsPath === getRepositorySubagentSettingsPath()) assertRepositorySettingsFile(settingsPath);
   if (!existsSync(settingsPath)) return {};
-  const parsed: unknown = JSON.parse(readFileSync(settingsPath, "utf8"));
+  const parsed: unknown = JSON.parse(readBoundedRegularFile(settingsPath, MAX_SUBAGENT_SETTINGS_BYTES,
+    "Subagent settings").toString("utf8"));
   if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
     throw new Error("Invalid subagent settings: expected an object");
   }

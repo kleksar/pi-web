@@ -1,9 +1,10 @@
 import { createHash } from "node:crypto";
-import { lstatSync, mkdirSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { lstatSync, mkdirSync, realpathSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import lockfile from "proper-lockfile";
 import { writePrivateFileAtomicSync } from "./atomic-file";
+import { BoundedFileError, readBoundedRegularFile } from "./bounded-file";
 import { isPathWithinRoots } from "./path-security";
 import { getProjectTrustStatus } from "./project-trust";
 import { getRepositoryRosterRoot } from "./repository-roster";
@@ -34,6 +35,15 @@ const MAX_CONTENT_LENGTH = 512 * 1024;
 export class MainPromptAccessError extends Error {}
 export class MainPromptConflictError extends Error {}
 export class MainPromptValidationError extends Error {}
+
+function readPromptBytes(path: string): Buffer {
+  try {
+    return readBoundedRegularFile(path, MAX_CONTENT_LENGTH, FILENAME);
+  } catch (error) {
+    if (error instanceof BoundedFileError) throw new MainPromptValidationError(error.message);
+    throw error;
+  }
+}
 
 function promptPath(cwd: string, scope: LegacyPromptScope, agentDir: string): string {
   return scope === "global"
@@ -83,8 +93,7 @@ function readPromptFile(cwd: string, scope: LegacyPromptScope, agentDir: string)
     throw error;
   }
 
-  const bytes = readFileSync(canonicalFile);
-  if (bytes.length > MAX_CONTENT_LENGTH) throw new MainPromptValidationError("APPEND_SYSTEM.md is too large to edit in the UI");
+  const bytes = readPromptBytes(canonicalFile);
   return {
     path,
     exists: true,
@@ -110,9 +119,7 @@ function readRosterPrompt(): MainPromptFile | undefined {
   if (stat.isSymbolicLink() || !stat.isFile()) {
     throw new MainPromptAccessError("Repository APPEND_SYSTEM.md must be a regular file, not a symlink");
   }
-  if (stat.size > MAX_CONTENT_LENGTH) throw new MainPromptValidationError("Repository APPEND_SYSTEM.md is too large");
-  const bytes = readFileSync(path);
-  if (bytes.length > MAX_CONTENT_LENGTH) throw new MainPromptValidationError("Repository APPEND_SYSTEM.md is too large");
+  const bytes = readPromptBytes(path);
   return {
     path,
     exists: true,
@@ -139,8 +146,17 @@ export function readMainPrompt(cwd: string, agentDir = getAgentDir()): MainPromp
 
 /** Called at each resource-loader reload; an empty project or local file still shadows the roster. */
 export function repositoryMainPromptFallback(cwd: string, agentDir = getAgentDir()): string[] {
-  const prompt = readMainPrompt(cwd, agentDir);
-  return prompt.effectiveScope === "roster" && prompt.roster ? [prompt.roster.content] : [];
+  // The SDK ignores an untrusted project's prompt. Its .pi directory may
+  // contain malformed files or links, so do not inspect it while resolving a
+  // trusted repository fallback for a new session.
+  const projectTrust = getProjectTrustStatus(cwd, agentDir);
+  // With no SDK-discoverable project resources, `trusted` defaults to true.
+  // A dangling prompt symlink is invisible to SDK discovery but visible to
+  // lstatSync in readPromptFile; it must not block the repository fallback.
+  if (projectTrust.requiresTrust && projectTrust.trusted && readPromptFile(cwd, "project", agentDir).exists) return [];
+  if (readPromptFile(cwd, "global", agentDir).exists) return [];
+  const roster = readRosterPrompt();
+  return roster?.exists ? [roster.content] : [];
 }
 
 /** Compare and replace under one lock; a stale editor cannot overwrite a newer edit. */

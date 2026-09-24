@@ -172,6 +172,7 @@ function Toggle({ checked, disabled, label, hint, onChange }: { checked: boolean
 
 export function AgentsConfig({
   cwd,
+  projectSelected = true,
   sessionId = null,
   onClose,
   onReloaded,
@@ -179,6 +180,7 @@ export function AgentsConfig({
   openMainMapRequest = 0,
 }: {
   cwd: string;
+  projectSelected?: boolean;
   sessionId?: string | null;
   onClose: () => void;
   onReloaded?: () => void;
@@ -198,6 +200,7 @@ export function AgentsConfig({
   const [targetScope, setTargetScope] = useState<SubagentWritableScope>("roster");
   const [rosterAvailable, setRosterAvailable] = useState(false);
   const [rosterRoot, setRosterRoot] = useState("");
+  const profileLoadSerial = useRef(0);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [savedOk, setSavedOk] = useState(false);
@@ -205,6 +208,7 @@ export function AgentsConfig({
   const [error, setError] = useState<string | null>(null);
   const [builtInEnabled, setBuiltInEnabled] = useState(false);
   const [maxConcurrent, setMaxConcurrent] = useState(10);
+  const [maxConcurrentInput, setMaxConcurrentInput] = useState("10");
   const [settingsEditScope, setSettingsEditScope] = useState<"roster" | "local">("local");
   const [settingsSources, setSettingsSources] = useState<SubagentSettingsResponse["sources"]>();
   const [repositorySettingsAvailable, setRepositorySettingsAvailable] = useState(false);
@@ -214,6 +218,7 @@ export function AgentsConfig({
   const [reloadNeeded, setReloadNeeded] = useState(false);
   const [reloading, setReloading] = useState(false);
   const [childrenQuery, setChildrenQuery] = useState("");
+  const [profileQuery, setProfileQuery] = useState("");
   const [view, setView] = useState<"profiles" | "map">("profiles");
   const [mapOwner, setMapOwner] = useState<string | null>(null);
   const [mapFocusNode, setMapFocusNode] = useState<string | null>(null);
@@ -254,10 +259,14 @@ export function AgentsConfig({
     name: model.name,
   })), [modelOptions]);
   const mapProfiles = useMemo(() => effectiveMapProfiles(profiles), [profiles]);
+  const visibleProfiles = useMemo(() => {
+    const query = profileQuery.trim().toLowerCase();
+    return query ? profiles.filter((profile) => `${profile.displayName} ${profile.name}`.toLowerCase().includes(query)) : profiles;
+  }, [profiles, profileQuery]);
   const profileDraftChanged = mode === "create" || Boolean(selected && mode === "edit"
     && JSON.stringify(draft) !== JSON.stringify(editableProfile(selected)));
   const mainDraftChanged = JSON.stringify(mainDraft) !== JSON.stringify(mainConfig);
-  const mainMapScope = rosterAvailable ? "roster" : "project";
+  const mainMapScope = rosterAvailable ? "roster" : projectSelected ? "project" : "global";
   const wantedMainSource = `${cwd}:${mainMapScope}`;
 
   const loadMainForMap = useCallback(async () => {
@@ -305,13 +314,16 @@ export function AgentsConfig({
   }, [mainDraftChanged, mainMapScope, t]);
 
   const loadProfiles = useCallback(async (preferredKey?: string) => {
+    const loadSerial = ++profileLoadSerial.current;
     setLoading(true);
     setError(null);
     try {
       const response = await fetch(`/api/subagents/profiles?cwd=${encodeURIComponent(cwd)}`, { cache: "no-store" });
       const data = await response.json() as Partial<SubagentProfilesResponse> & { error?: string; rosterAvailable?: boolean; rosterRoot?: string };
+      if (loadSerial !== profileLoadSerial.current) return;
       if (!response.ok || data.error) throw new Error(data.error ?? `HTTP ${response.status}`);
-      const next = data.profiles ?? [];
+      const next = (data.profiles ?? []).filter((profile) => projectSelected
+        || (profile.scope !== "project" && profile.scope !== "workspace"));
       setRosterAvailable(Boolean(data.rosterAvailable));
       setRosterRoot(data.rosterRoot ?? "");
       setProfiles(next);
@@ -327,17 +339,26 @@ export function AgentsConfig({
         setDraft(editableProfile(chosen));
         setMode(isWritableScope(chosen.scope) ? "edit" : "view");
         if (isWritableScope(chosen.scope)) setTargetScope(chosen.scope);
+      } else {
+        setDraft(EMPTY_PROFILE);
+        setMode("view");
       }
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
+      if (loadSerial === profileLoadSerial.current) setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
-      setLoading(false);
+      if (loadSerial === profileLoadSerial.current) setLoading(false);
     }
-  }, [cwd]);
+  }, [cwd, projectSelected]);
 
   useEffect(() => {
+    const loadSerialRef = profileLoadSerial;
     void loadProfiles();
+    return () => { loadSerialRef.current++; };
   }, [loadProfiles]);
+
+  useEffect(() => {
+    if (!projectSelected && targetScope === "project") setTargetScope(rosterAvailable ? "roster" : "global");
+  }, [projectSelected, rosterAvailable, targetScope]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -354,7 +375,10 @@ export function AgentsConfig({
           throw new Error(data.error ?? `HTTP ${response.status}`);
         }
         setBuiltInEnabled(data.enabled);
-        if (typeof data.maxConcurrent === "number") setMaxConcurrent(data.maxConcurrent);
+        if (typeof data.maxConcurrent === "number") {
+          setMaxConcurrent(data.maxConcurrent);
+          setMaxConcurrentInput(String(data.maxConcurrent));
+        }
         setSettingsSources(data.sources);
         setSettingsEditScope(data.defaultEditScope === "roster" ? "roster" : "local");
         setRepositorySettingsAvailable(data.defaultEditScope === "roster");
@@ -415,7 +439,7 @@ export function AgentsConfig({
     setDraft({ ...EMPTY_PROFILE, name, displayName: name });
     setMode("create");
     setCustomizingBuiltIn(false);
-    setTargetScope(rosterAvailable ? "roster" : "project");
+    setTargetScope(rosterAvailable ? "roster" : projectSelected ? "project" : "global");
     setError(null);
     setChildrenQuery("");
   };
@@ -432,7 +456,8 @@ export function AgentsConfig({
     });
     setMode("create");
     setCustomizingBuiltIn(false);
-    setTargetScope(isWritableScope(selected.scope) ? selected.scope : rosterAvailable ? "roster" : "project");
+    setTargetScope(isWritableScope(selected.scope) && (selected.scope !== "project" || projectSelected)
+      ? selected.scope : rosterAvailable ? "roster" : projectSelected ? "project" : "global");
     setError(null);
     setChildrenQuery("");
   };
@@ -451,6 +476,10 @@ export function AgentsConfig({
   };
 
   const save = async () => {
+    if (!projectSelected && (targetScope === "project" || selected?.scope === "project")) {
+      setError(t("settings.projectRequired"));
+      return;
+    }
     if (unavailableChildren.length > 0) {
       setError(t("agents.unavailableChildren", { names: unavailableChildren.join(", ") }));
       return;
@@ -487,6 +516,7 @@ export function AgentsConfig({
   };
 
   const remove = async () => {
+    if (!projectSelected && selected?.scope === "project") return;
     if (!selected || !isWritableScope(selected.scope)) return;
     if (!window.confirm(t("agents.deleteConfirm", { name: selected.displayName }))) return;
     setSaving(true);
@@ -531,7 +561,8 @@ export function AgentsConfig({
   const controlStyle = disabled ? { ...inputStyle, ...disabledInputStyle } : inputStyle;
   const switchDisabled = creating
     ? disabled
-    : !selected || Boolean(selected.configurationError) || !isTogglableScope(selected.scope) || saving || toggling;
+    : !selected || Boolean(selected.configurationError) || !isTogglableScope(selected.scope)
+      || (!projectSelected && selected.scope === "project") || saving || toggling;
   const update = <K extends keyof EditableProfile>(key: K, value: EditableProfile[K]) => {
     setDraft((current) => ({ ...current, [key]: value }));
   };
@@ -596,6 +627,7 @@ export function AgentsConfig({
   };
 
   const toggleEnabled = async (enabled: boolean) => {
+    if (!projectSelected && selected?.scope === "project") return;
     if (creating) {
       update("enabled", enabled);
       return;
@@ -645,8 +677,18 @@ export function AgentsConfig({
     }
   };
 
-  const updateMaxConcurrent = async (value: number) => {
-    setMaxConcurrent(value);
+  const updateMaxConcurrent = async (raw: string) => {
+    const value = Number(raw);
+    if (!raw.trim() || !Number.isInteger(value) || value < 1 || value > 32) {
+      setMaxConcurrentInput(String(maxConcurrent));
+      setSettingsError(t("agents.concurrentRange"));
+      return;
+    }
+    if (value === maxConcurrent) {
+      setMaxConcurrentInput(String(maxConcurrent));
+      return;
+    }
+    setSettingsSaving(true);
     setSettingsError(null);
     try {
       const response = await fetch("/api/subagents/settings", {
@@ -657,9 +699,14 @@ export function AgentsConfig({
       const data = await response.json() as Partial<SubagentSettingsResponse> & { error?: string };
       if (!response.ok || data.error || typeof data.maxConcurrent !== "number") throw new Error(data.error ?? `HTTP ${response.status}`);
       setMaxConcurrent(data.maxConcurrent);
+      setMaxConcurrentInput(String(data.maxConcurrent));
       setSettingsSources(data.sources);
+      setReloadNeeded(Boolean(sessionId));
     } catch (cause) {
+      setMaxConcurrentInput(String(maxConcurrent));
       setSettingsError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setSettingsSaving(false);
     }
   };
 
@@ -730,7 +777,8 @@ export function AgentsConfig({
   };
 
   const saveMapMain = async () => {
-    if (!mainRevision || !mainDraftChanged || mainMapSaving || (mainMapScope === "project" && !mainProjectTrusted)) return;
+    if (!mainRevision || !mainDraftChanged || mainMapSaving || loadedMainSource !== wantedMainSource
+      || (mainMapScope === "project" && (!projectSelected || !mainProjectTrusted))) return;
     setMainMapSaving(true);
     setMainMapError(null);
     try {
@@ -739,7 +787,7 @@ export function AgentsConfig({
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ cwd, scope: mainMapScope, config: mainDraft,
           expectedRevision: mainRevision,
-          ...(mainMapScope === "project" ? { previous: mainConfig, overrides: mainOverrides } : {}) }),
+          ...(mainMapScope !== "roster" ? { previous: mainConfig, overrides: mainOverrides } : {}) }),
       });
       const data = await response.json() as { config?: MainAgentConfig; overrides?: MainAgentConfig; trusted?: boolean; revision?: string; error?: string };
       if (!response.ok || data.error || !data.config || !data.revision) throw new Error(data.error ?? `HTTP ${response.status}`);
@@ -773,6 +821,7 @@ export function AgentsConfig({
     ? mainRevision !== null && loadedMainSource === wantedMainSource && !mainMapSaving
       && (mainMapScope === "roster" || mainProjectTrusted)
     : Boolean(mapOwner && selected && mapOwner.toLowerCase() === selected.name.toLowerCase()
+      && (projectSelected || selected.scope !== "project")
       && isWritableScope(selected.scope) && !selected.configurationError && !saving);
 
   useEffect(() => {
@@ -808,6 +857,7 @@ export function AgentsConfig({
             <select
               aria-label={t("agents.settingsSaveTo")}
               value={settingsEditScope}
+              disabled={settingsSaving}
               onChange={(event) => setSettingsEditScope(event.target.value as "roster" | "local")}
             >
               <option value="roster">{t("agents.settingsRepo")}</option>
@@ -826,10 +876,11 @@ export function AgentsConfig({
               type="number"
               min={1}
               max={32}
-              value={maxConcurrent}
+              value={maxConcurrentInput}
               disabled={settingsLoading || settingsSaving}
-              onChange={(event) => setMaxConcurrent(Number(event.target.value))}
-              onBlur={() => void updateMaxConcurrent(maxConcurrent)}
+              onChange={(event) => setMaxConcurrentInput(event.target.value)}
+              onBlur={(event) => void updateMaxConcurrent(event.currentTarget.value)}
+              onKeyDown={(event) => { if (event.key === "Enter") event.currentTarget.blur(); }}
             />
           </label>
           <ConfigSwitch
@@ -861,7 +912,9 @@ export function AgentsConfig({
           setMapOwner(MAIN_NODE_ID);
           setView("map");
         }}>{t("agents.openMap")}</ConfigButton>
-        {view === "map" && <span style={{ marginLeft: "auto", alignSelf: "center", color: "var(--text-dim)", fontSize: 11 }}>{t("main.projectScope")}</span>}
+        {view === "map" && <span style={{ marginLeft: "auto", alignSelf: "center", color: "var(--text-dim)", fontSize: 11 }}>
+          {t(mainMapScope === "roster" ? "main.rosterScope" : mainMapScope === "project" ? "main.projectScope" : "main.globalScope")}
+        </span>}
       </div>
       {view === "map" ? (
         <OrchestrationMap
@@ -885,11 +938,20 @@ export function AgentsConfig({
       ) : (
       <ConfigSplitView>
         <ConfigSidebar>
+          <input className="config-sidebar-search" type="search" aria-label={t("agents.searchProfiles")}
+            placeholder={t("agents.searchProfiles")} value={profileQuery}
+            onChange={(event) => setProfileQuery(event.target.value)} />
           <ConfigSidebarList>
               {loading ? (
                 <div style={{ padding: 10, color: "var(--text-dim)", fontSize: 12 }}>{t("agents.loading")}</div>
+              ) : error ? (
+                <div className="config-sidebar-message is-error">{error}
+                  <ConfigButton size="small" onClick={() => { if (!profileDraftChanged || window.confirm(t("agents.discardChanges"))) void loadProfiles(selectedKey ?? undefined); }}>{t("main.retryProfiles")}</ConfigButton>
+                </div>
+              ) : visibleProfiles.length === 0 && profileQuery.trim() ? (
+                <div className="config-sidebar-message is-empty">{t("agents.noMatchingChildren")}</div>
               ) : (["project", ...(rosterAvailable ? ["roster" as const] : []), "global", "workspace", "builtin"] as const).map((scope) => {
-                const scopedProfiles = profiles.filter((profile) => profile.scope === scope);
+                const scopedProfiles = visibleProfiles.filter((profile) => profile.scope === scope);
                 if (scopedProfiles.length === 0) return null;
                 return (
                   <div key={scope} className="config-sidebar-group">
@@ -942,7 +1004,7 @@ export function AgentsConfig({
                       {selected?.scope === "builtin" && !creating && <ConfigButton size="small" onClick={beginCustomizeBuiltIn} disabled={saving || toggling}
                         title={t("agents.customizeBuiltInHelp")}>{t("agents.customizeBuiltIn")}</ConfigButton>}
                       {selected && (mode === "view" || mode === "edit") && <ConfigButton size="small" onClick={beginDuplicate} disabled={saving || toggling}>{t("agents.duplicate")}</ConfigButton>}
-                      {selected && isWritableScope(selected.scope) && mode === "edit" && <ConfigButton variant="danger" size="small" onClick={() => void remove()} disabled={saving || toggling}>{t("agents.delete")}</ConfigButton>}
+                      {selected && isWritableScope(selected.scope) && mode === "edit" && <ConfigButton variant="danger" size="small" onClick={() => void remove()} disabled={saving || toggling || (!projectSelected && selected.scope === "project")}>{t("agents.delete")}</ConfigButton>}
                       <ConfigSwitch checked={draft.enabled} disabled={switchDisabled} label={draft.enabled ? t("agents.disable") : t("agents.enable")} onChange={(checked) => void toggleEnabled(checked)} />
                     </ConfigDetailActions>
                   </ConfigDetailHeader>
@@ -959,7 +1021,7 @@ export function AgentsConfig({
                     <Field label={t("agents.saveScope")}>
                       {customizingBuiltIn && <span style={{ color: "var(--text-muted)", fontSize: 11 }}>{t("agents.customizeBuiltInHelp")}</span>}
                       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 3, padding: 3, border: "1px solid var(--border)", borderRadius: 5, background: "var(--bg-panel)" }}>
-                        {([...(rosterAvailable ? ["roster" as const] : []), "project", "global"] as const).map((scope) => (
+                        {([...(rosterAvailable ? ["roster" as const] : []), ...(projectSelected ? ["project" as const] : []), "global"] as const).map((scope) => (
                           <button
                             key={scope}
                             type="button"
@@ -1132,6 +1194,7 @@ export function AgentsConfig({
                       cwd={cwd}
                       allowedSkillRoot={displayedScope === "roster" ? `${rosterRoot}/skills` : undefined}
                       selectedSkills={draft.selectedSkills}
+                      excludeProjectResources={!projectSelected}
                       selectedExtensionTools={draft.selectedExtensionTools}
                       onChangeSkills={(skills) => setDraft((current) => ({ ...current, selectedSkills: skills, loadSkills: false }))}
                       onChangeExtensionTools={(tools) => setDraft((current) => ({ ...current, selectedExtensionTools: tools, loadExtensions: false }))}
@@ -1202,7 +1265,7 @@ export function AgentsConfig({
         )}
         {view === "map" && mapOwner === MAIN_NODE_ID && !mainMapError && (
           <span style={{ color: "var(--text-muted)", fontSize: 11 }}>
-            {t(mainMapScope === "roster" ? "agents.mapRepositorySource" : "agents.mapProjectSource")}
+            {t(mainMapScope === "roster" ? "agents.mapRepositorySource" : mainMapScope === "project" ? "agents.mapProjectSource" : "agents.mapGlobalSource")}
             {" · "}{t("main.newSessionsOnly")}
           </span>
         )}
@@ -1215,7 +1278,7 @@ export function AgentsConfig({
           <ConfigButton
             variant="primary"
             onClick={() => void save()}
-            disabled={saving || savedOk || toggling || !draft.name.trim() || unavailableChildren.length > 0 || Boolean(dependencyIssue)}
+            disabled={saving || savedOk || toggling || !draft.name.trim() || (!projectSelected && (targetScope === "project" || selected?.scope === "project")) || unavailableChildren.length > 0 || Boolean(dependencyIssue)}
             className={savedOk ? "is-success" : undefined}
           >
             {savedOk && (

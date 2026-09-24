@@ -33,6 +33,41 @@ test("keeps every requested configuration surface inside the settings panel", ()
   }
 });
 
+test("shows Git and global resources when there are no sessions without treating the scratch cwd as a project", async () => {
+  const agents = await readFile(new URL("./AgentsConfig.tsx", import.meta.url), "utf8");
+  const main = await readFile(new URL("./MainAgentConfig.tsx", import.meta.url), "utf8");
+  const prompt = await readFile(new URL("./MainPromptEditor.tsx", import.meta.url), "utf8");
+  const skills = await readFile(new URL("./SkillsConfig.tsx", import.meta.url), "utf8");
+  const selector = await readFile(new URL("./AgentResourceSelector.tsx", import.meta.url), "utf8");
+  assert.match(panelSource, /if \(cwd\) return;[\s\S]*?fetch\("\/api\/default-cwd", \{ method: "POST", signal: controller\.signal \}\)/);
+  assert.match(panelSource, /!response\.ok \|\| data\.error \|\| !data\.cwd/);
+  assert.match(panelSource, /setSettingsCwd\(data\.cwd\)/);
+  assert.match(panelSource, /setSettingsCwdError\(cause instanceof Error/);
+  assert.match(panelSource, /settingsCwdError \? <>[\s\S]*?setSettingsCwdRetry\(\(value\) => value \+ 1\)/);
+  assert.match(panelSource, /const resourceCwd = cwd \?\? settingsCwd/);
+  for (const section of ["skills", "main", "agents"]) {
+    assert.match(panelSource, new RegExp(`\\{ id: "${section}", label: [^,]+, requiresProject: false \\}`));
+    assert.match(panelSource, new RegExp(`<${section === "skills" ? "SkillsConfig" : section === "main" ? "MainAgentConfig" : "AgentsConfig"} embedded key=\\{resourceCwd\\} cwd=\\{resourceCwd\\} projectSelected=\\{Boolean\\(cwd\\)\\}`));
+  }
+  assert.match(panelSource, /\{ id: "plugins", label: t\("common\.plugins"\), requiresProject: true \}/);
+  assert.match(prompt, /item !== "project" \|\| projectSelected/);
+  assert.match(prompt, /if \(!projectSelected && scope === "project"\) setScope\(state\?\.roster \? "roster" : "global"\)/);
+  assert.match(prompt, /\(!projectSelected && scope === "project"\)\) return;/);
+  assert.match(main, /projectSelected && <button type="button" aria-pressed=\{scope === "project"\}/);
+  assert.match(main, /if \(!projectSelected && scope === "project"\) setScope\(rosterAvailable \? "roster" : "global"\)/);
+  assert.match(main, /\|\| \(!projectSelected && scope === "project"\)\) return;/);
+  assert.match(agents, /rosterAvailable \? "roster" : projectSelected \? "project" : "global"/);
+  assert.match(agents, /if \(!projectSelected && \(targetScope === "project" \|\| selected\?\.scope === "project"\)\) \{/);
+  assert.match(agents, /loadedMainSource !== wantedMainSource/);
+  assert.match(skills, /\["global", \.\.\.\(projectSelected \? \["project" as const\] : \[\]\)\]/);
+  assert.match(skills, /if \(!projectSelected && scope === "project"\) setScope\("global"\)/);
+  assert.match(skills, /if \(!projectSelected && scope !== "global"\) return;/);
+  assert.match(skills, /sourceLabel\(skill\) !== "project"/);
+  assert.match(selector, /excludeProjectResources \? catalog\.skills\.filter/);
+  assert.match(selector, /outsideProject\(skill\.sourceInfo, skill\.filePath, skill\.realPath, cwd\)/);
+  assert.match(selector, /outsideProject\(tool\.sourceInfo, tool\.extensionPath, tool\.realPath, cwd\)/);
+});
+
 test("restores the settings section and each list detail selection", async () => {
   assert.match(shellSource, /getLastSettingsSection\(projectTrustCwd\)/);
   assert.match(panelSource, /setLastSettingsSection\(initialSection\)/);

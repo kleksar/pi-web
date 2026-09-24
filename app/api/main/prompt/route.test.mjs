@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, open, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { after } from "node:test";
@@ -119,6 +119,76 @@ test("project prompt cannot read or write through a symlink outside cwd", async 
   response = await save(location, "project", "attack", "absent");
   assert.equal(response.status, 403);
   assert.equal(await readFile(join(external, "APPEND_SYSTEM.md"), "utf8"), "outside");
+});
+
+test("an untrusted project's linked prompt cannot block the repository Main fallback", async (t) => {
+  const location = await cwd(t);
+  const external = await mkdtemp(join(fixture, "untrusted-prompt-"));
+  const isolatedAgentDir = await mkdtemp(join(fixture, "isolated-agent-"));
+  const roster = await mkdtemp(join(fixture, "roster-untrusted-prompt-"));
+  const previousRoster = process.env.PI_WEB_ROSTER_ROOT;
+  t.after(async () => {
+    if (previousRoster === undefined) delete process.env.PI_WEB_ROSTER_ROOT;
+    else process.env.PI_WEB_ROSTER_ROOT = previousRoster;
+    await rm(external, { recursive: true, force: true });
+    await rm(isolatedAgentDir, { recursive: true, force: true });
+    await rm(roster, { recursive: true, force: true });
+  });
+  await writeFile(join(external, "APPEND_SYSTEM.md"), "untrusted content");
+  await symlink(external, join(location, ".pi"), "dir");
+  await mkdir(join(roster, "agents"));
+  await mkdir(join(roster, "skills"));
+  await writeFile(join(roster, "APPEND_SYSTEM.md"), "Reviewed repository coordinator");
+  process.env.PI_WEB_ROSTER_ROOT = roster;
+
+  const { repositoryMainPromptFallback } = await jiti.import("../../../../lib/main-prompt.ts");
+  const fallback = () => repositoryMainPromptFallback(location, isolatedAgentDir);
+  assert.deepEqual(fallback(), ["Reviewed repository coordinator"]);
+  const loader = new DefaultResourceLoader({
+    cwd: location, agentDir: isolatedAgentDir,
+    noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true,
+    appendSystemPromptOverride: (base) => base.length ? base : fallback(),
+  });
+  await loader.reload(projectTrustReloadOptions(location, isolatedAgentDir));
+  assert.deepEqual(loader.getAppendSystemPrompt(), ["Reviewed repository coordinator"]);
+
+  // Explicit editing still reports an invalid project file to the operator.
+  const { response } = await readState(location);
+  assert.equal(response.status, 403);
+});
+
+test("a dangling project prompt symlink does not block the repository Main fallback", async (t) => {
+  const location = await cwd(t);
+  const isolatedAgentDir = await mkdtemp(join(fixture, "isolated-dangling-"));
+  const roster = await mkdtemp(join(fixture, "roster-dangling-"));
+  const previousRoster = process.env.PI_WEB_ROSTER_ROOT;
+  t.after(async () => {
+    if (previousRoster === undefined) delete process.env.PI_WEB_ROSTER_ROOT;
+    else process.env.PI_WEB_ROSTER_ROOT = previousRoster;
+    await rm(isolatedAgentDir, { recursive: true, force: true });
+    await rm(roster, { recursive: true, force: true });
+  });
+  await mkdir(join(location, ".pi"));
+  await symlink(join(location, "missing-prompt.md"), join(location, ".pi", "APPEND_SYSTEM.md"));
+  await mkdir(join(roster, "agents"));
+  await mkdir(join(roster, "skills"));
+  await writeFile(join(roster, "APPEND_SYSTEM.md"), "Git coordinator");
+  process.env.PI_WEB_ROSTER_ROOT = roster;
+
+  const { repositoryMainPromptFallback } = await jiti.import("../../../../lib/main-prompt.ts");
+  assert.deepEqual(repositoryMainPromptFallback(location, isolatedAgentDir), ["Git coordinator"]);
+  const { response } = await readState(location);
+  assert.equal(response.status, 403, "the editor must still reject the invalid project prompt");
+});
+
+test("a large untrusted project prompt is rejected before reading its contents", async (t) => {
+  const location = await cwd(t);
+  await mkdir(join(location, ".pi"));
+  const file = await open(join(location, ".pi", "APPEND_SYSTEM.md"), "w");
+  try { await file.truncate(64 * 1024 * 1024); } finally { await file.close(); }
+  const response = await GET(new Request(`http://localhost/api/main/prompt?cwd=${encodeURIComponent(location)}`));
+  assert.equal(response.status, 400);
+  assert.match((await response.json()).error, /limit/);
 });
 
 test("linked APPEND_SYSTEM.md cannot be silently replaced, and cwd is checked", async (t) => {

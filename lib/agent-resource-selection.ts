@@ -1,7 +1,8 @@
 import { createHash } from "node:crypto";
-import { readFileSync, realpathSync, statSync } from "node:fs";
+import { realpathSync, statSync } from "node:fs";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import { DefaultResourceLoader, getAgentDir, type InlineExtension, type Skill } from "@earendil-works/pi-coding-agent";
+import { readBoundedRegularFile } from "./bounded-file";
 import { projectTrustReloadOptions } from "./project-trust";
 import { getRepositorySkillPaths } from "./repository-roster";
 
@@ -27,6 +28,8 @@ export interface PinnedExtensionTool extends SelectedExtensionTool {
 
 const SHA256_RE = /^[a-f0-9]{64}$/;
 const PORTABLE_SKILL_PREFIXES = new Set(["skills", ".pi/skills", "orchestration/skills"]);
+const MAX_SELECTED_SKILL_BYTES = 512 * 1024;
+const MAX_SELECTED_EXTENSION_BYTES = 8 * 1024 * 1024;
 
 /** Only a named SKILL.md below a known skill directory can be a portable reference. */
 function isPortableSkillReference(reference: string, prefix?: string): boolean {
@@ -133,14 +136,16 @@ export function validateAgentResourceSelection(
   };
 }
 
-function pinFile(path: string, label: string): { realPath: string; sha256: string; content: string } {
+function pinFile(path: string, label: "Selected skill" | "Selected extension" | "Selected resource"): { realPath: string; sha256: string; content: string } {
   if (!isAbsolute(path) || path.startsWith("<inline:")) throw new Error(`Invalid ${label} path`);
   let realPath: string;
   let content: string;
   try {
     realPath = realpathSync(path);
     if (!statSync(realPath).isFile()) throw new Error("Not a regular file");
-    content = readFileSync(realPath, "utf8");
+    // A generic source fingerprint may represent either a skill or an extension.
+    const maxBytes = label === "Selected skill" ? MAX_SELECTED_SKILL_BYTES : MAX_SELECTED_EXTENSION_BYTES;
+    content = readBoundedRegularFile(realPath, maxBytes, label).toString("utf8");
     if (realpathSync(path) !== realPath) throw new Error("Symlink target changed during load");
   } catch (error) {
     throw new Error(`${label} is missing or cannot be pinned: ${path}`, { cause: error });
@@ -226,17 +231,32 @@ export function pinSelectedExtensionTools(
   const reserved = selected.find(({ toolName }) => RESERVED_EXTENSION_TOOL_NAMES.has(toolName));
   if (reserved) throw new Error(`Built-in or Pi Web delegation tool cannot be selected as an extension: ${reserved.toolName}`);
   if (selected.length > 0) assertNoReservedExtensionToolCollisions(extensions);
+  const sources = new Map<string, { paths: Set<string>; count: number }>();
+  for (const extension of extensions) {
+    for (const toolName of extension.tools.keys()) {
+      const source = sources.get(toolName) ?? { paths: new Set<string>(), count: 0 };
+      source.paths.add(extension.path);
+      source.count++;
+      sources.set(toolName, source);
+    }
+  }
   const seen = new Set<string>();
+  const pinnedFiles = new Map<string, ReturnType<typeof pinFile>>();
   return selected.map(({ extensionPath, toolName }) => {
     const key = `${extensionPath}\u0000${toolName}`;
     if (seen.has(key)) throw new Error("Duplicate selected extension tool");
     seen.add(key);
-    const source = extensions.find((extension) => extension.path === extensionPath && extension.tools.has(toolName));
-    if (!source) throw new Error(`Selected extension tool is no longer available: ${toolName} (${extensionPath})`);
-    if (extensions.filter((extension) => extension.tools.has(toolName)).length !== 1) {
+    const source = sources.get(toolName);
+    if (!source?.paths.has(extensionPath)) throw new Error(`Selected extension tool is no longer available: ${toolName} (${extensionPath})`);
+    if (source.count !== 1) {
       throw new Error(`Selected extension tool name is ambiguous: ${toolName}`);
     }
-    const { realPath, sha256 } = pinFile(extensionPath, "Selected extension");
+    let file = pinnedFiles.get(extensionPath);
+    if (!file) {
+      file = pinFile(extensionPath, "Selected extension");
+      pinnedFiles.set(extensionPath, file);
+    }
+    const { realPath, sha256 } = file;
     return { extensionPath, toolName, realPath, sha256 };
   });
 }
@@ -254,8 +274,13 @@ export function validatePinnedExtensionTools(value: unknown): PinnedExtensionToo
 }
 
 export function assertSelectedExtensionToolsUnchanged(pinned: readonly PinnedExtensionTool[]): void {
+  const checked = new Map<string, ReturnType<typeof pinFile>>();
   for (const tool of pinned) {
-    const source = pinFile(tool.extensionPath, "Selected extension");
+    let source = checked.get(tool.extensionPath);
+    if (!source) {
+      source = pinFile(tool.extensionPath, "Selected extension");
+      checked.set(tool.extensionPath, source);
+    }
     if (source.realPath !== tool.realPath || source.sha256 !== tool.sha256) {
       throw new Error(`Selected extension changed since session start: ${tool.extensionPath}`);
     }

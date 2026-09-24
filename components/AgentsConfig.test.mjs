@@ -27,6 +27,21 @@ test("keeps same-name profiles selectable by scope and shows the shared roster w
   assert.match(source, /profile\.scope === scope/);
 });
 
+test("filters large profile catalogs without hiding the selected edit or exposing scratch project profiles", () => {
+  assert.match(source, /const visibleProfiles = useMemo\(\(\) => \{[\s\S]*?profileQuery\.trim\(\)\.toLowerCase\(\)/);
+  assert.match(source, /visibleProfiles\.filter\(\(profile\) => profile\.scope === scope\)/);
+  assert.match(source, /const next = \(data\.profiles \?\? \[\]\)\.filter\(\(profile\) => projectSelected/);
+  assert.match(source, /profile\.scope !== "project" && profile\.scope !== "workspace"/);
+  assert.match(source, /excludeProjectResources=\{!projectSelected\}/);
+});
+
+test("rejects invalid concurrency without writing it, and restores the persisted value if saving fails", () => {
+  assert.match(source, /!raw\.trim\(\) \|\| !Number\.isInteger\(value\) \|\| value < 1 \|\| value > 32/);
+  assert.match(source, /setMaxConcurrentInput\(String\(maxConcurrent\)\);\s*setSettingsError\(t\("agents\.concurrentRange"\)\)/);
+  assert.match(source, /catch \(cause\) \{\s*setMaxConcurrentInput\(String\(maxConcurrent\)\);\s*setSettingsError/);
+  assert.match(source, /setSettingsSaving\(true\);[\s\S]*?fetch\("\/api\/subagents\/settings"/);
+});
+
 test("uses the shared enabled status treatment", () => {
   assert.match(source, /<ConfigStatusDot active=\{profile\.enabled\}/);
   assert.match(source, /className=\{`is-grow\$\{profile\.enabled \? "" : " is-muted"\}`\}/);
@@ -59,7 +74,7 @@ test("treats roster, global and project profiles as directly editable", () => {
 
 test("offers a roster creation scope only when a shared catalog is configured", () => {
   assert.match(source, /\{creating && \(/);
-  assert.match(source, /\[\.\.\.\(rosterAvailable \? \["roster" as const\] : \[\]\), "project", "global"\] as const/);
+  assert.match(source, /\[\.\.\.\(rosterAvailable \? \["roster" as const\] : \[\]\), \.\.\.\(projectSelected \? \["project" as const\] : \[\]\), "global"\] as const/);
   assert.doesNotMatch(source, /beginOverride|mode === "override"|agents\.readOnly|agents\.override/);
 });
 
@@ -84,7 +99,7 @@ test("shows a Skills-style path row with the same switch in editable and readonl
 
 test("keeps the enabled switch live for built-ins whose fields stay read-only", () => {
   assert.match(source, /function isTogglableScope\(scope: SubagentScope\): boolean \{\s*return isWritableScope\(scope\) \|\| scope === "builtin";/);
-  assert.match(source, /const switchDisabled = creating\s*\? disabled\s*: !selected \|\| Boolean\(selected\.configurationError\) \|\| !isTogglableScope\(selected\.scope\) \|\| saving \|\| toggling;/);
+  assert.match(source, /const switchDisabled = creating\s*\? disabled\s*: !selected \|\| Boolean\(selected\.configurationError\) \|\| !isTogglableScope\(selected\.scope\)[\s\S]*?\|\| saving \|\| toggling;/);
   assert.match(source, /if \(!selected \|\| selected\.configurationError \|\| !isTogglableScope\(selected\.scope\)\) return;/);
   // Everything else on a built-in stays read-only: only the switch has somewhere to write.
   assert.match(source, /setMode\(isWritableScope\(profile\.scope\) \? "edit" : "view"\)/);
@@ -158,7 +173,8 @@ test("duplicates any selected profile through the existing create flow", () => {
   assert.match(source, /const beginDuplicate = \(\) =>/);
   assert.match(source, /\.\.\.editableProfile\(selected\),[\s\S]*?name,[\s\S]*?displayName: t\("agents\.copyName"/);
   assert.match(source, /setMode\("create"\)/);
-  assert.match(source, /setTargetScope\(isWritableScope\(selected\.scope\) \? selected\.scope : rosterAvailable \? "roster" : "project"\)/);
+  assert.match(source, /setTargetScope\(isWritableScope\(selected\.scope\) && \(selected\.scope !== "project" \|\| projectSelected\)/);
+  assert.match(source, /\? selected\.scope : rosterAvailable \? "roster" : projectSelected \? "project" : "global"\)/);
   assert.match(source, /onClick=\{beginDuplicate\}[^>]*>[\s\S]*?t\("agents\.duplicate"\)/);
 });
 

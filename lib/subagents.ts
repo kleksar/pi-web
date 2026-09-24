@@ -1,10 +1,11 @@
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { dump as stringifyYaml } from "js-yaml";
-import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSync, unlinkSync } from "fs";
+import { existsSync, lstatSync, mkdirSync, readdirSync, realpathSync, statSync, unlinkSync } from "fs";
 import { basename, dirname, isAbsolute, join, resolve } from "path";
 import { parseFrontmatter } from "./frontmatter";
 import { writePrivateFileAtomicSync } from "./atomic-file";
+import { readBoundedRegularFile } from "./bounded-file";
 import { isExistingPathWithinRoots, isPathWithinRoots } from "./path-security";
 import { disabledBuiltInSubagents } from "./subagent-settings";
 import { pendingContextRequest } from "./subagent-context-handoff";
@@ -27,6 +28,11 @@ export const SUBAGENT_RESULT_TYPE = "pi-web:subagent-result";
 export const SUBAGENT_CONTROL_TOOL_NAMES = ["Agent", "get_subagent_result", "steer_subagent"] as const;
 /** An admitted child receives one immutable result artifact per direct prerequisite. */
 export const MAX_SUBAGENT_DEPENDENCIES = 8;
+const MAX_SUBAGENT_PROFILE_BYTES = 512 * 1024;
+
+function readProfileText(path: string): string {
+  return readBoundedRegularFile(path, MAX_SUBAGENT_PROFILE_BYTES, "Agent profile").toString("utf8");
+}
 
 export type SubagentStatus = SubagentSessionStatus;
 export type SubagentScope = "builtin" | "roster" | "global" | "workspace" | "project";
@@ -121,6 +127,8 @@ interface SubagentResourceSnapshotFields {
   loadExtensions: boolean;
   /** Older session snapshots omit this setting and remain on the default tier. */
   fastMode?: boolean;
+  /** Effective limit for each invocation. Legacy snapshots without it retain their old unlimited resume behavior. */
+  maxTurns?: number;
   exactSystemPrompt?: string;
 }
 
@@ -137,6 +145,7 @@ export interface SubagentSessionResources {
   loadSkills: boolean;
   loadExtensions: boolean;
   fastMode: boolean;
+  maxTurns?: number;
   exactSystemPrompt?: string;
   orchestration?: SubagentSessionOrchestration;
   selectedSkills?: PinnedSkill[];
@@ -447,7 +456,7 @@ function parseSelectedExtensionTools(value: unknown): Array<{ extensionPath: str
 function readStoredFrontmatter(filePath: string): Record<string, unknown> {
   let source: string;
   try {
-    source = readFileSync(filePath, "utf8");
+    source = readProfileText(filePath);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return {};
     throw error;
@@ -496,7 +505,7 @@ function syncFlagAlias(
   if (owned) frontmatter[alias] = flag;
 }
 function parseProfileFile(filePath: string, scope: SubagentScope): SubagentProfile {
-  const source = readFileSync(filePath, "utf8");
+  const source = readProfileText(filePath);
   const { data, rest } = parseFrontmatter(source);
   // A malformed fence may contain a `name` that differs from the filename;
   // a tombstone under the filename cannot safely shadow that effective name.
@@ -506,7 +515,12 @@ function parseProfileFile(filePath: string, scope: SubagentScope): SubagentProfi
   const name = stringValue(data?.name) ?? basename(filePath, ".md");
   if (!PROFILE_NAME_RE.test(name)) throw new Error(`Invalid agent profile name in ${filePath}: ${name}`);
   const thinkingValue = stringValue(data?.thinking) as ThinkingLevel | undefined;
-  const maxTurnsValue = typeof data?.max_turns === "number" ? Math.floor(data.max_turns) : undefined;
+  const rawMaxTurns = data?.max_turns;
+  const invalidMaxTurns = rawMaxTurns !== undefined && (typeof rawMaxTurns !== "number"
+    || !Number.isFinite(rawMaxTurns) || rawMaxTurns < 0
+    || (rawMaxTurns > 0 && rawMaxTurns < 1)
+    || !Number.isSafeInteger(Math.floor(rawMaxTurns)));
+  const maxTurnsValue = !invalidMaxTurns && typeof rawMaxTurns === "number" ? Math.floor(rawMaxTurns) : undefined;
   const tools = parseTools(data?.tools, DEFAULT_TOOLS);
   const disallowedTools = new Set(parseTools(data?.disallowed_tools, []));
   const disallowedExtensionTools = new Set(parseExtensionToolSelectors(data?.disallowed_tools).map((tool) => tool.toLowerCase()));
@@ -557,7 +571,7 @@ function parseProfileFile(filePath: string, scope: SubagentScope): SubagentProfi
     scope,
     filePath,
   };
-  if (!invalidSelection && (!data || !hasOrchestrationMarker(data) || orchestration)) return profile;
+  if (!invalidSelection && !invalidMaxTurns && (!data || !hasOrchestrationMarker(data) || orchestration)) return profile;
   return {
     ...profile,
     enabled: false,
@@ -565,7 +579,9 @@ function parseProfileFile(filePath: string, scope: SubagentScope): SubagentProfi
     extensionTools: undefined,
     loadSkills: false,
     loadExtensions: false,
-    configurationError: invalidSelection
+    configurationError: invalidMaxTurns
+      ? "Invalid max_turns; this profile cannot run"
+      : invalidSelection
       ? "Invalid Pi Web selected resources; this profile cannot run"
       : "Invalid Pi Web orchestration configuration; this profile cannot run",
   };
@@ -732,8 +748,10 @@ export function saveSubagentProfile(
   if (profile.fastMode !== undefined && typeof profile.fastMode !== "boolean") {
     throw new Error("Fast mode must be a boolean");
   }
-  if (profile.maxTurns !== undefined && (!Number.isFinite(profile.maxTurns) || profile.maxTurns < 0)) {
-    throw new Error("Max turns must be a non-negative number");
+  if (profile.maxTurns !== undefined && (!Number.isFinite(profile.maxTurns) || profile.maxTurns < 0
+    || (profile.maxTurns > 0 && profile.maxTurns < 1)
+    || !Number.isSafeInteger(Math.floor(profile.maxTurns)))) {
+    throw new Error("Max turns must be zero (unlimited) or at least one safe turn");
   }
   const maxTurns = profile.maxTurns && profile.maxTurns > 0
     ? Math.floor(profile.maxTurns)
@@ -953,6 +971,8 @@ export function readSubagentSessionResources(
     || !Array.isArray(snapshot.tools)
     || (snapshot.exactSystemPrompt !== undefined && typeof snapshot.exactSystemPrompt !== "string")
     || (snapshot.fastMode !== undefined && typeof snapshot.fastMode !== "boolean")
+    || (snapshot.maxTurns !== undefined && (typeof snapshot.maxTurns !== "number"
+      || !Number.isSafeInteger(snapshot.maxTurns) || snapshot.maxTurns < 1))
     || ((snapshot.version === 2 || snapshot.version === 3) &&
       (typeof snapshot.loadSkills !== "boolean" || typeof snapshot.loadExtensions !== "boolean"))
   ) {
@@ -1023,6 +1043,7 @@ export function readSubagentSessionResources(
     loadSkills,
     loadExtensions,
     fastMode: snapshot.fastMode === true,
+    ...(typeof snapshot.maxTurns === "number" ? { maxTurns: snapshot.maxTurns } : {}),
     ...(selectedSkills !== undefined ? { selectedSkills } : {}),
     ...(selectedExtensionTools !== undefined ? { selectedExtensionTools } : {}),
     ...(typeof snapshot.exactSystemPrompt === "string" ? { exactSystemPrompt: snapshot.exactSystemPrompt } : {}),

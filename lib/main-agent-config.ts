@@ -1,9 +1,10 @@
-import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, realpathSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { dirname, join } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import lockfile from "proper-lockfile";
 import { writePrivateFileAtomicSync } from "./atomic-file";
+import { readBoundedRegularFile } from "./bounded-file";
 import type { SelectedExtensionTool } from "./agent-resource-selection";
 import { resolveSelectedSkillReferences } from "./agent-resource-selection";
 import { MAX_SUBAGENT_DEPENDENCIES, type SubagentOrchestration } from "./subagents";
@@ -18,6 +19,11 @@ export interface MainAgentConfig {
 }
 
 const PROFILE_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+const MAX_MAIN_CONFIG_BYTES = 1024 * 1024;
+
+function readMainConfigBytes(path: string): Buffer {
+  return readBoundedRegularFile(path, MAX_MAIN_CONFIG_BYTES, "Main configuration");
+}
 
 function record(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -277,13 +283,13 @@ export async function saveProjectMainAgentConfig(
 
 export function getMainAgentConfigRevision(configPath = getMainAgentConfigPath()): string {
   return existsSync(configPath)
-    ? createHash("sha256").update(readFileSync(configPath)).digest("hex")
+    ? createHash("sha256").update(readMainConfigBytes(configPath)).digest("hex")
     : "absent";
 }
 
 export function readMainAgentConfig(configPath = getMainAgentConfigPath()): MainAgentConfig {
   if (!existsSync(configPath)) return {};
-  return validateMainAgentConfig(JSON.parse(readFileSync(configPath, "utf8")) as unknown);
+  return validateMainAgentConfig(JSON.parse(readMainConfigBytes(configPath).toString("utf8")) as unknown);
 }
 
 export function writeMainAgentConfig(
