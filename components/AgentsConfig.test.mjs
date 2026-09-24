@@ -49,6 +49,22 @@ test("uses the shared enabled status treatment", () => {
   assert.match(cssSource, /\.config-sidebar-text\.is-muted \{[\s\S]*?color: var\(--text-dim\)/);
 });
 
+const sidebarRow = source.slice(source.indexOf('<ConfigSidebarItem\n                          key={profileKey(profile)}'), source.indexOf('</ConfigSidebarItem>', source.indexOf('<ConfigSidebarItem\n                          key={profileKey(profile)}')));
+
+test("shows configured model and thinking on independent compact lines beneath the sidebar name", () => {
+  assert.match(sidebarRow, /\{profile\.displayName\}<\/ConfigSidebarText>[\s\S]*?<span className=\{`agents-profile-metadata[^>]*>\s*\{t\("agents\.model"\)\}: \{profile\.model \|\| "Inherited"\}\s*<\/span>\s*<span className=\{`agents-profile-metadata[^>]*>\s*\{t\("agents\.thinking"\)\}: \{profile\.thinking \|\| "Inherited"\}\s*<\/span>/);
+  assert.match(cssSource, /\.agents-profile-summary \{[\s\S]*?min-width: 0;/);
+  assert.match(cssSource, /\.agents-profile-metadata \{[\s\S]*?display: block;[\s\S]*?overflow: hidden;[\s\S]*?text-overflow: ellipsis;[\s\S]*?white-space: nowrap;/);
+});
+
+test("labels each unset sidebar field Inherited without resolving session values", () => {
+  assert.match(sidebarRow, /profile\.model \|\| "Inherited"/);
+  assert.match(sidebarRow, /profile\.thinking \|\| "Inherited"/);
+  assert.doesNotMatch(sidebarRow, /t\("agents\.inherit"\)|Parent default/);
+  assert.equal((sidebarRow.match(/className=\{`agents-profile-metadata\$\{profile\.enabled \? "" : " is-muted"\}`\}/g) ?? []).length, 2);
+  assert.match(cssSource, /\.agents-profile-metadata\.is-muted \{[\s\S]*?opacity: 0\.7;/);
+});
+
 test("offers a persisted built-in sub-agent switch with explicit session reload", () => {
   assert.match(source, /fetch\("\/api\/subagents\/settings"/);
   assert.match(source, /JSON\.stringify\(\{ enabled, scope: settingsEditScope \}\)/);
